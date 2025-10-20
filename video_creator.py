@@ -1,6 +1,6 @@
-﻿import tkinter as tk
-from tkinter import messagebox, ttk, filedialog
-from moviepy import ImageClip, TextClip, CompositeVideoClip, VideoFileClip, concatenate_videoclips
+﻿import math
+import tkinter as tk
+from tkinter import messagebox, ttk
 import os
 import json
 import threading
@@ -9,25 +9,21 @@ from tkcalendar import DateEntry
 from datetime import date
 from proglog import ProgressBarLogger
 from tkinterdnd2 import DND_FILES, TkinterDnD
-import tempfile
-import subprocess
 
 from ffmpeg_installer import ensure_ffmpeg_installed
 
 # --- KONSTANTEN ---
 CONFIG_FILE = "config.json"
 
-# --- NEU: Threading-Event für den Abbruch ---
+# --- Threading-Event für den Abbruch ---
 cancel_event = threading.Event()
 
 
-# --- NEU: Eigene Exception für den Abbruch ---
 class CancellationError(Exception):
     """Eigene Exception, um einen sauberen Abbruch zu signalisieren."""
     pass
 
 
-# --- NEU: Eigener Logger, der auf Abbruch prüfen kann ---
 class CancellableProgressBarLogger(ProgressBarLogger):
     """
     Dieser Logger prüft bei jedem Fortschritts-Update, ob das
@@ -51,9 +47,9 @@ class CancellableProgressBarLogger(ProgressBarLogger):
 def save_settings():
     """Speichert die aktuellen Einstellungen in einer JSON-Datei."""
     settings = {
-        "gast": entry_gast.get(),
         "speicherort": speicherort_var.get(),
         "ort": ort_var.get(),
+        "dauer": int(dauer_var.get()),
         "outside_video": outside_video_var.get(),
         "tandemmaster": entry_tandemmaster.get() if not outside_video_var.get() else "",
         "videospringer": entry_videospringer.get() if outside_video_var.get() else ""
@@ -74,8 +70,7 @@ def load_settings():
                 speicherort_var.set(settings.get("speicherort", ""))
                 ort_var.set(settings.get("ort", "Calden"))
                 outside_video_var.set(settings.get("outside_video", False))
-                entry_gast.delete(0, tk.END)
-                entry_gast.insert(0, settings.get("gast", ""))
+                dauer_var.set(str(settings.get("dauer", 8)))
                 entry_tandemmaster.delete(0, tk.END)
                 entry_tandemmaster.insert(0, settings.get("tandemmaster", ""))
                 entry_videospringer.delete(0, tk.END)
@@ -102,7 +97,7 @@ def waehle_speicherort():
         speicherort_var.set(directory)
 
 
-# --- NEU: FUNKTIONEN FÜR DRAG AND DROP ---
+# --- FUNKTIONEN FÜR DRAG AND DROP ---
 def handle_drop(event):
     """Verarbeitet die hier abgelegte Datei."""
     # event.data kann von geschweiften Klammern umschlossen sein, diese entfernen wir
@@ -115,6 +110,15 @@ def handle_drop(event):
         dropped_video_path_var.set("")
         drop_label.config(text="Ungültig! Bitte nur eine einzelne .mp4 Datei ablegen.", fg="red")
         messagebox.showerror("Ungültiger Dateityp", "Bitte ziehen Sie nur .mp4-Dateien in das Feld.")
+
+
+# --- NEU: FORTSCHRITTS-UPDATE-FUNKTION ---
+def update_progress(step, total_steps=7):
+    """Aktualisiert die Fortschrittsanzeige in der GUI."""
+    progress = (step / total_steps) * 100
+    progress_bar['value'] = progress
+    eta_label.config(text=f"Fortschritt: {math.floor(progress)}%")
+    root.update_idletasks()
 
 
 # --- FUNKTIONEN ZUR VIDEOERSTELLUNG UND STEUERUNG ---
@@ -150,7 +154,7 @@ def erstelle_video():
 
     progress_bar['mode'] = 'determinate'
     progress_bar['value'] = 0
-    eta_label.config(text="Geschätzte Restlaufzeit: wird berechnet...")
+    eta_label.config(text="Fortschritt: 0%")
     progress_bar.pack(pady=5)
     eta_label.pack(pady=2)
 
@@ -206,11 +210,15 @@ def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, 
     delayed_audio = os.path.join(tempfile.gettempdir(), "delayed_audio.aac")
 
     try:
+        # Schritt 1: Videoinformationen lesen
+        root.after(0, update_progress, 1)
         user_clip = VideoFileClip(dropped_video_path)
         clip_width, clip_height = user_clip.size
         clip_fps = user_clip.fps or 30
         user_clip.close()
 
+        # Schritt 2: Textinhalte vorbereiten
+        root.after(0, update_progress, 2)
         text_inhalte = [f"Gast: {gast}", f"Tandemmaster: {tandemmaster}"]
         if outside_video_var.get():
             text_inhalte.append(f"Videospringer: {videospringer}")
@@ -232,7 +240,8 @@ def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, 
         if not os.path.exists("hintergrund.png"):
             raise FileNotFoundError("hintergrund.png fehlt")
 
-        # Titelclip ohne Audio erzeugen
+        # Schritt 3: Titelclip ohne Audio erzeugen
+        root.after(0, update_progress, 3)
         subprocess.run([
             "ffmpeg", "-y",
             "-loop", "1",
@@ -246,7 +255,8 @@ def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, 
             temp_titel_clip_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-        # Original-Audio extrahieren
+        # Schritt 4: Original-Audio extrahieren
+        root.after(0, update_progress, 4)
         subprocess.run([
             "ffmpeg", "-y",
             "-i", dropped_video_path,
@@ -255,7 +265,8 @@ def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, 
             extracted_audio
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-        # Audio um Intro verschieben
+        # Schritt 5: Audio um Intro verschieben
+        root.after(0, update_progress, 5)
         intro_ms = int(dauer * 1000)
         subprocess.run([
             "ffmpeg", "-y",
@@ -277,7 +288,8 @@ def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, 
             f.write(f"file '{os.path.abspath(temp_titel_clip_path)}'\n")
             f.write(f"file '{os.path.abspath(dropped_video_path)}'\n")
 
-        # Video ohne Rekodierung zusammenfügen
+        # Schritt 6: Video ohne Rekodierung zusammenfügen
+        root.after(0, update_progress, 6)
         subprocess.run([
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
@@ -286,7 +298,8 @@ def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, 
             temp_video_noaudio
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-        # Delayed-Audio hinzufügen
+        # Schritt 7: Delayed-Audio hinzufügen
+        root.after(0, update_progress, 7)
         subprocess.run([
             "ffmpeg", "-y",
             "-i", temp_video_noaudio,
@@ -295,6 +308,10 @@ def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, 
             "-c:a", "copy",
             full_output_path
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+        # Fertig - 100%
+        root.after(0, lambda: progress_bar['value'] == 100)
+        root.after(0, lambda: eta_label.config(text="Fortschritt: 100%"))
 
         messagebox.showinfo("Fertig", f"Das Video wurde unter '{full_output_path}' gespeichert.")
 
@@ -361,7 +378,7 @@ entry_datum = DateEntry(form_frame, width=38, font=("Arial", 12), date_pattern='
 entry_datum.grid(row=5, column=1, padx=5, pady=5)
 
 tk.Label(form_frame, text="Dauer (Sekunden):", font=("Arial", 12)).grid(row=6, column=0, padx=5, pady=5, sticky="w")
-dauer_var = tk.StringVar(value="1")
+dauer_var = tk.StringVar(value="8")
 dropdown_dauer = tk.OptionMenu(form_frame, dauer_var, "1", "3", "4", "5", "6", "7", "8", "9", "10")
 dropdown_dauer.grid(row=6, column=1, padx=5, pady=5, sticky="ew")
 

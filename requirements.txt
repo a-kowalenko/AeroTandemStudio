@@ -1,0 +1,7 @@
+﻿tkinter
+proglog
+moviepy
+tkcalendar
+tkinterdnd2
+urllib3
+Pillow

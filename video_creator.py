@@ -199,6 +199,22 @@ def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, 
     def ffmpeg_escape(text: str) -> str:
         return text.replace(":", r"\:").replace("'", r"\''").replace(",", r"\,")
 
+    def run_ffmpeg(cmd, description=""):
+        """Führt FFmpeg aus und gibt Fortschritt über Logger aus. Prüft auf Abbruch."""
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        try:
+            for line in process.stdout:
+                print(f"[FFmpeg {description}] {line.strip()}")
+                if cancel_event.is_set():
+                    process.kill()
+                    raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
+            process.wait()
+            if process.returncode != 0:
+                raise Exception(f"FFmpeg ({description}) beendet mit Fehlercode {process.returncode}")
+        except Exception:
+            process.kill()
+            raise
+
     full_output_path = ""
     concat_list_path = os.path.join(tempfile.gettempdir(), "concat_list.txt")
     temp_video_noaudio = os.path.join(tempfile.gettempdir(), "temp_video_noaudio.mp4")
@@ -233,7 +249,7 @@ def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, 
             raise FileNotFoundError("hintergrund.png fehlt")
 
         # Titelclip ohne Audio erzeugen
-        subprocess.run([
+        run_ffmpeg([
             "ffmpeg", "-y",
             "-loop", "1",
             "-i", "hintergrund.png",
@@ -244,25 +260,25 @@ def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, 
             "-pix_fmt", "yuv420p",
             "-preset", "ultrafast",
             temp_titel_clip_path
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        ], description="Titelclip")
 
         # Original-Audio extrahieren
-        subprocess.run([
+        run_ffmpeg([
             "ffmpeg", "-y",
             "-i", dropped_video_path,
             "-vn",
             "-acodec", "copy",
             extracted_audio
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        ], description="Audio extrahieren")
 
         # Audio um Intro verschieben
         intro_ms = int(dauer * 1000)
-        subprocess.run([
+        run_ffmpeg([
             "ffmpeg", "-y",
             "-i", extracted_audio,
             "-af", f"adelay={intro_ms}|{intro_ms}",
             delayed_audio
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        ], description="Audio verschieben")
 
         datum_obj = date.fromisoformat('-'.join(datum.split('.')[::-1]))
         datum_formatiert = datum_obj.strftime("%Y%m%d")
@@ -278,23 +294,23 @@ def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, 
             f.write(f"file '{os.path.abspath(dropped_video_path)}'\n")
 
         # Video ohne Rekodierung zusammenfügen
-        subprocess.run([
+        run_ffmpeg([
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
             "-i", concat_list_path,
             "-c", "copy",
             temp_video_noaudio
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        ], description="Video zusammenfügen")
 
         # Delayed-Audio hinzufügen
-        subprocess.run([
+        run_ffmpeg([
             "ffmpeg", "-y",
             "-i", temp_video_noaudio,
             "-i", delayed_audio,
             "-c:v", "copy",
             "-c:a", "copy",
             full_output_path
-        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        ], description="Audio hinzufügen")
 
         messagebox.showinfo("Fertig", f"Das Video wurde unter '{full_output_path}' gespeichert.")
 

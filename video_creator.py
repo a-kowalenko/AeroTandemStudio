@@ -3,7 +3,6 @@ from tkinter import messagebox, ttk, filedialog
 from moviepy import ImageClip, TextClip, CompositeVideoClip, VideoFileClip, concatenate_videoclips
 import os
 import json
-import time
 import threading
 from tkinter import filedialog
 from tkcalendar import DateEntry
@@ -12,6 +11,8 @@ from proglog import ProgressBarLogger
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import tempfile
 import subprocess
+
+from ffmpeg_installer import ensure_ffmpeg_installed
 
 # --- KONSTANTEN ---
 CONFIG_FILE = "config.json"
@@ -173,13 +174,14 @@ def abbrechen_prozess():
 
 
 def reset_gui_state():
+    print('call reset_gui_state')
     """Setzt die GUI nach Abschluss oder Abbruch zurück in den Ursprungszustand."""
     progress_bar.pack_forget()
     eta_label.pack_forget()
     # --- ANPASSUNG: Button wieder zu "Erstellen" zurücksetzen ---
     erstellen_button.config(text="Video Erstellen", command=erstelle_video, bg="#4CAF50", state="normal")
     dropped_video_path_var.set("")
-    drop_label.config(text="Optionale .mp4 Datei hierher ziehen", fg="black")
+    drop_label.config(text="Geschnittene .mp4 Datei hierher ziehen", fg="black")
 
 def sanitize_filename(filename):
     """Entfernt ungültige Zeichen aus einem potenziellen Dateinamen."""
@@ -189,91 +191,79 @@ def sanitize_filename(filename):
     return filename.strip()
 
 def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, ort, speicherort, dropped_video_path):
-    """
-    Erstellt das Video. Nutzt einen schnellen FFmpeg-Pfad für kompatible Videos
-    oder den langsameren MoviePy-Pfad zur Konvertierung.
-    """
+    import os, subprocess, tempfile
+    from datetime import date
+    from moviepy import VideoFileClip
+    from tkinter import messagebox
 
-    # Eingaben für Dateinamen bereinigen
-    gast = sanitize_filename(gast)
-    tandemmaster = sanitize_filename(tandemmaster)
-    videospringer = sanitize_filename(videospringer)
-
+    def ffmpeg_escape(text: str) -> str:
+        return text.replace(":", r"\:").replace("'", r"\''").replace(",", r"\,")
 
     full_output_path = ""
-    temp_video_to_delete = None
-    temp_titel_clip_path = None
-    concat_list_path = "concat_list.txt"
-
-    # Clips initialisieren, damit sie im finally-Block sicher geschlossen werden können
-    user_clip_original, titel_video, final_clip_to_write, user_clip = None, None, None, None
-
+    concat_list_path = os.path.join(tempfile.gettempdir(), "concat_list.txt")
+    temp_video_noaudio = os.path.join(tempfile.gettempdir(), "temp_video_noaudio.mp4")
+    extracted_audio = os.path.join(tempfile.gettempdir(), "original_audio.aac")
+    delayed_audio = os.path.join(tempfile.gettempdir(), "delayed_audio.aac")
 
     try:
-        # --- SCHRITT 1: User-Video analysieren ---
-        root.after(0, lambda: status_label.config(text="Status: Analysiere User-Video..."))
-        user_clip_original = VideoFileClip(dropped_video_path)
-
-        # MODIFIZIERT: Auflösung und FPS dynamisch aus dem Clip lesen
-        clip_size = user_clip_original.size
-        clip_fps = user_clip_original.fps
-        clip_width, clip_height = clip_size
-
-        if not clip_fps:
-            raise ValueError("Konnte die FPS des Videos nicht ermitteln. Die Datei ist möglicherweise beschädigt.")
-
-        # --- SCHRITT 2: Intro-Video dynamisch passend zum User-Video erstellen ---
-        root.after(0, lambda: status_label.config(text="Status: Erstelle passendes Intro..."))
-
-        # MODIFIZIERT: Schriftgröße wird an die Video-Höhe angepasst für saubere Skalierung
-        dynamic_font_size = int(clip_height / 18)  # z.B. 60 bei 1080p, 40 bei 720p
-
-        hintergrund_clip = ImageClip("hintergrund.png", duration=dauer)
+        user_clip = VideoFileClip(dropped_video_path)
+        clip_width, clip_height = user_clip.size
+        clip_fps = user_clip.fps or 30
+        user_clip.close()
 
         text_inhalte = [f"Gast: {gast}", f"Tandemmaster: {tandemmaster}"]
         if outside_video_var.get():
             text_inhalte.append(f"Videospringer: {videospringer}")
         text_inhalte.extend([f"Datum: {datum}", f"Ort: {ort}"])
+        text_inhalte = [ffmpeg_escape(t) for t in text_inhalte]
 
-        clips_liste = [hintergrund_clip]
-        start_y_pos = clip_height * 0.15
-        y_increment = clip_height * 0.15
+        font_size = int(clip_height / 18)
+        y = clip_height * 0.15
+        y_step = clip_height * 0.15
+        drawtext_cmds = []
+        for t in text_inhalte:
+            drawtext_cmds.append(
+                f"drawtext=text='{t}':x=(w-text_w)/2:y={int(y)}:fontsize={font_size}:fontcolor=black:font='Arial'"
+            )
+            y += y_step
+        drawtext_filter = ",".join(drawtext_cmds)
 
-        for i, text_zeile in enumerate(text_inhalte):
-            y_pos = start_y_pos + (i * y_increment)
-            txt_clip = TextClip(
-                text=text_zeile,
-                font_size=50,
-                color='black',
-                method='label',
-                duration=dauer,
-                margin=(100, 20))
-            txt_clip = txt_clip.with_position(('center', y_pos))
-            clips_liste.append(txt_clip)
+        temp_titel_clip_path = os.path.join(tempfile.gettempdir(), "titel_intro.mp4")
+        if not os.path.exists("hintergrund.png"):
+            raise FileNotFoundError("hintergrund.png fehlt")
 
-        # MODIFIZIERT: CompositeVideoClip wird mit der dynamischen Größe des User-Videos erstellt
-        titel_video = CompositeVideoClip(clips_liste, size=clip_size, use_bgclip=True)
-        titel_video.duration = dauer
-        titel_video.fps = clip_fps
+        # Titelclip ohne Audio erzeugen
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-loop", "1",
+            "-i", "hintergrund.png",
+            "-vf", drawtext_filter,
+            "-t", str(dauer),
+            "-r", str(clip_fps),
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-preset", "ultrafast",
+            temp_titel_clip_path
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-        # --- SCHRITT 3: Temporären Titel-Clip rendern ---
-        # Dieser kurze Schreibvorgang ist der einzige Kodierungsschritt und daher sehr schnell.
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_f:
-            temp_titel_clip_path = temp_f.name
+        # Original-Audio extrahieren
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", dropped_video_path,
+            "-vn",
+            "-acodec", "copy",
+            extracted_audio
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-        titel_video.write_videofile(
-            temp_titel_clip_path,
-            codec='libx264',
-            preset='ultrafast',
-            threads=os.cpu_count(),
-            logger=CancellableProgressBarLogger(),
-            fps=clip_fps  # MODIFIZIERT: Nutzt die FPS des User-Videos
-        )
+        # Audio um Intro verschieben
+        intro_ms = int(dauer * 1000)
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", extracted_audio,
+            "-af", f"adelay={intro_ms}|{intro_ms}",
+            delayed_audio
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-        # --- SCHRITT 4: Finale Datei mit FFmpeg blitzschnell zusammensetzen ---
-        root.after(0, lambda: status_label.config(text="Status: Führe schnelles Zusammenfügen durch..."))
-
-        # Dateinamen vorbereiten
         datum_obj = date.fromisoformat('-'.join(datum.split('.')[::-1]))
         datum_formatiert = datum_obj.strftime("%Y%m%d")
         output_filename = f"{datum_formatiert}_L{load}_{gast}_TA_{tandemmaster}"
@@ -282,54 +272,50 @@ def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, 
         output_filename += ".mp4"
         full_output_path = os.path.join(speicherort, output_filename)
 
-        # Textdatei für FFmpeg erstellen
+        # Concat-Textdatei für Videos ohne Audio
         with open(concat_list_path, "w", encoding="utf-8") as f:
             f.write(f"file '{os.path.abspath(temp_titel_clip_path)}'\n")
             f.write(f"file '{os.path.abspath(dropped_video_path)}'\n")
 
-        if cancel_event.is_set(): raise CancellationError()
+        # Video ohne Rekodierung zusammenfügen
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", concat_list_path,
+            "-c", "copy",
+            temp_video_noaudio
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-        # FFmpeg-Befehl ausführen
-        command = ["ffmpeg", "-f", "concat", "-safe", "0", "-i", concat_list_path, "-c", "copy", full_output_path]
-        subprocess.run(command, check=True, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.PIPE)  # stderr=PIPE fängt Fehler ab
+        # Delayed-Audio hinzufügen
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", temp_video_noaudio,
+            "-i", delayed_audio,
+            "-c:v", "copy",
+            "-c:a", "copy",
+            full_output_path
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-        # Erfolgsmeldung
-        if not cancel_event.is_set():
-            root.after(0,
-                       lambda: status_label.config(text=f"Status: Video '{output_filename}' erfolgreich erstellt!"))
-            messagebox.showinfo("Fertig", f"Das Video wurde erfolgreich unter '{full_output_path}' gespeichert.")
+        messagebox.showinfo("Fertig", f"Das Video wurde unter '{full_output_path}' gespeichert.")
 
-    except FileNotFoundError as e:
-        print(e)
-        messagebox.showerror("Fehler", "Die Datei 'hintergrund.png' wurde nicht gefunden.")
-        status_label.config(text="Status: Fehler. Hintergrundbild nicht gefunden.")
-
-    # --- NEU: Abfangen der Abbruch-Exception ---
     except CancellationError:
-        status_label.config(text="Status: Videoerstellung vom Benutzer abgebrochen.")
-        # Versuch, die unfertige Datei zu löschen
+        status_label.config(text="Status: Erstellung abgebrochen.")
         if full_output_path and os.path.exists(full_output_path):
-            try:
-                os.remove(full_output_path)
-                print(f"Unfertige Datei '{full_output_path}' gelöscht.")
-            except OSError as e:
-                print(f"Fehler beim Löschen der unfertigen Datei: {e}")
-
+            os.remove(full_output_path)
     except Exception as e:
-        messagebox.showerror("Fehler", f"Ein unerwarteter Fehler ist aufgetreten:\n{e}")
-        status_label.config(text="Status: Ein Fehler ist aufgetreten.")
+        messagebox.showerror("Fehler", f"Fehler bei der Videoerstellung:\n{e}")
+        status_label.config(text="Status: Fehler aufgetreten.")
     finally:
-        # WICHTIG: Alle Clips schließen, um Dateihandles freizugeben
-        if 'titel_video' in locals(): titel_video.close()
-        if 'user_clip' in locals() and user_clip: user_clip.close()
-        if 'final_clip_to_write' in locals(): final_clip_to_write.close()
-        if temp_video_to_delete and os.path.exists(temp_video_to_delete):
-            try:
-                os.remove(temp_video_to_delete)
-            except Exception as e:
-                print(f"Konnte temporäre Datei nicht löschen: {e}")
         root.after(0, reset_gui_state)
+        for f in [temp_titel_clip_path, temp_video_noaudio, extracted_audio, delayed_audio]:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except:
+                pass
+
+
+
 
 
 # --- GUI ERSTELLUNG (TKINTER) ---
@@ -412,6 +398,129 @@ eta_label = tk.Label(root, text="", font=("Arial", 10))
 
 status_label = tk.Label(root, text="Status: Bereit.", font=("Arial", 10), bd=1, relief=tk.SUNKEN, anchor=tk.W)
 status_label.pack(side=tk.BOTTOM, fill=tk.X)
+
+
+ffmpeg_path = None
+
+class CircularSpinner:
+    """Simple rotating arc spinner on a Canvas."""
+    def __init__(self, parent, size=80, line_width=8, color="#333", speed=8):
+        self.parent = parent
+        self.size = size
+        self.line_width = line_width
+        self.color = color
+        self.speed = speed  # degrees per frame
+        self.angle = 0
+        self._job = None
+
+        self.canvas = tk.Canvas(parent, width=size, height=size, highlightthickness=0, bg='white')
+        pad = line_width // 2
+        self.arc = self.canvas.create_arc(
+            pad, pad, size - pad, size - pad,
+            start=self.angle, extent=300, style='arc', width=line_width, outline=self.color
+        )
+
+    def pack(self, **kwargs):
+        self.canvas.pack(**kwargs)
+
+    def start(self, delay=50):
+        if self._job:
+            return
+        self._animate(delay)
+
+    def _animate(self, delay):
+        self.angle = (self.angle + self.speed) % 360
+        try:
+            self.canvas.itemconfigure(self.arc, start=self.angle)
+        except Exception:
+            return
+        self._job = self.parent.after(delay, lambda: self._animate(delay))
+
+    def stop(self):
+        if self._job:
+            try:
+                self.parent.after_cancel(self._job)
+            except Exception:
+                pass
+            self._job = None
+
+def _create_install_overlay():
+    """
+    Create and return an in-window modal overlay (Frame), a circular spinner instance and a status StringVar.
+    The overlay covers the entire root window and prevents interaction with underlying widgets.
+    """
+    overlay = tk.Frame(root, bg="#000000")
+    # place to cover whole window
+    overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+    overlay.lift()
+
+    # Intercept mouse and keyboard events so underlying widgets can't be used
+    def _block_event(e):
+        return "break"
+    # common events to block
+    for seq in ("<Button-1>", "<Button-2>", "<Button-3>", "<ButtonRelease>", "<Key>", "<MouseWheel>", "<Button>"):
+        overlay.bind_all(seq, _block_event)
+
+    # semi-opaque effect by a slightly transparent-like color is not natively supported for Frames;
+    # use a darker color but keep the spinner container white for contrast
+    overlay.configure(bg="#000000")  # dark background
+    overlay.attributes = getattr(overlay, "attributes", None)  # no-op for safety
+
+    container = tk.Frame(overlay, bg='white', bd=2, relief=tk.RIDGE)
+    container_width = min(420, int(root.winfo_width() * 0.7 or 300))
+    container.place(relx=0.5, rely=0.5, anchor='center', width=container_width)
+
+    # Spinner (circular)
+    spinner = CircularSpinner(container, size=80, line_width=8, color="#2E86C1", speed=10)
+    spinner.pack(padx=20, pady=(20, 6))
+
+    status_var = tk.StringVar(value="Installing FFmpeg...")
+    status_lbl = tk.Label(container, textvariable=status_var, font=("Arial", 10), bg='white', wraplength=container_width-40)
+    status_lbl.pack(padx=20, pady=(0, 20))
+
+    return overlay, spinner, status_var
+
+def _start_ffmpeg_installer_overlayed():
+    """Show in-window overlay and run ensure_ffmpeg_installed in a background thread."""
+
+    overlay, spinner, status_var = _create_install_overlay()
+    spinner.start()
+
+    def progress_callback(msg):
+        root.after(0, status_var.set, msg)
+
+    def finish(success_path=None, error=None):
+        try:
+            spinner.stop()
+        except Exception:
+            pass
+        # unbind the blocking event handlers
+        for seq in ("<Button-1>", "<Button-2>", "<Button-3>", "<ButtonRelease>", "<Key>", "<MouseWheel>", "<Button>"):
+            try:
+                overlay.unbind_all(seq)
+            except Exception:
+                pass
+        try:
+            overlay.destroy()
+        except Exception:
+            pass
+        if error:
+            root.after(0, lambda: messagebox.showerror("FFmpeg installation failed", str(error)))
+
+    def installer_thread():
+        global ffmpeg_path
+        try:
+            path = ensure_ffmpeg_installed(progress_callback=progress_callback)
+            ffmpeg_path = path
+            finish(success_path=path)
+        except Exception as e:
+            finish(error=e)
+
+    t = threading.Thread(target=installer_thread, daemon=True)
+    t.start()
+
+# start installer with overlay before entering mainloop
+_start_ffmpeg_installer_overlayed()
 
 load_settings()
 

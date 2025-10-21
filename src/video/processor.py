@@ -1,4 +1,5 @@
-﻿import threading
+﻿import shutil
+import threading
 import os
 import tempfile
 import subprocess
@@ -16,19 +17,19 @@ class VideoProcessor:
         self.cancel_event = threading.Event()
         self.logger = CancellableProgressBarLogger(self.cancel_event)
 
-    def create_video_with_intro_only(self, form_data, combined_video_path):
+    def create_video_with_intro_only(self, form_data, combined_video_path, photo_paths=None):
         """Erstellt nur noch das Intro und hängt es vor das kombinierte Video"""
         thread = threading.Thread(
             target=self._video_creation_with_intro_only_task,
-            args=(form_data, combined_video_path)
+            args=(form_data, combined_video_path, photo_paths)
         )
         thread.start()
         return thread
 
-    def _video_creation_with_intro_only_task(self, form_data, combined_video_path):
+    def _video_creation_with_intro_only_task(self, form_data, combined_video_path, photo_paths=None):
         """Hauptlogik für das Hinzufügen des Intros zum kombinierten Video"""
         try:
-            self._execute_video_creation_with_intro_only(form_data, combined_video_path)
+            self._execute_video_creation_with_intro_only(form_data, combined_video_path, photo_paths)
         except CancellationError:
             self._handle_cancellation()
         except Exception as e:
@@ -36,7 +37,7 @@ class VideoProcessor:
         finally:
             self._cleanup()
 
-    def _execute_video_creation_with_intro_only(self, form_data, combined_video_path):
+    def _execute_video_creation_with_intro_only(self, form_data, combined_video_path, photo_paths=None):
         """Fügt nur das Intro zum bereits kombinierten Video hinzu"""
         load = form_data["load"]
         gast = form_data["gast"]
@@ -113,8 +114,13 @@ class VideoProcessor:
                 temp_video_no_audio, combined_video_path, full_output_path, dauer
             )
 
-            # Fertig
+            # Schritt 8: Fotos in Output-Verzeichnis kopieren
             self._update_progress(7)
+            if photo_paths:
+                self._copy_photos_to_output_directory(photo_paths, full_output_path)
+
+            # Fertig
+            self._update_progress(8)
             self._show_success_message(full_output_path)
 
         except Exception as e:
@@ -123,6 +129,36 @@ class VideoProcessor:
             raise e
         finally:
             self._cleanup_temp_files(temp_files)
+
+    def _copy_photos_to_output_directory(self, photo_paths, output_video_path):
+        """Kopiert alle Fotos in ein Foto-Unterverzeichnis"""
+        if not photo_paths:
+            return
+
+        # Verzeichnis des Output-Videos ermitteln
+        output_dir = os.path.dirname(output_video_path)
+        photos_dir = os.path.join(output_dir, "Fotos")
+
+        try:
+            # Foto-Verzeichnis erstellen
+            os.makedirs(photos_dir, exist_ok=True)
+
+            # Fotos kopieren
+            copied_count = 0
+            for photo_path in photo_paths:
+                if os.path.exists(photo_path):
+                    filename = os.path.basename(photo_path)
+                    destination_path = os.path.join(photos_dir, filename)
+
+                    # Datei kopieren (überschreiben falls existiert)
+                    shutil.copy2(photo_path, destination_path)
+                    copied_count += 1
+                    print(f"Foto kopiert: {filename}")
+
+            print(f"{copied_count} Foto(s) nach '{photos_dir}' kopiert")
+
+        except Exception as e:
+            print(f"Fehler beim Kopieren der Fotos: {e}")
 
     def _create_title_clip_no_audio(self, output_path, dauer, fps, drawtext_filter):
         """Erstellt den Titel-Clip mit Text-Overlay OHNE Audio"""
@@ -241,7 +277,7 @@ class VideoProcessor:
         return ",".join(drawtext_cmds)
 
     def _generate_output_path(self, load, gast, tandemmaster, videospringer, datum, speicherort, outside_video):
-        """Generiert den finalen Output-Pfad"""
+        """Generiert den finalen Output-Pfad in einem gleichnamigen Verzeichnis"""
         try:
             datum_obj = date.fromisoformat('-'.join(datum.split('.')[::-1]))
             datum_formatiert = datum_obj.strftime("%Y%m%d")
@@ -250,12 +286,20 @@ class VideoProcessor:
             from datetime import datetime
             datum_formatiert = datetime.now().strftime("%Y%m%d")
 
-        output_filename = f"{datum_formatiert}_L{load}_{gast}_TA_{tandemmaster}"
+        # Basis-Dateiname ohne Endung
+        base_filename = f"{datum_formatiert}_L{load}_{gast}_TA_{tandemmaster}"
         if outside_video:
-            output_filename += f"_V_{videospringer}"
-        output_filename += "_final.mp4"
+            base_filename += f"_V_{videospringer}"
 
-        return os.path.join(speicherort, sanitize_filename(output_filename))
+        # Verzeichnis erstellen
+        output_dir = os.path.join(speicherort, sanitize_filename(base_filename))
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Vollständiger Pfad mit Dateiname
+        output_filename = f"{base_filename}.mp4"
+        full_output_path = os.path.join(output_dir, sanitize_filename(output_filename))
+
+        return full_output_path
 
     def _update_progress(self, step, total_steps=7):
         """Aktualisiert den Fortschritt"""

@@ -206,6 +206,9 @@ class VideoGeneratorApp:
             messagebox.showwarning("Fehler", "Bitte erstellen Sie zuerst eine Vorschau durch Drag & Drop von Videos.")
             return
 
+        # Foto-Pfade holen
+        photo_paths = self.drag_drop.get_photo_paths()
+
         # Validierung
         errors = validate_form_data(form_data, [combined_video_path])
         if errors:
@@ -217,6 +220,13 @@ class VideoGeneratorApp:
         self.config.save_settings(settings_data)
 
         # GUI für Verarbeitung vorbereiten
+        video_count = len(self.drag_drop.get_video_paths())
+        photo_count = len(photo_paths)
+        status_text = f"Status: Verarbeite {video_count} Video(s)"
+        if photo_count > 0:
+            status_text += f" und kopiere {photo_count} Foto(s)"
+        status_text += "... Bitte warten."
+
         self.progress_handler.set_status("Status: Füge Intro hinzu... Bitte warten.")
         self._switch_to_cancel_mode()
 
@@ -229,11 +239,11 @@ class VideoGeneratorApp:
         # Videoerstellung im Thread starten
         video_thread = threading.Thread(
             target=self.video_processor.create_video_with_intro_only,
-            args=(form_data, combined_video_path)
+            args=(form_data, combined_video_path, photo_paths)
         )
         video_thread.start()
 
-    def _update_progress(self, step, total_steps=7):
+    def _update_progress(self, step, total_steps=8):
         """Callback für Fortschrittsupdates"""
         self.root.after(0, self.progress_handler.update_progress, step, total_steps)
 

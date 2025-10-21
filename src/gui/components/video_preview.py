@@ -63,7 +63,7 @@ class VideoPreview:
 
         self.status_label.config(text="Erstelle Vorschau...", fg="blue")
         self.play_button.config(state="disabled")
-        self.clips_label.config(text=f"Anzahl Clips: {len(video_paths)}")
+        self.clips_label.config(text=f"Anzahl Videos: {len(video_paths)}")  # Text angepasst
 
         # Im Thread verarbeiten um UI nicht zu blockieren
         thread = threading.Thread(target=self._create_combined_preview, args=(video_paths,))

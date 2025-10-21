@@ -19,31 +19,40 @@ class VideoPreview:
         title_label = tk.Label(self.frame, text="Video Vorschau", font=("Arial", 14, "bold"))
         title_label.pack(pady=5)
 
+        # Separator
+        ttk.Separator(self.frame, orient='horizontal').pack(fill='x', pady=5)
+
         # Video-Info Frame
         info_frame = tk.Frame(self.frame)
-        info_frame.pack(fill="x", padx=10, pady=5)
+        info_frame.pack(fill="x", pady=5)
 
         self.duration_label = tk.Label(info_frame, text="Gesamtdauer: --:--", font=("Arial", 10))
-        self.duration_label.pack(side=tk.LEFT)
+        self.duration_label.pack(anchor="w")
 
         self.size_label = tk.Label(info_frame, text="Dateigröße: --", font=("Arial", 10))
-        self.size_label.pack(side=tk.RIGHT)
+        self.size_label.pack(anchor="w")
+
+        # Anzahl der Clips
+        self.clips_label = tk.Label(info_frame, text="Anzahl Clips: 0", font=("Arial", 10))
+        self.clips_label.pack(anchor="w")
 
         # Steuerungs-Buttons
         control_frame = tk.Frame(self.frame)
-        control_frame.pack(pady=5)
+        control_frame.pack(pady=10)
 
-        self.play_button = tk.Button(control_frame, text="▶ Abspielen", command=self.play_preview,
-                                     state="disabled", font=("Arial", 10))
-        self.play_button.pack(side=tk.LEFT, padx=2)
+        self.play_button = tk.Button(control_frame, text="▶ Vorschau abspielen",
+                                     command=self.play_preview, state="disabled",
+                                     font=("Arial", 11), width=15, height=1)
+        self.play_button.pack(pady=2)
 
-        self.stop_button = tk.Button(control_frame, text="⏹ Stopp", command=self.stop_preview,
-                                     state="disabled", font=("Arial", 10))
-        self.stop_button.pack(side=tk.LEFT, padx=2)
+        self.stop_button = tk.Button(control_frame, text="⏹ Abbrechen",
+                                     command=self.stop_preview, state="disabled",
+                                     font=("Arial", 11), width=15, height=1)
+        self.stop_button.pack(pady=2)
 
         # Status-Label
-        self.status_label = tk.Label(self.frame, text="Keine Vorschau verfügbar",
-                                     font=("Arial", 10), fg="gray")
+        self.status_label = tk.Label(self.frame, text="Ziehen Sie Videos in das Feld links",
+                                     font=("Arial", 10), fg="gray", wraplength=300)
         self.status_label.pack(pady=5)
 
     def update_preview(self, video_paths):

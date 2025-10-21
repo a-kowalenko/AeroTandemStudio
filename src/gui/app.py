@@ -6,7 +6,7 @@ from tkinterdnd2 import TkinterDnD
 
 from .components.form_fields import FormFields
 from .components.drag_drop import DragDropFrame
-from .components.video_preview import VideoPreview  # Neue Import
+from .components.video_preview import VideoPreview
 from .components.progress_indicator import ProgressHandler
 from ..video.processor import VideoProcessor
 from ..utils.config import ConfigManager
@@ -71,33 +71,54 @@ class VideoGeneratorApp:
 
     def setup_gui(self):
         self.root.title("Tandemvideo Generator")
-        self.root.geometry("600x850")  # Höher für Vorschau
+        self.root.geometry("1000x750")  # Breiter für zwei Spalten
         self.root.config(padx=20, pady=20)
 
-        # Hauptkomponenten erstellen
-        self.form_fields = FormFields(self.root, self.config)
-        self.drag_drop = DragDropFrame(self.root, self)  # App-Instanz übergeben
-        self.video_preview = VideoPreview(self.root)
-        self.progress_handler = ProgressHandler(self.root)
+        # Haupt-Container mit zwei Spalten
+        self.main_container = tk.Frame(self.root)
+        self.main_container.pack(fill="both", expand=True)
 
-        # Erstellen-Button
+        # Linke Spalte für Formular und Drag & Drop
+        self.left_frame = tk.Frame(self.main_container, width=600)
+        self.left_frame.pack(side="left", fill="both", expand=True, padx=(0, 20))
+
+        # Rechte Spalte für Vorschau und Button
+        self.right_frame = tk.Frame(self.main_container, width=350)
+        self.right_frame.pack(side="right", fill="y", padx=(20, 0))
+
+        # Linke Spalte: Formular und Drag & Drop
+        self.form_fields = FormFields(self.left_frame, self.config)
+        self.drag_drop = DragDropFrame(self.left_frame, self)
+
+        # Rechte Spalte: Vorschau und Button
+        self.video_preview = VideoPreview(self.right_frame)
         self.erstellen_button = tk.Button(
-            self.root,
+            self.right_frame,
             text="Video mit Intro erstellen",
             font=("Arial", 14, "bold"),
             command=self.erstelle_video,
             bg="#4CAF50",
-            fg="white"
+            fg="white",
+            width=20,
+            height=2
         )
+
+        # Progress Handler (unten über beiden Spalten)
+        self.progress_handler = ProgressHandler(self.root)
 
         self.pack_components()
         self.load_settings()
 
     def pack_components(self):
-        self.form_fields.pack(pady=10)
-        self.drag_drop.pack(fill="x", pady=10, ipady=20)
-        self.video_preview.pack(fill="x", pady=10)
-        self.erstellen_button.pack(pady=20, ipady=5)
+        # Linke Spalte
+        self.form_fields.pack(pady=10, fill="x")
+        self.drag_drop.pack(fill="both", expand=True, pady=10)
+
+        # Rechte Spalte
+        self.video_preview.pack(fill="both", expand=True, pady=(0, 10))
+        self.erstellen_button.pack(pady=10, fill="x")
+
+        # Progress unten
         self.progress_handler.pack_status_label()
 
     def load_settings(self):
@@ -212,7 +233,7 @@ class VideoGeneratorApp:
         )
         video_thread.start()
 
-    def _update_progress(self, step, total_steps=6):
+    def _update_progress(self, step, total_steps=7):
         """Callback für Fortschrittsupdates"""
         self.root.after(0, self.progress_handler.update_progress, step, total_steps)
 

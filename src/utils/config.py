@@ -13,7 +13,11 @@ class ConfigManager:
         if os.path.exists(self.CONFIG_FILE):
             try:
                 with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    settings = json.load(f)
+                    # Stelle sicher, dass server_url existiert
+                    if "server_url" not in settings:
+                        settings["server_url"] = "smb://169.254.169.254/aktuell"
+                    return settings
             except (json.JSONDecodeError, FileNotFoundError):
                 return self.get_default_settings()
         return self.get_default_settings()
@@ -26,7 +30,9 @@ class ConfigManager:
             "dauer": 8,
             "outside_video": False,
             "tandemmaster": "",
-            "videospringer": ""
+            "videospringer": "",
+            "upload_to_server": False,
+            "server_url": "smb://169.254.169.254/aktuell"  # Neue Standard-URL
         }
 
     def save_settings(self, settings):
@@ -42,6 +48,7 @@ class ConfigManager:
 
     def get_settings(self):
         """Gibt die aktuellen Einstellungen zurück"""
+        self.settings = self.load_settings()
         return self.settings.copy()
 
     def update_setting(self, key, value):

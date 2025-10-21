@@ -69,6 +69,8 @@ class VideoPreview:
         thread = threading.Thread(target=self._create_combined_preview, args=(video_paths,))
         thread.start()
 
+        return thread
+
     def _create_combined_preview(self, video_paths):
         """Erstellt ein kombiniertes Vorschau-Video aus allen Clips"""
         try:

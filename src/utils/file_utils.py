@@ -17,11 +17,18 @@ def ensure_directory_exists(directory):
     return directory
 
 
-def upload_to_server_simple(local_directory, server_url="smb://169.254.169.254/aktuell"):
+def upload_to_server_simple(local_directory, config_manager=None):
     """
     Einfache Upload-Methode die mit Python-Bordmitteln arbeitet
     """
     try:
+        # Hole Server-URL aus Config oder verwende Standard
+        if config_manager:
+            settings = config_manager.get_settings()
+            server_url = settings.get("server_url", "smb://169.254.169.254/aktuell")
+        else:
+            server_url = "smb://169.254.169.254/aktuell"
+
         # Für Windows: Verwende net use und robocopy (besser als xcopy)
         if platform.system() == "Windows":
             return _upload_windows_robocopy(local_directory, server_url)

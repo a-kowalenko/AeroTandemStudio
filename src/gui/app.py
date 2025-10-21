@@ -1,5 +1,5 @@
 ﻿import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 import threading
 import os
 from tkinterdnd2 import TkinterDnD
@@ -8,54 +8,12 @@ from .components.form_fields import FormFields
 from .components.drag_drop import DragDropFrame
 from .components.video_preview import VideoPreview
 from .components.progress_indicator import ProgressHandler
+from .components.circular_spinner import CircularSpinner
+from .components.settings_dialog import SettingsDialog
 from ..video.processor import VideoProcessor
 from ..utils.config import ConfigManager
 from ..utils.validation import validate_form_data
 from ..installer.ffmpeg_installer import ensure_ffmpeg_installed
-
-
-class CircularSpinner:
-    """Simple rotating arc spinner on a Canvas."""
-
-    def __init__(self, parent, size=80, line_width=8, color="#333", speed=8):
-        self.parent = parent
-        self.size = size
-        self.line_width = line_width
-        self.color = color
-        self.speed = speed  # degrees per frame
-        self.angle = 0
-        self._job = None
-
-        self.canvas = tk.Canvas(parent, width=size, height=size, highlightthickness=0, bg='white')
-        pad = line_width // 2
-        self.arc = self.canvas.create_arc(
-            pad, pad, size - pad, size - pad,
-            start=self.angle, extent=300, style='arc', width=line_width, outline=self.color
-        )
-
-    def pack(self, **kwargs):
-        self.canvas.pack(**kwargs)
-
-    def start(self, delay=50):
-        if self._job:
-            return
-        self._animate(delay)
-
-    def _animate(self, delay):
-        self.angle = (self.angle + self.speed) % 360
-        try:
-            self.canvas.itemconfigure(self.arc, start=self.angle)
-        except Exception:
-            return
-        self._job = self.parent.after(delay, lambda: self._animate(delay))
-
-    def stop(self):
-        if self._job:
-            try:
-                self.parent.after_cancel(self._job)
-            except Exception:
-                pass
-            self._job = None
 
 
 class VideoGeneratorApp:
@@ -71,8 +29,11 @@ class VideoGeneratorApp:
 
     def setup_gui(self):
         self.root.title("Aero Tandem Studio")
-        self.root.geometry("1280x900")  # Breiter für zwei Spalten
+        self.root.geometry("1280x900")
         self.root.config(padx=20, pady=20)
+
+        # Header mit Titel und Settings-Button
+        self.create_header()
 
         # Haupt-Container mit zwei Spalten
         self.main_container = tk.Frame(self.root)
@@ -93,7 +54,7 @@ class VideoGeneratorApp:
         # Rechte Spalte: Vorschau, Checkbox und Button
         self.video_preview = VideoPreview(self.right_frame)
 
-        # Checkbox für Server-Upload (NEU - direkt in rechter Spalte)
+        # Checkbox für Server-Upload
         self.upload_to_server_var = tk.BooleanVar()
         self.upload_checkbox = tk.Checkbutton(
             self.right_frame,
@@ -120,13 +81,86 @@ class VideoGeneratorApp:
         self.pack_components()
         self.load_settings()
 
+    def create_header(self):
+        """Erstellt den Header mit Titel, Logo und Settings-Button"""
+        header_frame = tk.Frame(self.root)
+        header_frame.pack(fill="x", pady=(0, 20))
+
+        # Logo links neben dem Titel (100x100)
+        img_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "logo.png"))
+        self.logo_image = None
+        if os.path.exists(img_path):
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(img_path).convert("RGBA")
+                img = img.resize((100, 100), Image.LANCZOS)
+                self.logo_image = ImageTk.PhotoImage(img)
+            except Exception:
+                try:
+                    self.logo_image = tk.PhotoImage(file=img_path)
+                except Exception:
+                    self.logo_image = None
+
+        if self.logo_image:
+            logo_label = tk.Label(header_frame, image=self.logo_image, bd=0)
+            logo_label.pack(side="left", padx=(0, 10))
+
+        # Titel
+        title_label = tk.Label(
+            header_frame,
+            text="Aero Tandem Studio",
+            font=("Arial", 20, "bold"),
+            fg="#009d8b"
+        )
+        title_label.pack(side="left")
+
+        # Settings-Button (rechts)
+        self.settings_button = tk.Button(
+            header_frame,
+            text="⚙",  # Gear Icon
+            font=("Arial", 18),
+            command=self.show_settings,
+            bg="#f0f0f0",
+            relief="flat",
+            width=3,
+            height=1
+        )
+        self.settings_button.pack(side="right")
+
+        # Tooltip für Settings-Button
+        self.create_tooltip(self.settings_button, "Einstellungen öffnen")
+
+    def create_tooltip(self, widget, text):
+        """Erstellt einen Tooltip für ein Widget"""
+
+        def on_enter(event):
+            tooltip = tk.Toplevel()
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
+
+            label = tk.Label(tooltip, text=text, relief="solid", borderwidth=1)
+            label.pack()
+
+            widget.tooltip = tooltip
+
+        def on_leave(event):
+            if hasattr(widget, 'tooltip'):
+                widget.tooltip.destroy()
+
+        widget.bind("<Enter>", on_enter)
+        widget.bind("<Leave>", on_leave)
+
+    def show_settings(self):
+        """Zeigt den Einstellungs-Dialog"""
+        SettingsDialog(self.root, self.config).show()
+
     def pack_components(self):
         # Linke Spalte
         self.form_fields.pack(pady=10, fill="x")
         self.drag_drop.pack(fill="both", expand=True, pady=10)
 
         # Rechte Spalte
-        self.video_preview.pack(fill="both", expand=True, pady=(0, 10))
+        self.video_preview.pack(fill="x", expand=True, pady=(0, 8))
         self.upload_checkbox.pack(pady=10, fill="x")
         self.erstellen_button.pack(pady=10, fill="x")
 
@@ -209,7 +243,32 @@ class VideoGeneratorApp:
 
     def update_video_preview(self, video_paths):
         """Aktualisiert die Video-Vorschau (wird von DragDrop aufgerufen)"""
-        self.video_preview.update_preview(video_paths)
+        # Erstelle Waiting-State für den Button (Text, Farbe, Cursor)
+        old_text = self.erstellen_button.cget("text")
+        old_bg = self.erstellen_button.cget("bg")
+        try:
+            old_cursor = self.erstellen_button.cget("cursor")
+        except Exception:
+            old_cursor = ""
+
+        self.erstellen_button.config(text="Bitte warten...", bg="#9E9E9E", state="disabled", cursor="watch")
+
+        update_preview_thread = self.video_preview.update_preview(video_paths)
+
+        # Aktiviere Erstellen-Button wieder, wenn die Vorschau fertig ist
+        def enable_button_when_done():
+            update_preview_thread.join()
+
+            def restore():
+                try:
+                    self.erstellen_button.config(text=old_text, bg=old_bg, state="normal", cursor=old_cursor)
+                except Exception:
+                    # Fallback, falls cursor o.ä. nicht gesetzt werden kann
+                    self.erstellen_button.config(text=old_text, bg=old_bg, state="normal")
+
+            self.root.after(0, restore)
+
+        threading.Thread(target=enable_button_when_done, daemon=True).start()
 
     def erstelle_video(self):
         """Bereitet die Videoerstellung mit Intro vor"""
@@ -245,7 +304,6 @@ class VideoGeneratorApp:
         status_text = f"Status: Verarbeite {video_count} Video(s)"
         if photo_count > 0:
             status_text += f" und kopiere {photo_count} Foto(s)"
-        status_text += "... Bitte warten."
 
         # Server-Upload Info hinzufügen
         if form_data["upload_to_server"]:
@@ -253,7 +311,7 @@ class VideoGeneratorApp:
 
         status_text += "... Bitte warten."
 
-        self.progress_handler.set_status("Status: Füge Intro hinzu... Bitte warten.")
+        self.progress_handler.set_status(status_text)
         self._switch_to_cancel_mode()
 
         # VideoProcessor initialisieren
@@ -287,7 +345,6 @@ class VideoGeneratorApp:
             self.root.after(0, self.progress_handler.set_status, f"Status: {message}.")
             return
 
-
         self.root.after(0, self._switch_to_create_mode)
 
     def _switch_to_cancel_mode(self):
@@ -305,7 +362,7 @@ class VideoGeneratorApp:
     def _switch_to_create_mode(self):
         """Wechselt den Button zurück zum Erstellen-Modus"""
         self.erstellen_button.config(
-            text="Video mit Intro erstellen",
+            text="Erstellen",
             command=self.erstelle_video,
             bg="#4CAF50",
             state="normal"

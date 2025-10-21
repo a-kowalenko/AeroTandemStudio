@@ -317,7 +317,32 @@ class VideoGeneratorApp:
 
     def update_video_preview(self, video_paths):
         """Aktualisiert die Video-Vorschau (wird von DragDrop aufgerufen)"""
-        self.video_preview.update_preview(video_paths)
+        # Erstelle Waiting-State für den Button (Text, Farbe, Cursor)
+        old_text = self.erstellen_button.cget("text")
+        old_bg = self.erstellen_button.cget("bg")
+        try:
+            old_cursor = self.erstellen_button.cget("cursor")
+        except Exception:
+            old_cursor = ""
+
+        self.erstellen_button.config(text="Bitte warten...", bg="#9E9E9E", state="disabled", cursor="watch")
+
+        update_preview_thread = self.video_preview.update_preview(video_paths)
+
+        # Aktiviere Erstellen-Button wieder, wenn die Vorschau fertig ist
+        def enable_button_when_done():
+            update_preview_thread.join()
+
+            def restore():
+                try:
+                    self.erstellen_button.config(text=old_text, bg=old_bg, state="normal", cursor=old_cursor)
+                except Exception:
+                    # Fallback, falls cursor o.ä. nicht gesetzt werden kann
+                    self.erstellen_button.config(text=old_text, bg=old_bg, state="normal")
+
+            self.root.after(0, restore)
+
+        threading.Thread(target=enable_button_when_done, daemon=True).start()
 
     def erstelle_video(self):
         """Bereitet die Videoerstellung mit Intro vor"""

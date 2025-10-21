@@ -1,4 +1,5 @@
-﻿import tkinter as tk
+﻿import platform
+import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinterdnd2 import DND_FILES
 import os
@@ -81,6 +82,9 @@ class DragDropFrame:
         self.video_tree.pack(side=tk.LEFT, fill="both", expand=True)
         video_scrollbar.config(command=self.video_tree.yview)
 
+        # Doppelklick-Event für Videos
+        self.video_tree.bind("<Double-1>", self._on_video_double_click)
+
         # Steuerungs-Buttons für Videos
         video_button_frame = tk.Frame(self.video_tab)
         video_button_frame.pack(pady=5)
@@ -124,6 +128,9 @@ class DragDropFrame:
 
         self.photo_tree.pack(side=tk.LEFT, fill="both", expand=True)
         photo_scrollbar.config(command=self.photo_tree.yview)
+
+        # Doppelklick-Event für Fotos
+        self.photo_tree.bind("<Double-1>", self._on_photo_double_click)
 
         # Steuerungs-Buttons für Fotos
         photo_button_frame = tk.Frame(self.photo_tab)
@@ -368,3 +375,34 @@ class DragDropFrame:
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
+
+    def _on_video_double_click(self, event):
+        """Öffnet das ausgewählte Video beim Doppelklick"""
+        selection = self.video_tree.selection()
+        if selection:
+            index = self.video_tree.index(selection[0])
+            if 0 <= index < len(self.video_paths):
+                video_path = self.video_paths[index]
+                self._open_file_with_default_app(video_path)
+
+    def _on_photo_double_click(self, event):
+        """Öffnet das ausgewählte Foto beim Doppelklick"""
+        selection = self.photo_tree.selection()
+        if selection:
+            index = self.photo_tree.index(selection[0])
+            if 0 <= index < len(self.photo_paths):
+                photo_path = self.photo_paths[index]
+                self._open_file_with_default_app(photo_path)
+
+    def _open_file_with_default_app(self, file_path):
+        """Öffnet eine Datei mit der Standard-Anwendung des Systems"""
+        try:
+            if os.name == 'nt':  # Windows
+                os.startfile(file_path)
+            elif os.name == 'posix':  # macOS und Linux
+                if platform.system() == 'Darwin':  # macOS
+                    subprocess.run(['open', file_path], check=True)
+                else:  # Linux
+                    subprocess.run(['xdg-open', file_path], check=True)
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Datei konnte nicht geöffnet werden:\n{str(e)}")

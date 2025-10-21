@@ -14,6 +14,7 @@ from ..video.processor import VideoProcessor
 from ..utils.config import ConfigManager
 from ..utils.validation import validate_form_data
 from ..installer.ffmpeg_installer import ensure_ffmpeg_installed
+from ..utils.file_utils import test_server_connection
 
 
 class VideoGeneratorApp:
@@ -23,6 +24,8 @@ class VideoGeneratorApp:
         self.video_processor = None
         self.erstellen_button = None
         self.combined_video_path = None
+        self.server_status_label = None
+        self.server_connected = False
 
         self.setup_gui()
         self.ensure_dependencies()
@@ -54,14 +57,28 @@ class VideoGeneratorApp:
         # Rechte Spalte: Vorschau, Checkbox und Button
         self.video_preview = VideoPreview(self.right_frame)
 
+        # Server-Upload Frame mit Status-Anzeige
+        self.upload_frame = tk.Frame(self.right_frame)
+
         # Checkbox für Server-Upload
         self.upload_to_server_var = tk.BooleanVar()
         self.upload_checkbox = tk.Checkbutton(
-            self.right_frame,
+            self.upload_frame,
             text="Auf Server laden",
             variable=self.upload_to_server_var,
-            font=("Arial", 12)
+            font=("Arial", 12),
+            command=self.on_upload_checkbox_toggle
         )
+        self.upload_checkbox.pack(side="left", padx=(0, 10))
+
+        # Server Status Label
+        self.server_status_label = tk.Label(
+            self.upload_frame,
+            text="Prüfe...",
+            font=("Arial", 10, "bold"),
+            fg="orange"
+        )
+        self.server_status_label.pack(side="left")
 
         # Erstellen-Button
         self.erstellen_button = tk.Button(
@@ -81,36 +98,20 @@ class VideoGeneratorApp:
         self.pack_components()
         self.load_settings()
 
+        # Server-Verbindung testen (im Hintergrund)
+        self.test_server_connection_async()
+
     def create_header(self):
-        """Erstellt den Header mit Titel, Logo und Settings-Button"""
+        """Erstellt den Header mit Titel und Settings-Button"""
         header_frame = tk.Frame(self.root)
         header_frame.pack(fill="x", pady=(0, 20))
-
-        # Logo links neben dem Titel (100x100)
-        img_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "logo.png"))
-        self.logo_image = None
-        if os.path.exists(img_path):
-            try:
-                from PIL import Image, ImageTk
-                img = Image.open(img_path).convert("RGBA")
-                img = img.resize((100, 100), Image.LANCZOS)
-                self.logo_image = ImageTk.PhotoImage(img)
-            except Exception:
-                try:
-                    self.logo_image = tk.PhotoImage(file=img_path)
-                except Exception:
-                    self.logo_image = None
-
-        if self.logo_image:
-            logo_label = tk.Label(header_frame, image=self.logo_image, bd=0)
-            logo_label.pack(side="left", padx=(0, 10))
 
         # Titel
         title_label = tk.Label(
             header_frame,
             text="Aero Tandem Studio",
             font=("Arial", 20, "bold"),
-            fg="#009d8b"
+            fg="#2E86C1"
         )
         title_label.pack(side="left")
 
@@ -118,7 +119,7 @@ class VideoGeneratorApp:
         self.settings_button = tk.Button(
             header_frame,
             text="⚙",  # Gear Icon
-            font=("Arial", 18),
+            font=("Arial", 16),
             command=self.show_settings,
             bg="#f0f0f0",
             relief="flat",
@@ -138,7 +139,7 @@ class VideoGeneratorApp:
             tooltip.wm_overrideredirect(True)
             tooltip.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
 
-            label = tk.Label(tooltip, text=text, relief="solid", borderwidth=1)
+            label = tk.Label(tooltip, text=text, background="yellow", relief="solid", borderwidth=1)
             label.pack()
 
             widget.tooltip = tooltip
@@ -153,6 +154,8 @@ class VideoGeneratorApp:
     def show_settings(self):
         """Zeigt den Einstellungs-Dialog"""
         SettingsDialog(self.root, self.config).show()
+        # Nach Schließen des Dialogs Verbindung erneut testen
+        self.root.after(1000, self.test_server_connection_async)
 
     def pack_components(self):
         # Linke Spalte
@@ -161,7 +164,7 @@ class VideoGeneratorApp:
 
         # Rechte Spalte
         self.video_preview.pack(fill="x", expand=True, pady=(0, 8))
-        self.upload_checkbox.pack(pady=10, fill="x")
+        self.upload_frame.pack(pady=10, fill="x")
         self.erstellen_button.pack(pady=10, fill="x")
 
         # Progress unten
@@ -174,6 +177,55 @@ class VideoGeneratorApp:
             self.upload_to_server_var.set(settings.get("upload_to_server", False))
         except:
             self.upload_to_server_var.set(False)
+
+    def test_server_connection_async(self):
+        """Testet die Server-Verbindung asynchron"""
+        self.server_status_label.config(text="Prüfe...", fg="orange")
+
+        def test_connection():
+            success, message = test_server_connection(self.config)
+            self.root.after(0, self.update_server_status, success, message)
+
+        thread = threading.Thread(target=test_connection, daemon=True)
+        thread.start()
+
+    def update_server_status(self, connected, message):
+        """Aktualisiert den Server-Status in der GUI"""
+        self.server_connected = connected
+
+        if connected:
+            self.server_status_label.config(text="✓ Verbunden", fg="green")
+            # Tooltip für erfolgreiche Verbindung
+            self.create_tooltip(self.server_status_label, f"Server erreichbar\n{message}")
+        else:
+            self.server_status_label.config(text="✗ Getrennt", fg="red")
+            # Tooltip für Fehler
+            self.create_tooltip(self.server_status_label, f"Server nicht erreichbar\n{message}")
+
+            # Deaktiviere Upload-Checkbox falls nicht verbunden
+            if self.upload_to_server_var.get():
+                self.upload_to_server_var.set(False)
+                messagebox.showwarning(
+                    "Server nicht erreichbar",
+                    f"Server-Verbindung fehlgeschlagen:\n{message}\n\n"
+                    "Upload wurde deaktiviert. Bitte überprüfen Sie die Einstellungen."
+                )
+
+    def on_upload_checkbox_toggle(self):
+        """Wird aufgerufen wenn die Upload-Checkbox geändert wird"""
+        if self.upload_to_server_var.get() and not self.server_connected:
+            # Wenn Upload aktiviert aber nicht verbunden, zeige Warnung und deaktiviere
+            self.upload_to_server_var.set(False)
+            messagebox.showwarning(
+                "Server nicht erreichbar",
+                "Kann nicht auf Server uploaden - keine Verbindung verfügbar.\n\n"
+                "Bitte überprüfen Sie:\n"
+                "• Server-Einstellungen (⚙)\n"
+                "• Netzwerkverbindung\n"
+                "• Server-Erreichbarkeit"
+            )
+            # Starte erneuten Verbindungstest
+            self.test_server_connection_async()
 
     def ensure_dependencies(self):
         """Stellt sicher, dass FFmpeg installiert ist"""
@@ -243,32 +295,7 @@ class VideoGeneratorApp:
 
     def update_video_preview(self, video_paths):
         """Aktualisiert die Video-Vorschau (wird von DragDrop aufgerufen)"""
-        # Erstelle Waiting-State für den Button (Text, Farbe, Cursor)
-        old_text = self.erstellen_button.cget("text")
-        old_bg = self.erstellen_button.cget("bg")
-        try:
-            old_cursor = self.erstellen_button.cget("cursor")
-        except Exception:
-            old_cursor = ""
-
-        self.erstellen_button.config(text="Bitte warten...", bg="#9E9E9E", state="disabled", cursor="watch")
-
-        update_preview_thread = self.video_preview.update_preview(video_paths)
-
-        # Aktiviere Erstellen-Button wieder, wenn die Vorschau fertig ist
-        def enable_button_when_done():
-            update_preview_thread.join()
-
-            def restore():
-                try:
-                    self.erstellen_button.config(text=old_text, bg=old_bg, state="normal", cursor=old_cursor)
-                except Exception:
-                    # Fallback, falls cursor o.ä. nicht gesetzt werden kann
-                    self.erstellen_button.config(text=old_text, bg=old_bg, state="normal")
-
-            self.root.after(0, restore)
-
-        threading.Thread(target=enable_button_when_done, daemon=True).start()
+        self.video_preview.update_preview(video_paths)
 
     def erstelle_video(self):
         """Bereitet die Videoerstellung mit Intro vor"""
@@ -277,6 +304,15 @@ class VideoGeneratorApp:
 
         # Server-Upload Einstellung hinzufügen
         form_data["upload_to_server"] = self.upload_to_server_var.get()
+
+        # Prüfe Server-Verbindung wenn Upload aktiviert
+        if form_data["upload_to_server"] and not self.server_connected:
+            messagebox.showwarning(
+                "Server nicht erreichbar",
+                "Server-Upload ist aktiviert, aber keine Verbindung zum Server verfügbar.\n\n"
+                "Bitte überprüfen Sie die Server-Einstellungen oder deaktivieren Sie den Upload."
+            )
+            return
 
         # Verwende das kombinierte Video aus der Vorschau
         combined_video_path = self.video_preview.get_combined_video_path()

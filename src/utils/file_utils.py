@@ -3,12 +3,14 @@ import shutil
 import subprocess
 import platform
 
+
 def sanitize_filename(filename):
     """Entfernt ungültige Zeichen aus einem potenziellen Dateinamen."""
     invalid_chars = '<>:"/\\|?*'
     for char in invalid_chars:
         filename = filename.replace(char, '')
     return filename.strip()
+
 
 def ensure_directory_exists(directory):
     """Stellt sicher, dass ein Verzeichnis existiert"""
@@ -55,14 +57,66 @@ def _upload_windows_robocopy(local_directory, server_url):
         if not os.path.exists(local_directory):
             return False, f"Lokales Verzeichnis existiert nicht: {local_directory}", ""
 
-        # Prüfe ob Server erreichbar ist
+        # Versuche zunächst ohne Credentials (falls bereits verbunden)
         try:
-            # Versuche auf Server zuzugreifen
             if not os.path.exists(server_path):
-                return False, f"Server nicht erreichbar: {server_path}", ""
+                # Server nicht erreichbar, versuche mit Credentials zu verbinden
+                return _upload_windows_with_credentials(local_directory, server_url)
         except:
-            return False, f"Kann nicht auf Server zugreifen: {server_path}", ""
+            # Fehler beim Zugriff, versuche mit Credentials
+            return _upload_windows_with_credentials(local_directory, server_url)
 
+        # Server ist erreichbar, verwende robocopy direkt
+        return _execute_robocopy(local_directory, target_path)
+
+    except Exception as e:
+        return False, f"Windows Upload Fehler: {str(e)}", ""
+
+
+def _upload_windows_with_credentials(local_directory, server_url):
+    """Upload für Windows mit expliziten Anmeldedaten"""
+    try:
+        # Extrahiere Server und Share aus URL
+        server_share = server_url.replace("smb://", "")
+        parts = server_share.split("/", 1)
+        if len(parts) < 2:
+            return False, f"Ungültige Server-URL: {server_url}", ""
+
+        server, share = parts
+        server_path = f"\\\\{server}\\{share}"
+        dir_name = os.path.basename(local_directory)
+        target_path = os.path.join(server_path, dir_name)
+
+        # Verwende net use mit Anmeldedaten
+        drive_letter = "Z:"  # Temporärer Laufwerksbuchstabe
+
+        # Trenne bestehende Verbindung falls vorhanden
+        subprocess.run(f"net use {drive_letter} /delete /y",
+                       shell=True, capture_output=True)
+
+        # Verbinde mit Server und Anmeldedaten
+        net_use_cmd = f'net use {drive_letter} "{server_path}" /user:aero aero'
+        result = subprocess.run(net_use_cmd, shell=True, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            return False, f"Verbindung zum Server fehlgeschlagen: {result.stderr}", ""
+
+        try:
+            # Jetzt mit robocopy über das gemountete Laufwerk kopieren
+            local_drive_path = os.path.join(drive_letter, dir_name)
+            return _execute_robocopy(local_directory, local_drive_path, drive_mounted=True)
+        finally:
+            # Verbindung trennen
+            subprocess.run(f"net use {drive_letter} /delete /y",
+                           shell=True, capture_output=True)
+
+    except Exception as e:
+        return False, f"Upload mit Anmeldedaten fehlgeschlagen: {str(e)}", ""
+
+
+def _execute_robocopy(local_directory, target_path, drive_mounted=False):
+    """Führt robocopy aus (Hilfsfunktion)"""
+    try:
         # Verwende robocopy für zuverlässiges Kopieren
         # robocopy Quelle Ziel /E /COPYALL /R:3 /W:5
         robocopy_cmd = [
@@ -101,7 +155,7 @@ def _upload_windows_robocopy(local_directory, server_url):
     except subprocess.TimeoutExpired:
         return False, "Upload timeout - Server nicht erreichbar oder zu langsam", ""
     except Exception as e:
-        return False, f"Windows Upload Fehler: {str(e)}", ""
+        return False, f"robocopy Ausführungsfehler: {str(e)}", ""
 
 
 def _upload_windows_xcopy_fallback(local_directory, server_url):
@@ -147,46 +201,52 @@ def _upload_other_systems(local_directory, server_url):
 
         server, share = parts
 
-        # Erstelle temporäres Verzeichnis für den Upload
-        import tempfile
-        temp_dir = tempfile.mkdtemp()
-
-        try:
-            # Mount Befehl (versuchsweise)
-            mount_point = os.path.join(temp_dir, "mount")
-            os.makedirs(mount_point, exist_ok=True)
-
-            # Versuche mit smbclient direkt zu arbeiten (ohne mount)
-            # Erstelle tar Archiv und sende es per smbclient
-            tar_file = os.path.join(temp_dir, "upload.tar")
-            tar_cmd = f'tar -cf "{tar_file}" -C "{local_directory}" .'
-            subprocess.run(tar_cmd, shell=True, check=True, capture_output=True)
-
-            # Upload mit smbclient
-            smb_cmd = f'smbclient "//{server}/{share}" -N -c "prompt; put {tar_file} {os.path.basename(local_directory)}.tar"'
-            result = subprocess.run(smb_cmd, shell=True, capture_output=True, text=True)
-
-            if result.returncode == 0:
-                return True, f"Erfolgreich auf Server kopiert als Archiv", f"//{server}/{share}"
-            else:
-                # Fallback: Versuche Verzeichnis rekursiv zu kopieren
-                return _upload_smbclient_recursive(local_directory, server, share)
-
-        finally:
-            # Aufräumen
-            try:
-                shutil.rmtree(temp_dir)
-            except:
-                pass
+        # Verwende smbclient mit Anmeldedaten
+        return _upload_smbclient_with_auth(local_directory, server, share)
 
     except Exception as e:
         return False, f"Upload Fehler (nicht-Windows): {str(e)}", ""
 
 
-def _upload_smbclient_recursive(local_directory, server, share):
-    """Versucht rekursiv mit smbclient zu uploaden"""
+def _upload_smbclient_with_auth(local_directory, server, share):
+    """Upload mit smbclient und Authentifizierung"""
     try:
-        # Erstelle Befehl für rekursives Upload
+        dir_name = os.path.basename(local_directory)
+
+        # Befehl für smbclient mit Authentifizierung
+        # -U aero%aero: Benutzername und Passwort
+        # -c: Befehle ausführen
+        cmd = [
+            "smbclient",
+            f"//{server}/{share}",
+            "-U", "aero%aero",  # Benutzername%Passwort
+            "-c", f"mkdir {dir_name}; prompt; recurse; cd {dir_name}; lcd {local_directory}; mput *"
+        ]
+
+        result = subprocess.run(
+            " ".join(cmd),
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+
+        if result.returncode == 0:
+            target_path = f"//{server}/{share}/{dir_name}"
+            return True, f"Erfolgreich auf Server kopiert: {target_path}", target_path
+        else:
+            error_msg = result.stderr if result.stderr else result.stdout
+            return False, f"smbclient Fehler: {error_msg}", ""
+
+    except subprocess.TimeoutExpired:
+        return False, "Upload timeout - Server nicht erreichbar", ""
+    except Exception as e:
+        return False, f"smbclient Authentifizierungsfehler: {str(e)}", ""
+
+
+def _upload_smbclient_recursive(local_directory, server, share):
+    """Versucht rekursiv mit smbclient zu uploaden (ohne Auth)"""
+    try:
         dir_name = os.path.basename(local_directory)
         cmd = f'smbclient "//{server}/{share}" -N -c "mkdir {dir_name}; prompt; recurse; cd {dir_name}; lcd {local_directory}; mput *"'
 
@@ -227,3 +287,54 @@ def upload_to_server_python(local_directory, server_url="smb://169.254.169.254/a
 
     except Exception as e:
         return False, f"Python Upload Fehler: {str(e)}", ""
+
+
+def test_server_connection(config_manager=None):
+    """Testet die Verbindung zum Server mit Anmeldedaten"""
+    try:
+        if config_manager:
+            settings = config_manager.get_settings()
+            server_url = settings.get("server_url", "smb://169.254.169.254/aktuell")
+        else:
+            server_url = "smb://169.254.169.254/aktuell"
+
+        server_share = server_url.replace("smb://", "")
+        parts = server_share.split("/", 1)
+        if len(parts) < 2:
+            return False, "Ungültige Server-URL"
+
+        server, share = parts
+
+        if platform.system() == "Windows":
+            # Test mit net use auf Windows
+            drive_letter = "T:"  # Test-Laufwerksbuchstabe
+
+            # Bestehende Verbindung trennen
+            subprocess.run(f"net use {drive_letter} /delete /y",
+                           shell=True, capture_output=True)
+
+            # Verbindung testen
+            net_use_cmd = f'net use {drive_letter} "\\\\{server}\\{share}" /user:aero aero'
+            result = subprocess.run(net_use_cmd, shell=True, capture_output=True, text=True)
+
+            # Verbindung trennen
+            subprocess.run(f"net use {drive_letter} /delete /y",
+                           shell=True, capture_output=True)
+
+            if result.returncode == 0:
+                return True, "Verbindung zum Server erfolgreich"
+            else:
+                return False, f"Verbindung fehlgeschlagen: {result.stderr}"
+
+        else:
+            # Test mit smbclient auf anderen Systemen
+            cmd = ["smbclient", f"//{server}/{share}", "-U", "aero%aero", "-c", "ls"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+            if result.returncode == 0:
+                return True, "Verbindung zum Server erfolgreich"
+            else:
+                return False, f"Verbindung fehlgeschlagen: {result.stderr}"
+
+    except Exception as e:
+        return False, f"Verbindungstest fehlgeschlagen: {str(e)}"

@@ -85,6 +85,10 @@ class DragDropFrame:
         # Doppelklick-Event für Videos
         self.video_tree.bind("<Double-1>", self._on_video_double_click)
 
+        # Drag & Drop für Video-Tabelle
+        self.video_tree.drop_target_register(DND_FILES)
+        self.video_tree.dnd_bind('<<Drop>>', self._handle_video_table_drop)
+
         # Steuerungs-Buttons für Videos
         video_button_frame = tk.Frame(self.video_tab)
         video_button_frame.pack(pady=5)
@@ -131,6 +135,10 @@ class DragDropFrame:
 
         # Doppelklick-Event für Fotos
         self.photo_tree.bind("<Double-1>", self._on_photo_double_click)
+
+        # Drag & Drop für Foto-Tabelle
+        self.photo_tree.drop_target_register(DND_FILES)
+        self.photo_tree.dnd_bind('<<Drop>>', self._handle_photo_table_drop)
 
         # Steuerungs-Buttons für Fotos
         photo_button_frame = tk.Frame(self.photo_tab)
@@ -406,3 +414,15 @@ class DragDropFrame:
                     subprocess.run(['xdg-open', file_path], check=True)
         except Exception as e:
             messagebox.showerror("Fehler", f"Datei konnte nicht geöffnet werden:\n{str(e)}")
+
+    def _handle_video_table_drop(self, event):
+        """Verarbeitet das Ablegen von Dateien in die Video-Tabelle"""
+        self.handle_drop(event)
+        # Wechsle zum Video-Tab nach dem Drop
+        self.notebook.select(0)
+
+    def _handle_photo_table_drop(self, event):
+        """Verarbeitet das Ablegen von Dateien in die Foto-Tabelle"""
+        self.handle_drop(event)
+        # Wechsle zum Foto-Tab nach dem Drop
+        self.notebook.select(1)

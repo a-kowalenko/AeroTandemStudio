@@ -102,16 +102,35 @@ class VideoGeneratorApp:
         self.test_server_connection_async()
 
     def create_header(self):
-        """Erstellt den Header mit Titel und Settings-Button"""
+        """Erstellt den Header mit Titel, Logo und Settings-Button"""
         header_frame = tk.Frame(self.root)
-        header_frame.pack(fill="x", pady=(0, 20))
+        header_frame.pack(fill="x")
+
+        # Logo links neben dem Titel (80x80)
+        img_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets", "logo.png"))
+        self.logo_image = None
+        if os.path.exists(img_path):
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(img_path).convert("RGBA")
+                img = img.resize((69, 69), Image.LANCZOS)
+                self.logo_image = ImageTk.PhotoImage(img)
+            except Exception:
+                try:
+                    self.logo_image = tk.PhotoImage(file=img_path)
+                except Exception:
+                    self.logo_image = None
+
+        if self.logo_image:
+            logo_label = tk.Label(header_frame, image=self.logo_image, bd=0)
+            logo_label.pack(side="left", padx=(0, 10))
 
         # Titel
         title_label = tk.Label(
             header_frame,
             text="Aero Tandem Studio",
             font=("Arial", 20, "bold"),
-            fg="#2E86C1"
+            fg="#009d8b"
         )
         title_label.pack(side="left")
 
@@ -119,12 +138,11 @@ class VideoGeneratorApp:
         self.settings_button = tk.Button(
             header_frame,
             text="⚙",  # Gear Icon
-            font=("Arial", 16),
+            font=("Arial", 18),
             command=self.show_settings,
             bg="#f0f0f0",
             relief="flat",
             width=3,
-            height=1
         )
         self.settings_button.pack(side="right")
 
@@ -162,8 +180,12 @@ class VideoGeneratorApp:
         self.form_fields.pack(pady=10, fill="x")
         self.drag_drop.pack(fill="both", expand=True, pady=10)
 
+        # Spacer to push the following right-column elements slightly down
+        self.right_spacer = tk.Frame(self.right_frame, height=20, bg=self.right_frame.cget("bg"))
+        self.right_spacer.pack(fill="x", expand=True)
+
         # Rechte Spalte
-        self.video_preview.pack(fill="x", expand=True, pady=(0, 8))
+        self.video_preview.pack(fill="x", pady=(0, 8))
         self.upload_frame.pack(pady=10, fill="x")
         self.erstellen_button.pack(pady=10, fill="x")
 

@@ -339,3 +339,100 @@ class VideoProcessor:
     def _cleanup(self):
         """Führt allgemeine Cleanup-Aufgaben durch"""
         self.reset_cancel_event()
+
+    def create_video_with_intro_only(self, form_data, combined_video_path):
+        """Erstellt nur noch das Intro und hängt es vor das kombinierte Video"""
+        thread = threading.Thread(
+            target=self._video_creation_with_intro_only_task,
+            args=(form_data, combined_video_path)
+        )
+        thread.start()
+        return thread
+
+    def _video_creation_with_intro_only_task(self, form_data, combined_video_path):
+        """Hauptlogik für das Hinzufügen des Intros zum kombinierten Video"""
+        try:
+            self._execute_video_creation_with_intro_only(form_data, combined_video_path)
+        except CancellationError:
+            self._handle_cancellation()
+        except Exception as e:
+            self._handle_error(e)
+        finally:
+            self._cleanup()
+
+    def _execute_video_creation_with_intro_only(self, form_data, combined_video_path):
+        """Fügt nur das Intro zum bereits kombinierten Video hinzu"""
+        load = form_data["load"]
+        gast = form_data["gast"]
+        tandemmaster = form_data["tandemmaster"]
+        videospringer = form_data["videospringer"]
+        datum = form_data["datum"]
+        dauer = form_data["dauer"]
+        ort = form_data["ort"]
+        speicherort = form_data["speicherort"]
+        outside_video = form_data["outside_video"]
+
+        full_output_path = ""
+        temp_files = []
+
+        try:
+            # Schritt 1: Videoinformationen des kombinierten Videos lesen
+            self._update_progress(1)
+            video_info = self._get_video_info(combined_video_path)
+            clip_width, clip_height, clip_fps = video_info
+
+            # Schritt 2: Textinhalte vorbereiten
+            self._update_progress(2)
+            drawtext_filter = self._prepare_text_overlay(
+                gast, tandemmaster, videospringer, datum, ort,
+                clip_height, outside_video
+            )
+
+            temp_titel_clip_path = os.path.join(tempfile.gettempdir(), "titel_intro.mp4")
+            temp_files.append(temp_titel_clip_path)
+
+            if not os.path.exists("assets/hintergrund.png"):
+                raise FileNotFoundError("hintergrund.png fehlt im assets/ Ordner")
+
+            # Schritt 3: Titelclip erstellen
+            self._update_progress(3)
+            self._create_title_clip(
+                temp_titel_clip_path, dauer, clip_fps, drawtext_filter
+            )
+
+            # Schritt 4: Concat-Liste für Intro + kombiniertes Video erstellen
+            self._update_progress(4)
+            concat_list_path = os.path.join(tempfile.gettempdir(), "final_concat_list.txt")
+            temp_files.append(concat_list_path)
+
+            with open(concat_list_path, "w", encoding="utf-8") as f:
+                f.write(f"file '{os.path.abspath(temp_titel_clip_path)}'\n")
+                f.write(f"file '{os.path.abspath(combined_video_path)}'\n")
+
+            # Schritt 5: Output-Pfad generieren
+            full_output_path = self._generate_output_path(
+                load, gast, tandemmaster, videospringer,
+                datum, speicherort, outside_video
+            )
+
+            # Schritt 6: Finales Video mit Intro erstellen
+            self._update_progress(5)
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_list_path,
+                "-c", "copy",
+                "-movflags", "+faststart",
+                full_output_path
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+            # Fertig
+            self._update_progress(6)
+            self._show_success_message(full_output_path)
+
+        except Exception as e:
+            if full_output_path and os.path.exists(full_output_path):
+                os.remove(full_output_path)
+            raise e
+        finally:
+            self._cleanup_temp_files(temp_files)

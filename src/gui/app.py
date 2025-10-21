@@ -1,10 +1,12 @@
 ﻿import tkinter as tk
 from tkinter import messagebox
 import threading
+import os
 from tkinterdnd2 import TkinterDnD
 
 from .components.form_fields import FormFields
 from .components.drag_drop import DragDropFrame
+from .components.video_preview import VideoPreview  # Neue Import
 from .components.progress_indicator import ProgressHandler
 from ..video.processor import VideoProcessor
 from ..utils.config import ConfigManager
@@ -62,24 +64,26 @@ class VideoGeneratorApp:
         self.config = ConfigManager()
         self.video_processor = None
         self.erstellen_button = None
+        self.combined_video_path = None
 
         self.setup_gui()
         self.ensure_dependencies()
 
     def setup_gui(self):
         self.root.title("Tandemvideo Generator")
-        self.root.geometry("600x750")
+        self.root.geometry("600x850")  # Höher für Vorschau
         self.root.config(padx=20, pady=20)
 
         # Hauptkomponenten erstellen
         self.form_fields = FormFields(self.root, self.config)
-        self.drag_drop = DragDropFrame(self.root)
+        self.drag_drop = DragDropFrame(self.root, self)  # App-Instanz übergeben
+        self.video_preview = VideoPreview(self.root)
         self.progress_handler = ProgressHandler(self.root)
 
         # Erstellen-Button
         self.erstellen_button = tk.Button(
             self.root,
-            text="Video Erstellen",
+            text="Video mit Intro erstellen",
             font=("Arial", 14, "bold"),
             command=self.erstelle_video,
             bg="#4CAF50",
@@ -92,45 +96,34 @@ class VideoGeneratorApp:
     def pack_components(self):
         self.form_fields.pack(pady=10)
         self.drag_drop.pack(fill="x", pady=10, ipady=20)
+        self.video_preview.pack(fill="x", pady=10)
         self.erstellen_button.pack(pady=20, ipady=5)
         self.progress_handler.pack_status_label()
 
     def load_settings(self):
         """Lädt die gespeicherten Einstellungen"""
-        pass  # Wird bereits in FormFields behandelt
+        pass
 
     def ensure_dependencies(self):
         """Stellt sicher, dass FFmpeg installiert ist"""
         self._start_ffmpeg_installer_overlayed()
 
     def _create_install_overlay(self):
-        """
-        Create and return an in-window modal overlay (Frame), a circular spinner instance and a status StringVar.
-        The overlay covers the entire root window and prevents interaction with underlying widgets.
-        """
+        """Erstellt Installations-Overlay"""
         overlay = tk.Frame(self.root, bg="#000000")
-        # place to cover whole window
         overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
         overlay.lift()
 
-        # Intercept mouse and keyboard events so underlying widgets can't be used
         def _block_event(e):
             return "break"
 
-        # common events to block
         for seq in ("<Button-1>", "<Button-2>", "<Button-3>", "<ButtonRelease>", "<Key>", "<MouseWheel>", "<Button>"):
             overlay.bind_all(seq, _block_event)
-
-        # semi-opaque effect by a slightly transparent-like color is not natively supported for Frames;
-        # use a darker color but keep the spinner container white for contrast
-        overlay.configure(bg="#000000")  # dark background
-        overlay.attributes = getattr(overlay, "attributes", None)  # no-op for safety
 
         container = tk.Frame(overlay, bg='white', bd=2, relief=tk.RIDGE)
         container_width = min(420, int(self.root.winfo_width() * 0.7 or 300))
         container.place(relx=0.5, rely=0.5, anchor='center', width=container_width)
 
-        # Spinner (circular)
         spinner = CircularSpinner(container, size=80, line_width=8, color="#2E86C1", speed=10)
         spinner.pack(padx=20, pady=(20, 6))
 
@@ -142,8 +135,7 @@ class VideoGeneratorApp:
         return overlay, spinner, status_var
 
     def _start_ffmpeg_installer_overlayed(self):
-        """Show in-window overlay and run ensure_ffmpeg_installed in a background thread."""
-
+        """Startet FFmpeg-Installation mit Overlay"""
         overlay, spinner, status_var = self._create_install_overlay()
         spinner.start()
 
@@ -155,7 +147,6 @@ class VideoGeneratorApp:
                 spinner.stop()
             except Exception:
                 pass
-            # unbind the blocking event handlers
             for seq in ("<Button-1>", "<Button-2>", "<Button-3>", "<ButtonRelease>", "<Key>", "<MouseWheel>",
                         "<Button>"):
                 try:
@@ -179,15 +170,23 @@ class VideoGeneratorApp:
         t = threading.Thread(target=installer_thread, daemon=True)
         t.start()
 
-    # In der erstelle_video Methode:
+    def update_video_preview(self, video_paths):
+        """Aktualisiert die Video-Vorschau (wird von DragDrop aufgerufen)"""
+        self.video_preview.update_preview(video_paths)
+
     def erstelle_video(self):
-        """Bereitet die Videoerstellung vor und startet sie in einem separaten Thread."""
+        """Bereitet die Videoerstellung mit Intro vor"""
         # Formulardaten sammeln
         form_data = self.form_fields.get_form_data()
-        video_paths = self.drag_drop.get_video_paths()  # Jetzt eine Liste!
+
+        # Verwende das kombinierte Video aus der Vorschau
+        combined_video_path = self.video_preview.get_combined_video_path()
+        if not combined_video_path or not os.path.exists(combined_video_path):
+            messagebox.showwarning("Fehler", "Bitte erstellen Sie zuerst eine Vorschau durch Drag & Drop von Videos.")
+            return
 
         # Validierung
-        errors = validate_form_data(form_data, video_paths)
+        errors = validate_form_data(form_data, [combined_video_path])
         if errors:
             messagebox.showwarning("Fehlende Eingabe", "\n".join(errors))
             return
@@ -197,8 +196,7 @@ class VideoGeneratorApp:
         self.config.save_settings(settings_data)
 
         # GUI für Verarbeitung vorbereiten
-        video_count = len(video_paths)
-        self.progress_handler.set_status(f"Status: Verarbeite {video_count} Video(s)... Bitte warten.")
+        self.progress_handler.set_status("Status: Füge Intro hinzu... Bitte warten.")
         self._switch_to_cancel_mode()
 
         # VideoProcessor initialisieren
@@ -209,12 +207,12 @@ class VideoGeneratorApp:
 
         # Videoerstellung im Thread starten
         video_thread = threading.Thread(
-            target=self.video_processor.create_video,
-            args=(form_data, video_paths)  # Jetzt Liste von Pfaden
+            target=self.video_processor.create_video_with_intro_only,
+            args=(form_data, combined_video_path)
         )
         video_thread.start()
 
-    def _update_progress(self, step, total_steps=7):
+    def _update_progress(self, step, total_steps=6):
         """Callback für Fortschrittsupdates"""
         self.root.after(0, self.progress_handler.update_progress, step, total_steps)
 
@@ -246,18 +244,17 @@ class VideoGeneratorApp:
     def _switch_to_create_mode(self):
         """Wechselt den Button zurück zum Erstellen-Modus"""
         self.erstellen_button.config(
-            text="Video Erstellen",
+            text="Video mit Intro erstellen",
             command=self.erstelle_video,
             bg="#4CAF50",
             state="normal"
         )
         self.progress_handler.reset()
-        self.drag_drop.reset()
 
     def abbrechen_prozess(self):
         """Bricht die laufende Videoerstellung ab"""
         self.progress_handler.set_status("Status: Abbruch wird eingeleitet...")
-        self.erstellen_button.config(state="disabled")  # Verhindert mehrfaches Klicken
+        self.erstellen_button.config(state="disabled")
 
         if self.video_processor:
             self.video_processor.cancel_process()

@@ -2,13 +2,15 @@
 from tkinter import ttk, messagebox
 from tkinterdnd2 import DND_FILES
 import os
+import subprocess
 
 
 class DragDropFrame:
-    def __init__(self, parent):
+    def __init__(self, parent, app_instance):  # App-Instanz als Parameter
         self.parent = parent
+        self.app = app_instance  # App-Instanz speichern
         self.frame = tk.Frame(parent, relief="sunken", borderwidth=2, padx=10, pady=10)
-        self.video_paths = []  # Liste für mehrere Videos
+        self.video_paths = []
         self.create_widgets()
 
     def create_widgets(self):
@@ -87,23 +89,17 @@ class DragDropFrame:
             self.drop_label.config(text="Keine gültigen .mp4 Dateien gefunden", fg="red")
 
     def _parse_dropped_files(self, data):
-        """Parst die abgelegten Dateien - unterstützt mehrere Dateien"""
+        """Parst die abgelegten Dateien"""
         filepaths = []
-
-        # Entferne geschweifte Klammern und teile bei mehreren Dateien
         clean_data = data.strip('{}')
 
-        # Windows: Dateien sind durch Leerzeichen getrennt, möglicherweise in {}
-        # Linux/macOS: Dateien sind in einer Liste
         if ' ' in clean_data:
-            # Wahrscheinlich Windows - Dateien durch Leerzeichen getrennt
             potential_files = clean_data.split(' ')
             for filepath in potential_files:
                 filepath = filepath.strip()
                 if filepath and os.path.exists(filepath):
                     filepaths.append(filepath)
         else:
-            # Einzelne Datei oder andere Formatierung
             if os.path.exists(clean_data):
                 filepaths.append(clean_data)
 
@@ -112,18 +108,19 @@ class DragDropFrame:
     def add_videos(self, new_videos):
         """Fügt neue Videos zur Liste hinzu und aktualisiert die Tabelle"""
         for video_path in new_videos:
-            if video_path not in self.video_paths:  # Vermeide Duplikate
+            if video_path not in self.video_paths:
                 self.video_paths.append(video_path)
 
         self._update_table()
+        # Vorschau über App-Instanz aktualisieren
+        if hasattr(self.app, 'update_video_preview'):
+            self.app.update_video_preview(self.video_paths)
 
     def _update_table(self):
         """Aktualisiert die Vorschautabelle"""
-        # Alte Einträge löschen
         for item in self.tree.get_children():
             self.tree.delete(item)
 
-        # Neue Einträge hinzufügen
         for i, video_path in enumerate(self.video_paths, 1):
             filename = os.path.basename(video_path)
             duration = self._get_video_duration(video_path)
@@ -132,15 +129,13 @@ class DragDropFrame:
             self.tree.insert("", "end", values=(i, filename, duration, size))
 
     def _get_video_duration(self, video_path):
-        """Ermittelt die Dauer des Videos (vereinfacht)"""
+        """Ermittelt die Dauer des Videos"""
         try:
-            # Für eine genauere Dauer-Erkennung könntest du moviepy verwenden
-            import subprocess
             result = subprocess.run([
                 'ffprobe', '-v', 'error', '-show_entries',
                 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1',
                 video_path
-            ], capture_output=True, text=True)
+            ], capture_output=True, text=True, timeout=5)
 
             if result.returncode == 0:
                 seconds = float(result.stdout.strip())
@@ -150,7 +145,7 @@ class DragDropFrame:
         except:
             pass
 
-        return "Unbekannt"
+        return "?:??"
 
     def _get_file_size(self, video_path):
         """Ermittelt die Dateigröße"""
@@ -169,12 +164,13 @@ class DragDropFrame:
         if selection:
             index = self.tree.index(selection[0])
             if index > 0:
-                # Tausche Elemente in der Liste
                 self.video_paths[index], self.video_paths[index - 1] = self.video_paths[index - 1], self.video_paths[
                     index]
                 self._update_table()
-                # Selektiere das verschobene Element
                 self.tree.selection_set(self.tree.get_children()[index - 1])
+                # Vorschau aktualisieren
+                if hasattr(self.app, 'update_video_preview'):
+                    self.app.update_video_preview(self.video_paths)
 
     def move_down(self):
         """Bewegt ausgewähltes Video nach unten"""
@@ -182,12 +178,13 @@ class DragDropFrame:
         if selection:
             index = self.tree.index(selection[0])
             if index < len(self.video_paths) - 1:
-                # Tausche Elemente in der Liste
                 self.video_paths[index], self.video_paths[index + 1] = self.video_paths[index + 1], self.video_paths[
                     index]
                 self._update_table()
-                # Selektiere das verschobene Element
                 self.tree.selection_set(self.tree.get_children()[index + 1])
+                # Vorschau aktualisieren
+                if hasattr(self.app, 'update_video_preview'):
+                    self.app.update_video_preview(self.video_paths)
 
     def remove_selected(self):
         """Entfernt ausgewähltes Video"""
@@ -196,12 +193,18 @@ class DragDropFrame:
             index = self.tree.index(selection[0])
             self.video_paths.pop(index)
             self._update_table()
+            # Vorschau aktualisieren
+            if hasattr(self.app, 'update_video_preview'):
+                self.app.update_video_preview(self.video_paths)
 
     def clear_all(self):
         """Entfernt alle Videos"""
         self.video_paths.clear()
         self._update_table()
         self.drop_label.config(text="Mehrere .mp4 Dateien hierher ziehen (Reihenfolge wird beibehalten)", fg="black")
+        # Vorschau zurücksetzen
+        if hasattr(self.app, 'update_video_preview'):
+            self.app.update_video_preview([])
 
     def get_video_paths(self):
         """Gibt die Liste der Video-Pfade zurück"""
@@ -210,11 +213,6 @@ class DragDropFrame:
     def has_videos(self):
         """Prüft ob Videos vorhanden sind"""
         return len(self.video_paths) > 0
-
-    def get_total_duration(self):
-        """Gibt die Gesamtdauer aller Videos zurück (vereinfacht)"""
-        # Diese Funktion könnte erweitert werden für eine echte Dauer-Berechnung
-        return len(self.video_paths)
 
     def reset(self):
         """Setzt die Komponente zurück"""

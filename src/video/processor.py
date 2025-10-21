@@ -48,6 +48,7 @@ class VideoProcessor:
         ort = form_data["ort"]
         speicherort = form_data["speicherort"]
         outside_video = form_data["outside_video"]
+        upload_to_server = form_data["upload_to_server"]
 
         full_output_path = ""
         temp_files = []
@@ -55,11 +56,13 @@ class VideoProcessor:
         try:
             # Schritt 1: Videoinformationen des kombinierten Videos lesen
             self._update_progress(1)
+            self._update_status("Ermittle Videoinformationen...")
             video_info = self._get_video_info(combined_video_path)
             clip_width, clip_height, clip_fps = video_info
 
             # Schritt 2: Textinhalte vorbereiten
             self._update_progress(2)
+            self._update_status("Bereite Text-Overlays vor...")
             drawtext_filter = self._prepare_text_overlay(
                 gast, tandemmaster, videospringer, datum, ort,
                 clip_height, outside_video
@@ -73,12 +76,14 @@ class VideoProcessor:
 
             # Schritt 3: Titelclip OHNE Audio erstellen
             self._update_progress(3)
+            self._update_status("Erstelle Titelclip...")
             self._create_title_clip_no_audio(
                 temp_titel_clip_path, dauer, clip_fps, drawtext_filter
             )
 
             # Schritt 4: Concat-Liste für Intro + kombiniertes Video erstellen
             self._update_progress(4)
+            self._update_status("Erstelle Concat-Liste...")
             concat_list_path = os.path.join(tempfile.gettempdir(), "final_concat_list.txt")
             temp_files.append(concat_list_path)
 
@@ -88,6 +93,7 @@ class VideoProcessor:
 
             # Schritt 5: Temporäres Video ohne Audio erstellen (nur Konkatenierung)
             self._update_progress(5)
+            self._update_status("Kombiniere Videos ohne Audio...")
             temp_video_no_audio = os.path.join(tempfile.gettempdir(), "temp_no_audio.mp4")
             temp_files.append(temp_video_no_audio)
 
@@ -103,25 +109,40 @@ class VideoProcessor:
             ], check=True, capture_output=True, text=True)
 
             # Schritt 6: Output-Pfad generieren
+            self._update_progress(6)
+            self._update_status("Generiere Ausgabe-Pfad...")
             full_output_path = self._generate_output_path(
                 load, gast, tandemmaster, videospringer,
                 datum, speicherort, outside_video
             )
 
             # Schritt 7: Finales Video mit ursprünglicher Audio erstellen
-            self._update_progress(6)
+            self._update_progress(7)
+            self._update_status("Erstelle finales Video mit Audio...")
             self._create_final_video_with_original_audio(
                 temp_video_no_audio, combined_video_path, full_output_path, dauer
             )
 
             # Schritt 8: Fotos in Output-Verzeichnis kopieren
-            self._update_progress(7)
+            self._update_progress(8)
             if photo_paths:
+                self._update_status("Kopiere Fotos in Ausgabe-Verzeichnis...")
                 self._copy_photos_to_output_directory(photo_paths, full_output_path)
 
+            # Schritt 9: Auf Server uploaden falls gewünscht
+            self._update_progress(9)
+            server_message = ""
+            if upload_to_server:
+                self._update_status("Lade Video auf Server hoch...")
+                success, message, server_path = self._upload_to_server(full_output_path)
+                server_message = f"\nServer: {message}" if message else ""
+            else:
+                success = True
+                message = ""
+
             # Fertig
-            self._update_progress(8)
-            self._show_success_message(full_output_path)
+            self._update_progress(10)
+            self._show_success_message(full_output_path, server_message)
 
         except Exception as e:
             if full_output_path and os.path.exists(full_output_path):
@@ -301,15 +322,38 @@ class VideoProcessor:
 
         return full_output_path
 
-    def _update_progress(self, step, total_steps=7):
+    def _upload_to_server(self, local_video_path):
+        """Lädt das erstellte Verzeichnis auf den Server hoch"""
+        try:
+            from ..utils.file_utils import upload_to_server_simple
+
+            # Verzeichnis des Videos ermitteln
+            video_dir = os.path.dirname(local_video_path)
+
+            # Upload durchführen
+            success, message, server_path = upload_to_server_simple(video_dir)
+
+            if success:
+                print(f"Server Upload erfolgreich: {server_path}")
+            else:
+                print(f"Server Upload fehlgeschlagen: {message}")
+
+            return success, message, server_path
+
+        except Exception as e:
+            error_msg = f"Upload Fehler: {str(e)}"
+            print(error_msg)
+            return False, error_msg, ""
+
+    def _update_progress(self, step, total_steps=10):
         """Aktualisiert den Fortschritt"""
         if self.progress_callback:
             self.progress_callback(step, total_steps)
 
-    def _show_success_message(self, output_path):
+    def _show_success_message(self, output_path, server_message=""):
         """Zeigt Erfolgsmeldung an"""
         if self.status_callback:
-            self.status_callback("success", f"Das finale Video mit Intro wurde unter '{output_path}' gespeichert.")
+            self.status_callback("success", f"Das finale Video mit Intro wurde unter '{output_path}' gespeichert." + (f"\n{server_message}" if server_message != "" else server_message))
 
     def _handle_cancellation(self):
         """Behandelt Abbruch durch Benutzer"""
@@ -320,6 +364,11 @@ class VideoProcessor:
         """Behandelt Fehler während der Verarbeitung"""
         if self.status_callback:
             self.status_callback("error", f"Fehler bei der Videoerstellung:\n{error}")
+
+    def _update_status(self, message):
+        """Aktualisiert den Status"""
+        if self.status_callback:
+            self.status_callback("update", message)
 
     def _cleanup_temp_files(self, temp_files):
         """Räumt temporäre Dateien auf"""

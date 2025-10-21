@@ -71,7 +71,7 @@ class VideoGeneratorApp:
 
     def setup_gui(self):
         self.root.title("Aero Tandem Studio")
-        self.root.geometry("1000x750")  # Breiter für zwei Spalten
+        self.root.geometry("1280x900")  # Breiter für zwei Spalten
         self.root.config(padx=20, pady=20)
 
         # Haupt-Container mit zwei Spalten
@@ -90,11 +90,22 @@ class VideoGeneratorApp:
         self.form_fields = FormFields(self.left_frame, self.config)
         self.drag_drop = DragDropFrame(self.left_frame, self)
 
-        # Rechte Spalte: Vorschau und Button
+        # Rechte Spalte: Vorschau, Checkbox und Button
         self.video_preview = VideoPreview(self.right_frame)
+
+        # Checkbox für Server-Upload (NEU - direkt in rechter Spalte)
+        self.upload_to_server_var = tk.BooleanVar()
+        self.upload_checkbox = tk.Checkbutton(
+            self.right_frame,
+            text="Auf Server laden",
+            variable=self.upload_to_server_var,
+            font=("Arial", 12)
+        )
+
+        # Erstellen-Button
         self.erstellen_button = tk.Button(
             self.right_frame,
-            text="Video mit Intro erstellen",
+            text="Erstellen",
             font=("Arial", 14, "bold"),
             command=self.erstelle_video,
             bg="#4CAF50",
@@ -116,6 +127,7 @@ class VideoGeneratorApp:
 
         # Rechte Spalte
         self.video_preview.pack(fill="both", expand=True, pady=(0, 10))
+        self.upload_checkbox.pack(pady=10, fill="x")
         self.erstellen_button.pack(pady=10, fill="x")
 
         # Progress unten
@@ -123,7 +135,11 @@ class VideoGeneratorApp:
 
     def load_settings(self):
         """Lädt die gespeicherten Einstellungen"""
-        pass
+        try:
+            settings = self.config.get_settings()
+            self.upload_to_server_var.set(settings.get("upload_to_server", False))
+        except:
+            self.upload_to_server_var.set(False)
 
     def ensure_dependencies(self):
         """Stellt sicher, dass FFmpeg installiert ist"""
@@ -200,6 +216,9 @@ class VideoGeneratorApp:
         # Formulardaten sammeln
         form_data = self.form_fields.get_form_data()
 
+        # Server-Upload Einstellung hinzufügen
+        form_data["upload_to_server"] = self.upload_to_server_var.get()
+
         # Verwende das kombinierte Video aus der Vorschau
         combined_video_path = self.video_preview.get_combined_video_path()
         if not combined_video_path or not os.path.exists(combined_video_path):
@@ -217,6 +236,7 @@ class VideoGeneratorApp:
 
         # Einstellungen speichern
         settings_data = self.form_fields.get_settings_data()
+        settings_data["upload_to_server"] = form_data["upload_to_server"]  # Hinzufügen
         self.config.save_settings(settings_data)
 
         # GUI für Verarbeitung vorbereiten
@@ -225,6 +245,12 @@ class VideoGeneratorApp:
         status_text = f"Status: Verarbeite {video_count} Video(s)"
         if photo_count > 0:
             status_text += f" und kopiere {photo_count} Foto(s)"
+        status_text += "... Bitte warten."
+
+        # Server-Upload Info hinzufügen
+        if form_data["upload_to_server"]:
+            status_text += " - Lade auf Server hoch"
+
         status_text += "... Bitte warten."
 
         self.progress_handler.set_status("Status: Füge Intro hinzu... Bitte warten.")
@@ -257,6 +283,10 @@ class VideoGeneratorApp:
             self.root.after(0, self.progress_handler.set_status, "Status: Fehler aufgetreten.")
         elif status_type == "cancelled":
             self.root.after(0, self.progress_handler.set_status, "Status: Erstellung abgebrochen.")
+        elif status_type == "update":
+            self.root.after(0, self.progress_handler.set_status, f"Status: {message}.")
+            return
+
 
         self.root.after(0, self._switch_to_create_mode)
 

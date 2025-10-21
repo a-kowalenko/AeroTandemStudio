@@ -179,14 +179,15 @@ class VideoGeneratorApp:
         t = threading.Thread(target=installer_thread, daemon=True)
         t.start()
 
+    # In der erstelle_video Methode:
     def erstelle_video(self):
         """Bereitet die Videoerstellung vor und startet sie in einem separaten Thread."""
         # Formulardaten sammeln
         form_data = self.form_fields.get_form_data()
-        video_path = self.drag_drop.get_video_path()
+        video_paths = self.drag_drop.get_video_paths()  # Jetzt eine Liste!
 
         # Validierung
-        errors = validate_form_data(form_data, video_path)
+        errors = validate_form_data(form_data, video_paths)
         if errors:
             messagebox.showwarning("Fehlende Eingabe", "\n".join(errors))
             return
@@ -196,8 +197,8 @@ class VideoGeneratorApp:
         self.config.save_settings(settings_data)
 
         # GUI für Verarbeitung vorbereiten
-        self.progress_handler.pack_progress_bar()
-        self.progress_handler.set_status("Status: Video wird erstellt... Bitte warten.")
+        video_count = len(video_paths)
+        self.progress_handler.set_status(f"Status: Verarbeite {video_count} Video(s)... Bitte warten.")
         self._switch_to_cancel_mode()
 
         # VideoProcessor initialisieren
@@ -209,7 +210,7 @@ class VideoGeneratorApp:
         # Videoerstellung im Thread starten
         video_thread = threading.Thread(
             target=self.video_processor.create_video,
-            args=(form_data, video_path)
+            args=(form_data, video_paths)  # Jetzt Liste von Pfaden
         )
         video_thread.start()
 

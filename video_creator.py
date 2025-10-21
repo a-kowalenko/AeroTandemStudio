@@ -320,7 +320,9 @@ def _video_creation_task(load, gast, tandemmaster, videospringer, datum, dauer, 
         if full_output_path and os.path.exists(full_output_path):
             os.remove(full_output_path)
     except Exception as e:
-        messagebox.showerror("Fehler", f"Fehler bei der Videoerstellung:\n{e}")
+        error_message = f"Fehler bei der Videoerstellung:\n{e}"
+        print(error_message)
+        messagebox.showerror("Fehler", error_message)
         status_label.config(text="Status: Fehler aufgetreten.")
     finally:
         root.after(0, reset_gui_state)

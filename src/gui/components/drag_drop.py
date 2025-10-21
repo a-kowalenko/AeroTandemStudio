@@ -1,44 +1,224 @@
 ﻿import tkinter as tk
+from tkinter import ttk, messagebox
 from tkinterdnd2 import DND_FILES
 import os
-from tkinter import messagebox
 
 
 class DragDropFrame:
     def __init__(self, parent):
         self.parent = parent
         self.frame = tk.Frame(parent, relief="sunken", borderwidth=2, padx=10, pady=10)
-        self.dropped_video_path_var = tk.StringVar()
+        self.video_paths = []  # Liste für mehrere Videos
         self.create_widgets()
 
     def create_widgets(self):
+        # Haupt-Label
         self.drop_label = tk.Label(self.frame,
-                                   text="Geschnittene .mp4 Datei hierher ziehen",
+                                   text="Mehrere .mp4 Dateien hierher ziehen (Reihenfolge wird beibehalten)",
                                    font=("Arial", 12))
-        self.drop_label.pack(expand=True)
+        self.drop_label.pack(pady=10)
+
+        # Tabelle für Vorschau der Videos
+        self.create_preview_table()
+
         self.setup_drag_drop()
+
+    def create_preview_table(self):
+        # Frame für die Tabelle
+        table_frame = tk.Frame(self.frame)
+        table_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Scrollbar für die Tabelle
+        scrollbar = ttk.Scrollbar(table_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Treeview als Tabelle
+        self.tree = ttk.Treeview(
+            table_frame,
+            columns=("Nr", "Dateiname", "Dauer", "Größe"),
+            show="headings",
+            height=6,
+            yscrollcommand=scrollbar.set
+        )
+
+        # Spalten konfigurieren
+        self.tree.heading("Nr", text="#")
+        self.tree.heading("Dateiname", text="Dateiname")
+        self.tree.heading("Dauer", text="Dauer")
+        self.tree.heading("Größe", text="Größe")
+
+        self.tree.column("Nr", width=40, anchor="center")
+        self.tree.column("Dateiname", width=200)
+        self.tree.column("Dauer", width=80, anchor="center")
+        self.tree.column("Größe", width=80, anchor="center")
+
+        self.tree.pack(side=tk.LEFT, fill="both", expand=True)
+        scrollbar.config(command=self.tree.yview)
+
+        # Buttons für Bearbeitung der Reihenfolge
+        button_frame = tk.Frame(self.frame)
+        button_frame.pack(pady=5)
+
+        tk.Button(button_frame, text="Nach oben", command=self.move_up).pack(side=tk.LEFT, padx=2)
+        tk.Button(button_frame, text="Nach unten", command=self.move_down).pack(side=tk.LEFT, padx=2)
+        tk.Button(button_frame, text="Entfernen", command=self.remove_selected).pack(side=tk.LEFT, padx=2)
+        tk.Button(button_frame, text="Alle löschen", command=self.clear_all).pack(side=tk.LEFT, padx=2)
 
     def setup_drag_drop(self):
         self.drop_label.drop_target_register(DND_FILES)
         self.drop_label.dnd_bind('<<Drop>>', self.handle_drop)
 
     def handle_drop(self, event):
-        filepath = event.data.strip('{}')
+        """Verarbeitet das Ablegen von Dateien"""
+        filepaths = self._parse_dropped_files(event.data)
+        valid_videos = []
 
-        if os.path.isfile(filepath) and filepath.lower().endswith('.mp4'):
-            self.dropped_video_path_var.set(filepath)
-            self.drop_label.config(text=f"Datei: {os.path.basename(filepath)}", fg="green")
+        for filepath in filepaths:
+            if os.path.isfile(filepath) and filepath.lower().endswith('.mp4'):
+                valid_videos.append(filepath)
+            else:
+                messagebox.showwarning("Ungültige Datei",
+                                       f"'{os.path.basename(filepath)}' ist keine gültige .mp4 Datei")
+
+        if valid_videos:
+            self.add_videos(valid_videos)
+            self.drop_label.config(text=f"{len(valid_videos)} Video(s) hinzugefügt", fg="green")
         else:
-            self.dropped_video_path_var.set("")
-            self.drop_label.config(text="Ungültig! Bitte nur eine einzelne .mp4 Datei ablegen.", fg="red")
-            messagebox.showerror("Ungültiger Dateityp", "Bitte ziehen Sie nur .mp4-Dateien in das Feld.")
+            self.drop_label.config(text="Keine gültigen .mp4 Dateien gefunden", fg="red")
 
-    def get_video_path(self):
-        return self.dropped_video_path_var.get()
+    def _parse_dropped_files(self, data):
+        """Parst die abgelegten Dateien - unterstützt mehrere Dateien"""
+        filepaths = []
+
+        # Entferne geschweifte Klammern und teile bei mehreren Dateien
+        clean_data = data.strip('{}')
+
+        # Windows: Dateien sind durch Leerzeichen getrennt, möglicherweise in {}
+        # Linux/macOS: Dateien sind in einer Liste
+        if ' ' in clean_data:
+            # Wahrscheinlich Windows - Dateien durch Leerzeichen getrennt
+            potential_files = clean_data.split(' ')
+            for filepath in potential_files:
+                filepath = filepath.strip()
+                if filepath and os.path.exists(filepath):
+                    filepaths.append(filepath)
+        else:
+            # Einzelne Datei oder andere Formatierung
+            if os.path.exists(clean_data):
+                filepaths.append(clean_data)
+
+        return filepaths
+
+    def add_videos(self, new_videos):
+        """Fügt neue Videos zur Liste hinzu und aktualisiert die Tabelle"""
+        for video_path in new_videos:
+            if video_path not in self.video_paths:  # Vermeide Duplikate
+                self.video_paths.append(video_path)
+
+        self._update_table()
+
+    def _update_table(self):
+        """Aktualisiert die Vorschautabelle"""
+        # Alte Einträge löschen
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        # Neue Einträge hinzufügen
+        for i, video_path in enumerate(self.video_paths, 1):
+            filename = os.path.basename(video_path)
+            duration = self._get_video_duration(video_path)
+            size = self._get_file_size(video_path)
+
+            self.tree.insert("", "end", values=(i, filename, duration, size))
+
+    def _get_video_duration(self, video_path):
+        """Ermittelt die Dauer des Videos (vereinfacht)"""
+        try:
+            # Für eine genauere Dauer-Erkennung könntest du moviepy verwenden
+            import subprocess
+            result = subprocess.run([
+                'ffprobe', '-v', 'error', '-show_entries',
+                'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1',
+                video_path
+            ], capture_output=True, text=True)
+
+            if result.returncode == 0:
+                seconds = float(result.stdout.strip())
+                minutes = int(seconds // 60)
+                secs = int(seconds % 60)
+                return f"{minutes}:{secs:02d}"
+        except:
+            pass
+
+        return "Unbekannt"
+
+    def _get_file_size(self, video_path):
+        """Ermittelt die Dateigröße"""
+        try:
+            size_bytes = os.path.getsize(video_path)
+            if size_bytes > 1024 * 1024:
+                return f"{size_bytes / (1024 * 1024):.1f} MB"
+            else:
+                return f"{size_bytes / 1024:.1f} KB"
+        except:
+            return "Unbekannt"
+
+    def move_up(self):
+        """Bewegt ausgewähltes Video nach oben"""
+        selection = self.tree.selection()
+        if selection:
+            index = self.tree.index(selection[0])
+            if index > 0:
+                # Tausche Elemente in der Liste
+                self.video_paths[index], self.video_paths[index - 1] = self.video_paths[index - 1], self.video_paths[
+                    index]
+                self._update_table()
+                # Selektiere das verschobene Element
+                self.tree.selection_set(self.tree.get_children()[index - 1])
+
+    def move_down(self):
+        """Bewegt ausgewähltes Video nach unten"""
+        selection = self.tree.selection()
+        if selection:
+            index = self.tree.index(selection[0])
+            if index < len(self.video_paths) - 1:
+                # Tausche Elemente in der Liste
+                self.video_paths[index], self.video_paths[index + 1] = self.video_paths[index + 1], self.video_paths[
+                    index]
+                self._update_table()
+                # Selektiere das verschobene Element
+                self.tree.selection_set(self.tree.get_children()[index + 1])
+
+    def remove_selected(self):
+        """Entfernt ausgewähltes Video"""
+        selection = self.tree.selection()
+        if selection:
+            index = self.tree.index(selection[0])
+            self.video_paths.pop(index)
+            self._update_table()
+
+    def clear_all(self):
+        """Entfernt alle Videos"""
+        self.video_paths.clear()
+        self._update_table()
+        self.drop_label.config(text="Mehrere .mp4 Dateien hierher ziehen (Reihenfolge wird beibehalten)", fg="black")
+
+    def get_video_paths(self):
+        """Gibt die Liste der Video-Pfade zurück"""
+        return self.video_paths.copy()
+
+    def has_videos(self):
+        """Prüft ob Videos vorhanden sind"""
+        return len(self.video_paths) > 0
+
+    def get_total_duration(self):
+        """Gibt die Gesamtdauer aller Videos zurück (vereinfacht)"""
+        # Diese Funktion könnte erweitert werden für eine echte Dauer-Berechnung
+        return len(self.video_paths)
 
     def reset(self):
-        self.dropped_video_path_var.set("")
-        self.drop_label.config(text="Geschnittene .mp4 Datei hierher ziehen", fg="black")
+        """Setzt die Komponente zurück"""
+        self.clear_all()
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)

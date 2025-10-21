@@ -63,6 +63,7 @@ class VideoPreview:
 
         self.status_label.config(text="Erstelle Vorschau...", fg="blue")
         self.play_button.config(state="disabled")
+        self.clips_label.config(text=f"Anzahl Clips: {len(video_paths)}")
 
         # Im Thread verarbeiten um UI nicht zu blockieren
         thread = threading.Thread(target=self._create_combined_preview, args=(video_paths,))
@@ -114,6 +115,7 @@ class VideoPreview:
 
         self.duration_label.config(text=f"Gesamtdauer: {total_duration}")
         self.size_label.config(text=f"Dateigröße: {total_size}")
+        self.clips_label.config(text=f"Anzahl Clips: {len(video_paths)}")
         self.status_label.config(text="Vorschau bereit", fg="green")
         self.play_button.config(state="normal")
 
@@ -122,6 +124,7 @@ class VideoPreview:
         self.status_label.config(text=error_msg, fg="red")
         self.duration_label.config(text="Gesamtdauer: --:--")
         self.size_label.config(text="Dateigröße: --")
+        self.clips_label.config(text="Anzahl Clips: 0")
         self.play_button.config(state="disabled")
         self.combined_video_path = None
 
@@ -204,6 +207,7 @@ class VideoPreview:
         self.is_playing = False
         self.duration_label.config(text="Gesamtdauer: --:--")
         self.size_label.config(text="Dateigröße: --")
+        self.clips_label.config(text="Anzahl Clips: 0")
         self.status_label.config(text="Keine Vorschau verfügbar", fg="gray")
         self.play_button.config(state="disabled")
         self.stop_button.config(state="disabled")

@@ -70,7 +70,7 @@ class VideoGeneratorApp:
         self.ensure_dependencies()
 
     def setup_gui(self):
-        self.root.title("Tandemvideo Generator")
+        self.root.title("Aero Tandem Studio")
         self.root.geometry("1000x750")  # Breiter für zwei Spalten
         self.root.config(padx=20, pady=20)
 

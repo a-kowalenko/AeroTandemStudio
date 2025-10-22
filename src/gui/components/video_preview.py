@@ -22,6 +22,7 @@ class VideoPreview:
         self.processing_thread = None
         self.ffmpeg_process = None
         self.cancellation_event = threading.Event()
+        self.pending_restart_callback = None
         # ---
 
         self.create_widgets()
@@ -75,14 +76,24 @@ class VideoPreview:
         self.progress_frame.pack(pady=5, fill='x')
 
     def update_preview(self, video_paths):
-        """Erstellt eine Vorschau aus allen Videos und aktualisiert die UI"""
+        """
+        Public entry point to update the preview.
+        Handles cancellation of an ongoing process before starting a new one.
+        """
         if self.processing_thread and self.processing_thread.is_alive():
-            print("Preview creation is already in progress.")
-            return None
+            # A process is running. Request a restart after it's cancelled.
+            self.pending_restart_callback = lambda: self._start_preview_creation_thread(video_paths)
+            self.cancel_creation()
+            print("Preview creation in progress. Queuing a restart.")
+        else:
+            # No process is running, start directly.
+            self._start_preview_creation_thread(video_paths)
 
+    def _start_preview_creation_thread(self, video_paths):
+        """Starts the background thread to create the preview."""
         if not video_paths:
             self.clear_preview()
-            return None
+            return
 
         # Store the current paths for a potential retry
         self.last_video_paths = video_paths
@@ -93,7 +104,6 @@ class VideoPreview:
         self.status_label.config(text="Erstelle Vorschau...", fg="blue")
         self.play_button.config(state="disabled")
 
-        # --- MODIFIED: Configure button for cancellation ---
         self.action_button.config(text="⏹ Erstellung abbrechen",
                                   command=self.cancel_creation,
                                   state="normal")
@@ -104,8 +114,6 @@ class VideoPreview:
 
         self.processing_thread = threading.Thread(target=self._create_combined_preview, args=(video_paths,))
         self.processing_thread.start()
-
-        return self.processing_thread
 
     def _create_combined_preview(self, video_paths):
         """Erstellt ein kombiniertes Vorschau-Video aus allen Clips"""
@@ -144,8 +152,23 @@ class VideoPreview:
             if not self.cancellation_event.is_set():
                 self.parent.after(0, self._update_ui_error, f"Fehler: {str(e)}")
         finally:
-            self.processing_thread = None
-            self.ffmpeg_process = None
+            # Schedule finalization on the main GUI thread for thread-safety.
+            if self.parent.winfo_exists():
+                self.parent.after(0, self._finalize_processing)
+
+    def _finalize_processing(self):
+        """
+        Cleans up after a thread finishes and triggers a pending restart if requested.
+        This method MUST run on the main GUI thread.
+        """
+        self.processing_thread = None
+        self.ffmpeg_process = None
+
+        if self.pending_restart_callback:
+            # A restart was requested.
+            callback = self.pending_restart_callback
+            self.pending_restart_callback = None
+            callback()  # This will call _start_preview_creation_thread with the new paths
 
     def _create_fast_combined_video(self, video_paths):
         """Kombiniert Videos schnell ohne Re-Encoding"""
@@ -434,6 +457,7 @@ class VideoPreview:
 
     def clear_preview(self):
         """Setzt die Vorschau zurück und löscht die temporäre Datei"""
+        self.pending_restart_callback = None  # Clear any pending restart
         self.cancel_creation()
         if self.combined_video_path and os.path.exists(self.combined_video_path):
             try:

@@ -335,8 +335,15 @@ class DragDropFrame:
         self._update_photo_table()
 
         # Vorschau nur mit Videos aktualisieren
-        if hasattr(self.app, 'update_video_preview') and new_videos_added:
-            self.app.update_video_preview(self.video_paths)
+        if new_videos_added:
+            self._update_app_preview()
+
+    def _update_app_preview(self, video_paths=None):
+        """Fordert eine Aktualisierung der Vorschau über die Hauptanwendung an."""
+        paths = self.video_paths.copy() if video_paths is None else video_paths.copy()
+
+        if hasattr(self.app, 'update_video_preview'):
+            self.app.update_video_preview(paths)
 
     def _update_video_table(self):
         """Aktualisiert die Video-Tabelle"""
@@ -422,8 +429,7 @@ class DragDropFrame:
                 self._update_video_table()
                 self.video_tree.selection_set(self.video_tree.get_children()[index - 1])
                 # Vorschau aktualisieren
-                if hasattr(self.app, 'update_video_preview'):
-                    self.app.update_video_preview(self.video_paths)
+                self._update_app_preview()
 
     def move_video_down(self):
         """Bewegt ausgewähltes Video nach unten"""
@@ -436,8 +442,7 @@ class DragDropFrame:
                 self._update_video_table()
                 self.video_tree.selection_set(self.video_tree.get_children()[index + 1])
                 # Vorschau aktualisieren
-                if hasattr(self.app, 'update_video_preview'):
-                    self.app.update_video_preview(self.video_paths)
+                self._update_app_preview()
 
     def remove_selected_video(self):
         """Entfernt ausgewähltes Video"""
@@ -447,8 +452,7 @@ class DragDropFrame:
             self.video_paths.pop(index)
             self._update_video_table()
             # Vorschau aktualisieren
-            if hasattr(self.app, 'update_video_preview'):
-                self.app.update_video_preview(self.video_paths)
+            self._update_app_preview()
 
     def remove_selected_photo(self):
         """Entfernt ausgewähltes Foto"""
@@ -463,8 +467,7 @@ class DragDropFrame:
         self.video_paths.clear()
         self._update_video_table()
         # Vorschau zurücksetzen
-        if hasattr(self.app, 'update_video_preview'):
-            self.app.update_video_preview([])
+        self._update_app_preview([])
 
     def clear_photos(self):
         """Entfernt alle Fotos"""
@@ -542,3 +545,4 @@ class DragDropFrame:
         self.handle_drop(event)
         # Wechsle zum Foto-Tab nach dem Drop
         self.notebook.select(1)
+

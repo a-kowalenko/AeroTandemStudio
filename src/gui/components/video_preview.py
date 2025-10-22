@@ -4,6 +4,7 @@ import os
 import tempfile
 import subprocess
 import threading
+import json
 
 
 class VideoPreview:
@@ -36,6 +37,10 @@ class VideoPreview:
         self.clips_label = tk.Label(info_frame, text="Anzahl Clips: 0", font=("Arial", 10))
         self.clips_label.pack(anchor="w")
 
+        # Encoding-Info
+        self.encoding_label = tk.Label(info_frame, text="Encoding: --", font=("Arial", 9), fg="gray")
+        self.encoding_label.pack(anchor="w")
+
         # Steuerungs-Buttons
         control_frame = tk.Frame(self.frame)
         control_frame.pack(pady=10)
@@ -63,7 +68,8 @@ class VideoPreview:
 
         self.status_label.config(text="Erstelle Vorschau...", fg="blue")
         self.play_button.config(state="disabled")
-        self.clips_label.config(text=f"Anzahl Videos: {len(video_paths)}")  # Text angepasst
+        self.encoding_label.config(text="Encoding: Prüfe Formate...")
+        self.clips_label.config(text=f"Anzahl Videos: {len(video_paths)}")
 
         # Im Thread verarbeiten um UI nicht zu blockieren
         thread = threading.Thread(target=self._create_combined_preview, args=(video_paths,))
@@ -74,6 +80,12 @@ class VideoPreview:
     def _create_combined_preview(self, video_paths):
         """Erstellt ein kombiniertes Vorschau-Video aus allen Clips"""
         try:
+            # Video-Formate prüfen
+            format_info = self._check_video_formats(video_paths)
+            needs_reencoding = not format_info["compatible"]
+
+            self.parent.after(0, self._update_encoding_info, format_info)
+
             # Concat-Liste erstellen
             concat_list_path = os.path.join(tempfile.gettempdir(), "preview_concat_list.txt")
 
@@ -84,15 +96,34 @@ class VideoPreview:
             # Temporäre Ausgabedatei
             self.combined_video_path = os.path.join(tempfile.gettempdir(), "preview_combined.mp4")
 
-            # Videos ohne Rekodierung kombinieren
-            result = subprocess.run([
-                "ffmpeg", "-y",
-                "-f", "concat", "-safe", "0",
-                "-i", concat_list_path,
-                "-c", "copy",
-                "-movflags", "+faststart",
-                self.combined_video_path
-            ], capture_output=True, text=True)
+            if needs_reencoding:
+                # Mit Re-Encoding kombinieren (langsamer, aber kompatibel)
+                self.parent.after(0, lambda: self.status_label.config(
+                    text="Verschiedene Formate - kodiere neu...", fg="orange"))
+
+                result = subprocess.run([
+                    "ffmpeg", "-y",
+                    "-f", "concat", "-safe", "0",
+                    "-i", concat_list_path,
+                    "-c:v", "libx264", "-preset", "fast",
+                    "-crf", "23",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-movflags", "+faststart",
+                    self.combined_video_path
+                ], capture_output=True, text=True)
+            else:
+                # Ohne Re-Encoding kombinieren (schnell)
+                self.parent.after(0, lambda: self.status_label.config(
+                    text="Kombiniere Videos (schnell)...", fg="blue"))
+
+                result = subprocess.run([
+                    "ffmpeg", "-y",
+                    "-f", "concat", "-safe", "0",
+                    "-i", concat_list_path,
+                    "-c", "copy",
+                    "-movflags", "+faststart",
+                    self.combined_video_path
+                ], capture_output=True, text=True)
 
             # Aufräumen
             try:
@@ -102,14 +133,109 @@ class VideoPreview:
 
             if result.returncode == 0:
                 # UI aktualisieren
-                self.parent.after(0, self._update_ui_success, video_paths)
+                self.parent.after(0, self._update_ui_success, video_paths, needs_reencoding)
             else:
                 self.parent.after(0, self._update_ui_error, "Vorschau konnte nicht erstellt werden")
 
         except Exception as e:
             self.parent.after(0, self._update_ui_error, f"Fehler: {str(e)}")
 
-    def _update_ui_success(self, video_paths):
+    def _check_video_formats(self, video_paths):
+        """Prüft ob alle Videos das gleiche Format, Auflösung und FPS haben"""
+        if len(video_paths) <= 1:
+            return {"compatible": True, "details": "Nur ein Video - kompatibel"}
+
+        formats = []
+        for video_path in video_paths:
+            try:
+                result = subprocess.run([
+                    'ffprobe', '-v', 'quiet',
+                    '-print_format', 'json',
+                    '-show_format', '-show_streams',
+                    video_path
+                ], capture_output=True, text=True, timeout=10)
+
+                if result.returncode == 0:
+                    info = json.loads(result.stdout)
+
+                    # Finde Video-Stream
+                    video_stream = None
+                    for stream in info.get('streams', []):
+                        if stream.get('codec_type') == 'video':
+                            video_stream = stream
+                            break
+
+                    if video_stream:
+                        format_info = {
+                            'codec_name': video_stream.get('codec_name', 'unknown'),
+                            'width': video_stream.get('width', 0),
+                            'height': video_stream.get('height', 0),
+                            'r_frame_rate': video_stream.get('r_frame_rate', '0/0'),
+                            'pix_fmt': video_stream.get('pix_fmt', 'unknown')
+                        }
+                        formats.append(format_info)
+                    else:
+                        formats.append({'error': 'No video stream'})
+                else:
+                    formats.append({'error': 'FFprobe failed'})
+
+            except Exception as e:
+                formats.append({'error': str(e)})
+
+        # Vergleiche alle Formate
+        if len(formats) <= 1:
+            return {"compatible": True, "details": "Nur ein Video"}
+
+        first_format = formats[0]
+        compatible = True
+        differences = []
+
+        for i, fmt in enumerate(formats[1:], 1):
+            if 'error' in fmt:
+                compatible = False
+                differences.append(f"Video {i + 1}: {fmt['error']}")
+                continue
+
+            # Prüfe Codec
+            if fmt.get('codec_name') != first_format.get('codec_name'):
+                compatible = False
+                differences.append(f"Video {i + 1}: Codec {fmt['codec_name']} != {first_format['codec_name']}")
+
+            # Prüfe Auflösung
+            if fmt.get('width') != first_format.get('width') or fmt.get('height') != first_format.get('height'):
+                compatible = False
+                differences.append(
+                    f"Video {i + 1}: {fmt['width']}x{fmt['height']} != {first_format['width']}x{first_format['height']}")
+
+            # Prüfe Framerate (vereinfacht)
+            if fmt.get('r_frame_rate') != first_format.get('r_frame_rate'):
+                compatible = False
+                differences.append(f"Video {i + 1}: FPS {fmt['r_frame_rate']} != {first_format['r_frame_rate']}")
+
+            # Prüfe Pixel-Format
+            if fmt.get('pix_fmt') != first_format.get('pix_fmt'):
+                compatible = False
+                differences.append(f"Video {i + 1}: Pixel-Format {fmt['pix_fmt']} != {first_format['pix_fmt']}")
+
+        if compatible:
+            details = f"Alle {len(video_paths)} Videos kompatibel: {first_format['width']}x{first_format['height']}, {first_format['codec_name']}"
+        else:
+            details = f"Format-Unterschiede: {', '.join(differences[:3])}"  # Zeige nur erste 3 Unterschiede
+
+        return {
+            "compatible": compatible,
+            "details": details,
+            "formats": formats
+        }
+
+    def _update_encoding_info(self, format_info):
+        """Aktualisiert die Encoding-Information in der UI"""
+        if format_info["compatible"]:
+            self.encoding_label.config(text=f"Encoding: Kompatibel (schnell)", fg="green")
+        else:
+            self.encoding_label.config(text=f"Encoding: Neu kodieren nötig", fg="orange")
+
+    def _update_ui_success(self, video_paths, was_reencoded):
         """Aktualisiert UI nach erfolgreicher Vorschau-Erstellung"""
         # Gesamtdauer berechnen
         total_duration = self._calculate_total_duration(video_paths)
@@ -118,7 +244,14 @@ class VideoPreview:
         self.duration_label.config(text=f"Gesamtdauer: {total_duration}")
         self.size_label.config(text=f"Dateigröße: {total_size}")
         self.clips_label.config(text=f"Anzahl Clips: {len(video_paths)}")
-        self.status_label.config(text="Vorschau bereit", fg="green")
+
+        if was_reencoded:
+            self.status_label.config(text="Vorschau bereit (neu kodiert)", fg="green")
+            self.encoding_label.config(text="Encoding: Neu kodiert", fg="orange")
+        else:
+            self.status_label.config(text="Vorschau bereit (schnell)", fg="green")
+            self.encoding_label.config(text="Encoding: Direkt kombiniert", fg="green")
+
         self.play_button.config(state="normal")
 
     def _update_ui_error(self, error_msg):
@@ -127,6 +260,7 @@ class VideoPreview:
         self.duration_label.config(text="Gesamtdauer: --:--")
         self.size_label.config(text="Dateigröße: --")
         self.clips_label.config(text="Anzahl Clips: 0")
+        self.encoding_label.config(text="Encoding: Fehler", fg="red")
         self.play_button.config(state="disabled")
         self.combined_video_path = None
 
@@ -210,6 +344,7 @@ class VideoPreview:
         self.duration_label.config(text="Gesamtdauer: --:--")
         self.size_label.config(text="Dateigröße: --")
         self.clips_label.config(text="Anzahl Clips: 0")
+        self.encoding_label.config(text="Encoding: --", fg="gray")
         self.status_label.config(text="Keine Vorschau verfügbar", fg="gray")
         self.play_button.config(state="disabled")
         self.stop_button.config(state="disabled")

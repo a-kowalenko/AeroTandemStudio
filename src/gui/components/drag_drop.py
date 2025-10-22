@@ -169,6 +169,11 @@ class DragDropFrame:
                                            f"'{os.path.basename(filepath)}' ist keine unterstützte Video- oder Foto-Datei")
 
         if valid_videos or valid_photos:
+            # Prüfe Video-Formate wenn mehrere Videos hinzugefügt werden
+            needs_reencoding_info = None
+            if len(valid_videos) > 0 and len(self.video_paths) + len(valid_videos) > 1:
+                needs_reencoding_info = self._check_if_reencoding_needed(valid_videos)
+
             self.add_files(valid_videos, valid_photos)
             video_count = len(valid_videos)
             photo_count = len(valid_photos)
@@ -183,8 +188,113 @@ class DragDropFrame:
             status_text += " hinzugefügt"
 
             self.drop_label.config(text=status_text, fg="green")
+
+            # Zeige Warnung falls Re-Encoding nötig
+            if needs_reencoding_info and not needs_reencoding_info["compatible"]:
+                messagebox.showinfo(
+                    "Verschiedene Video-Formate",
+                    f"Die hinzugefügten Videos haben verschiedene Formate:\n\n"
+                    f"{needs_reencoding_info['details']}\n\n"
+                    f"Die Vorschau-Erstellung kann länger dauern, da die Videos neu kodiert werden müssen."
+                )
         else:
             self.drop_label.config(text="Keine gültigen Video- oder Foto-Dateien gefunden", fg="red")
+
+    def _check_if_reencoding_needed(self, new_videos):
+        """Prüft ob Re-Encoding für die neuen Videos nötig ist"""
+        try:
+            # Kombiniere vorhandene und neue Videos für die Prüfung
+            all_videos = self.video_paths + new_videos
+
+            if len(all_videos) <= 1:
+                return {"compatible": True, "details": "Nur ein Video"}
+
+            # Verwende ffprobe um Video-Informationen zu sammeln
+            formats = []
+            for video_path in all_videos:
+                try:
+                    result = subprocess.run([
+                        'ffprobe', '-v', 'quiet',
+                        '-print_format', 'json',
+                        '-show_streams',
+                        video_path
+                    ], capture_output=True, text=True, timeout=5)
+
+                    if result.returncode == 0:
+                        import json
+                        info = json.loads(result.stdout)
+
+                        # Finde Video-Stream
+                        video_stream = None
+                        for stream in info.get('streams', []):
+                            if stream.get('codec_type') == 'video':
+                                video_stream = stream
+                                break
+
+                        if video_stream:
+                            format_info = {
+                                'filename': os.path.basename(video_path),
+                                'codec_name': video_stream.get('codec_name', 'unknown'),
+                                'width': video_stream.get('width', 0),
+                                'height': video_stream.get('height', 0),
+                                'r_frame_rate': video_stream.get('r_frame_rate', '0/0'),
+                            }
+                            formats.append(format_info)
+                        else:
+                            formats.append({'filename': os.path.basename(video_path), 'error': 'No video stream'})
+                    else:
+                        formats.append({'filename': os.path.basename(video_path), 'error': 'FFprobe failed'})
+
+                except Exception as e:
+                    formats.append({'filename': os.path.basename(video_path), 'error': str(e)})
+
+            # Vergleiche alle Formate
+            first_format = formats[0]
+            compatible = True
+            differences = []
+
+            for i, fmt in enumerate(formats[1:], 1):
+                if 'error' in fmt:
+                    compatible = False
+                    differences.append(f"{fmt['filename']}: {fmt['error']}")
+                    continue
+
+                # Prüfe Codec
+                if fmt.get('codec_name') != first_format.get('codec_name'):
+                    compatible = False
+                    differences.append(f"{fmt['filename']}: Codec {fmt['codec_name']}")
+
+                # Prüfe Auflösung
+                if fmt.get('width') != first_format.get('width') or fmt.get('height') != first_format.get('height'):
+                    compatible = False
+                    differences.append(f"{fmt['filename']}: {fmt['width']}x{fmt['height']}")
+
+                # Prüfe Framerate (vereinfacht)
+                if fmt.get('r_frame_rate') != first_format.get('r_frame_rate'):
+                    compatible = False
+                    differences.append(f"{fmt['filename']}: FPS {fmt['r_frame_rate']}")
+
+            if compatible:
+                details = f"Alle {len(all_videos)} Videos kompatibel"
+            else:
+                # Zeige nur die ersten 3 Unterschiede um die Meldung übersichtlich zu halten
+                diff_display = "\n".join(differences[:3])
+                if len(differences) > 3:
+                    diff_display += f"\n... und {len(differences) - 3} weitere"
+                details = f"Format-Unterschiede:\n{diff_display}"
+
+            return {
+                "compatible": compatible,
+                "details": details,
+                "formats": formats
+            }
+
+        except Exception as e:
+            # Im Fehlerfall gehen wir davon aus dass Re-Encoding nötig ist
+            return {
+                "compatible": False,
+                "details": f"Fehler bei Format-Prüfung: {str(e)}"
+            }
 
     def _parse_dropped_files(self, data):
         """Parst die abgelegten Dateien"""

@@ -1,4 +1,5 @@
-﻿import shutil
+﻿import json
+import shutil
 import threading
 import os
 import tempfile
@@ -38,8 +39,7 @@ class VideoProcessor:
             self._cleanup()
 
     def _execute_video_creation_with_intro_only(self, form_data, combined_video_path, photo_paths=None):
-        """Fügt nur das Intro zum bereits kombinierten Video hinzu"""
-        load = form_data["load"]
+        """Fügt nur das Intro zum bereits kombinierten Video hinzu, ohne Neukodierung des Hauptvideos."""
         gast = form_data["gast"]
         tandemmaster = form_data["tandemmaster"]
         videospringer = form_data["videospringer"]
@@ -54,107 +54,160 @@ class VideoProcessor:
         temp_files = []
 
         try:
-            # Schritt 1: Videoinformationen des kombinierten Videos lesen
+            # Schritt 1: Detaillierte Videoinformationen des kombinierten Videos lesen
             self._update_progress(1)
-            self._update_status("Ermittle Videoinformationen...")
-            video_info = self._get_video_info(combined_video_path)
-            clip_width, clip_height, clip_fps = video_info
+            self._update_status("Ermittle detaillierte Videoinformationen...")
+            video_params = self._get_video_info(combined_video_path)
 
             # Schritt 2: Textinhalte vorbereiten
             self._update_progress(2)
             self._update_status("Bereite Text-Overlays vor...")
             drawtext_filter = self._prepare_text_overlay(
                 gast, tandemmaster, videospringer, datum, ort,
-                clip_height, outside_video
+                video_params['height'], outside_video
             )
-
-            temp_titel_clip_path = os.path.join(tempfile.gettempdir(), "titel_intro.mp4")
-            temp_files.append(temp_titel_clip_path)
 
             if not os.path.exists("assets/hintergrund.png"):
                 raise FileNotFoundError("hintergrund.png fehlt im assets/ Ordner")
 
-            # Schritt 3: Titelclip OHNE Audio erstellen, unter Verwendung der Video-Infos
+            # Schritt 3: Kompatiblen Intro-Clip mit stiller Audiospur in einem Schritt erstellen
             self._update_progress(3)
-            self._update_status("Erstelle Titelclip...")
-            self._create_title_clip_no_audio(
-                temp_titel_clip_path,
-                dauer,
-                clip_fps,
-                clip_width,
-                clip_height,
-                drawtext_filter
+            self._update_status("Erstelle kompatiblen Intro-Clip...")
+            temp_intro_with_audio_path = os.path.join(tempfile.gettempdir(), "intro_with_silent_audio.mp4")
+            temp_files.append(temp_intro_with_audio_path)
+            self._create_intro_with_silent_audio(
+                temp_intro_with_audio_path, dauer, video_params, drawtext_filter
             )
 
-            # Schritt 4: Concat-Liste für Intro + kombiniertes Video erstellen
+            # Schritt 4: Concat-Liste für das effiziente Zusammenfügen erstellen
             self._update_progress(4)
             self._update_status("Erstelle Concat-Liste...")
             concat_list_path = os.path.join(tempfile.gettempdir(), "final_concat_list.txt")
             temp_files.append(concat_list_path)
-
             with open(concat_list_path, "w", encoding="utf-8") as f:
-                f.write(f"file '{os.path.abspath(temp_titel_clip_path)}'\n")
+                f.write(f"file '{os.path.abspath(temp_intro_with_audio_path)}'\n")
                 f.write(f"file '{os.path.abspath(combined_video_path)}'\n")
 
-            # Schritt 5: Temporäres Video ohne Audio erstellen (nur Konkatenierung)
+            # Schritt 5: Output-Pfad generieren
             self._update_progress(5)
-            self._update_status("Kombiniere Videos ohne Audio...")
-            temp_video_no_audio = os.path.join(tempfile.gettempdir(), "temp_no_audio.mp4")
-            temp_files.append(temp_video_no_audio)
+            self._update_status("Generiere Ausgabe-Pfad...")
+            full_output_path = self._generate_output_path(
+                form_data['load'], gast, tandemmaster, videospringer,
+                datum, speicherort, outside_video
+            )
 
-            # Videos ohne Audio konkatenieren
+            # Schritt 6: Endgültiges Video durch Kopieren der Streams erstellen (sehr schnell)
+            self._update_progress(6)
+            self._update_status("Füge Videos effizient zusammen...")
             subprocess.run([
                 "ffmpeg", "-y",
                 "-f", "concat",
                 "-safe", "0",
                 "-i", concat_list_path,
                 "-c", "copy",
-                "-an",  # KEINE Audio-Spur im temporären Video
-                temp_video_no_audio
-            ], check=True, capture_output=True, text=True)
+                full_output_path
+            ], capture_output=True, text=True, check=True)
 
-            # Schritt 6: Output-Pfad generieren
-            self._update_progress(6)
-            self._update_status("Generiere Ausgabe-Pfad...")
-            full_output_path = self._generate_output_path(
-                load, gast, tandemmaster, videospringer,
-                datum, speicherort, outside_video
-            )
 
-            # Schritt 7: Finales Video mit ursprünglicher Audio erstellen
+            # Schritt 7: Fotos in Output-Verzeichnis kopieren
             self._update_progress(7)
-            self._update_status("Erstelle finales Video mit Audio...")
-            self._create_final_video_with_original_audio(
-                temp_video_no_audio, combined_video_path, full_output_path, dauer
-            )
-
-            # Schritt 8: Fotos in Output-Verzeichnis kopieren
-            self._update_progress(8)
             if photo_paths:
-                self._update_status("Kopiere Fotos in Ausgabe-Verzeichnis...")
+                self._update_status("Kopiere Fotos...")
                 self._copy_photos_to_output_directory(photo_paths, full_output_path)
 
-            # Schritt 9: Auf Server uploaden falls gewünscht
-            self._update_progress(9)
+            # Schritt 8: Auf Server uploaden falls gewünscht
+            self._update_progress(8)
             server_message = ""
             if upload_to_server:
                 self._update_status("Lade Video auf Server hoch...")
                 success, message, server_path = self._upload_to_server(full_output_path)
                 server_message = f"\nServer: {message}" if message else ""
-            else:
-                success = True
-                message = ""
 
             # Fertig
             self._update_progress(10)
             self._show_success_message(full_output_path, server_message)
 
+        except subprocess.CalledProcessError as e:
+            print(f"FFmpeg Error: {e.stderr}")
+            raise Exception(f"Fehler bei der Videoverarbeitung: {e.stderr}")
         except Exception as e:
             if full_output_path and os.path.exists(full_output_path):
                 os.remove(full_output_path)
             raise e
         finally:
             self._cleanup_temp_files(temp_files)
+
+    def _create_intro_with_silent_audio(self, output_path, dauer, v_params, drawtext_filter):
+        """
+        Erstellt den Intro-Clip inklusive einer passenden stillen Audiospur in einem einzigen Befehl,
+        um maximale Kompatibilität für die Concat-Operation zu gewährleisten.
+        """
+        print(
+            f"Erstelle Intro mit Parametern: {v_params['width']}x{v_params['height']}, FPS: {v_params['fps']}, Timescale: {v_params['timescale']}")
+        video_filters = f"scale={v_params['width']}:{v_params['height']},{drawtext_filter}"
+
+        command = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-i", "assets/hintergrund.png",  # Video-Quelle
+            "-f", "lavfi", "-i",
+            f"anullsrc=channel_layout={v_params['channel_layout']}:sample_rate={v_params['sample_rate']}",
+            # Audio-Quelle
+            "-vf", video_filters,
+            "-c:v", v_params['vcodec'],
+            "-tag:v", v_params['vtag'],
+            "-pix_fmt", v_params['pix_fmt'],
+            "-r", v_params['fps'],
+            "-video_track_timescale", v_params['timescale'],
+            "-c:a", v_params['acodec'],
+            "-t", str(dauer),
+            "-shortest",  # Stellt sicher, dass die Dauer korrekt ist
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            output_path
+        ]
+
+        subprocess.run(command, capture_output=True, text=True, check=True)
+
+    def _create_matching_title_clip(self, output_path, dauer, v_params, drawtext_filter):
+        """Erstellt den Titel-Clip mit exakt passenden Video-Parametern."""
+        print(f"Erstelle Titelclip mit Parametern: {v_params['width']}x{v_params['height']}, FPS: {v_params['fps']}")
+        video_filters = f"scale={v_params['width']}:{v_params['height']}, {drawtext_filter}"
+
+        subprocess.run([
+            "ffmpeg", "-y", "-loop", "1", "-i", "assets/hintergrund.png",
+            "-vf", video_filters,
+            "-t", str(dauer),
+            "-r", v_params['fps'],
+            "-c:v", v_params['vcodec'],
+            "-pix_fmt", v_params['pix_fmt'],
+            "-an",
+            output_path
+        ], capture_output=True, text=True, check=True)
+
+    def _add_silent_audio_to_intro(self, video_in, video_out, dauer, v_params):
+        """Fügt eine stille Audiospur zu einem Video hinzu, die zum Hauptvideo passt."""
+        temp_silent_audio = os.path.join(tempfile.gettempdir(), "silent.aac")
+
+        # Stille Audiospur erstellen
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "lavfi",
+            "-i", f"anullsrc=channel_layout={v_params['channel_layout']}:sample_rate={v_params['sample_rate']}",
+            "-t", str(dauer),
+            "-c:a", v_params['acodec'],
+            temp_silent_audio
+        ], capture_output=True, text=True, check=True)
+
+        # Video und stille Audiospur zusammenfügen
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", video_in,
+            "-i", temp_silent_audio,
+            "-c", "copy",
+            "-map", "0:v:0", "-map", "1:a:0",
+            video_out
+        ], capture_output=True, text=True, check=True)
+
+        os.remove(temp_silent_audio)
 
     def _copy_photos_to_output_directory(self, photo_paths, output_video_path):
         """Kopiert alle Fotos in ein Foto-Unterverzeichnis"""
@@ -272,16 +325,39 @@ class VideoProcessor:
             raise Exception(f"Final-Video-Erstellung fehlgeschlagen: {result.stderr}")
 
     def _get_video_info(self, video_path):
-        """Ermittelt Video-Informationen"""
-        try:
-            user_clip = VideoFileClip(video_path)
-            clip_width, clip_height = user_clip.size
-            clip_fps = user_clip.fps or 30
-            user_clip.close()
-            return clip_width, clip_height, clip_fps
-        except:
-            # Fallback-Werte
-            return 1920, 1080, 30
+        """Ermittelt detaillierte Video- und Audio-Stream-Informationen mit ffprobe."""
+        command = [
+            "ffprobe", "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams", video_path
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        streams = json.loads(result.stdout)["streams"]
+
+        video_stream = next((s for s in streams if s['codec_type'] == 'video'), None)
+        audio_stream = next((s for s in streams if s['codec_type'] == 'audio'), None)
+
+        if not video_stream:
+            raise ValueError("Kein Video-Stream in der Eingabedatei gefunden.")
+        if not audio_stream:
+            raise ValueError("Kein Audio-Stream in der Eingabedatei gefunden.")
+
+        # Extrahiere die Timescale aus der time_base (z.B. aus "1/90000" wird 90000)
+        time_base = video_stream.get("time_base", "1/25").split('/')
+        timescale = time_base[1] if len(time_base) == 2 else "25"  # Fallback
+
+        return {
+            "width": video_stream.get("width"),
+            "height": video_stream.get("height"),
+            "fps": video_stream.get("r_frame_rate"),
+            "timescale": timescale,
+            "pix_fmt": video_stream.get("pix_fmt"),
+            "vcodec": video_stream.get("codec_name"),
+            "vtag": video_stream.get("codec_tag_string", "avc1"),
+            "acodec": audio_stream.get("codec_name"),
+            "sample_rate": audio_stream.get("sample_rate"),
+            "channel_layout": video_stream.get("channel_layout", "stereo")  # Default to stereo
+        }
 
     def _prepare_text_overlay(self, gast, tandemmaster, videospringer, datum, ort, clip_height, outside_video):
         """Bereitet die Text-Overlays für das Video vor"""

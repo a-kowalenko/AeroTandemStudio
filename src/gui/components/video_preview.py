@@ -15,8 +15,15 @@ class VideoPreview:
         self.parent = parent
         self.frame = tk.Frame(parent)
         self.combined_video_path = None
-        self.is_playing = False
         self.progress_handler = None
+        self.last_video_paths = None
+
+        # --- State and Threading Control Attributes ---
+        self.processing_thread = None
+        self.ffmpeg_process = None
+        self.cancellation_event = threading.Event()
+        # ---
+
         self.create_widgets()
 
     def create_widgets(self):
@@ -37,11 +44,9 @@ class VideoPreview:
         self.size_label = tk.Label(info_frame, text="Dateigröße: --", font=("Arial", 10))
         self.size_label.pack(anchor="w")
 
-        # Anzahl der Clips
-        self.clips_label = tk.Label(info_frame, text="Anzahl Clips: 0", font=("Arial", 10))
+        self.clips_label = tk.Label(info_frame, text="Anzahl Clips: --", font=("Arial", 10))
         self.clips_label.pack(anchor="w")
 
-        # Encoding-Info
         self.encoding_label = tk.Label(info_frame, text="Encoding: --", font=("Arial", 9), fg="gray")
         self.encoding_label.pack(anchor="w")
 
@@ -51,13 +56,14 @@ class VideoPreview:
 
         self.play_button = tk.Button(control_frame, text="▶ Vorschau abspielen",
                                      command=self.play_preview, state="disabled",
-                                     font=("Arial", 11), width=15, height=1)
+                                     font=("Arial", 11), width=20, height=1)
         self.play_button.pack(pady=2)
 
-        self.stop_button = tk.Button(control_frame, text="⏹ Abbrechen",
-                                     command=self.stop_preview, state="disabled",
-                                     font=("Arial", 11), width=15, height=1)
-        self.stop_button.pack(pady=2)
+        # --- MODIFIED: This button now serves dual purpose (cancel/retry) ---
+        self.action_button = tk.Button(control_frame, text="⏹ Erstellung abbrechen",
+                                       command=self.cancel_creation, state="disabled",
+                                       font=("Arial", 11), width=20, height=1)
+        self.action_button.pack(pady=2)
 
         # Status-Label
         self.status_label = tk.Label(self.frame, text="Ziehen Sie Videos in das Feld links",
@@ -70,78 +76,93 @@ class VideoPreview:
 
     def update_preview(self, video_paths):
         """Erstellt eine Vorschau aus allen Videos und aktualisiert die UI"""
+        if self.processing_thread and self.processing_thread.is_alive():
+            print("Preview creation is already in progress.")
+            return None
+
         if not video_paths:
             self.clear_preview()
             return None
 
-        # Instantiate progress handler if it doesn't exist
+        # Store the current paths for a potential retry
+        self.last_video_paths = video_paths
+
         if not self.progress_handler:
             self.progress_handler = ProgressHandler(self.progress_frame)
 
         self.status_label.config(text="Erstelle Vorschau...", fg="blue")
         self.play_button.config(state="disabled")
+
+        # --- MODIFIED: Configure button for cancellation ---
+        self.action_button.config(text="⏹ Erstellung abbrechen",
+                                  command=self.cancel_creation,
+                                  state="normal")
         self.encoding_label.config(text="Encoding: Prüfe Formate...")
         self.clips_label.config(text=f"Anzahl Videos: {len(video_paths)}")
 
-        # Im Thread verarbeiten um UI nicht zu blockieren
-        thread = threading.Thread(target=self._create_combined_preview, args=(video_paths,))
-        thread.start()
+        self.cancellation_event.clear()
 
-        return thread
+        self.processing_thread = threading.Thread(target=self._create_combined_preview, args=(video_paths,))
+        self.processing_thread.start()
+
+        return self.processing_thread
 
     def _create_combined_preview(self, video_paths):
         """Erstellt ein kombiniertes Vorschau-Video aus allen Clips"""
         try:
-            # Video-Formate prüfen
+            if self.cancellation_event.is_set():
+                self.parent.after(0, self._update_ui_cancelled)
+                return
+
             format_info = self._check_video_formats(video_paths)
             needs_reencoding = not format_info["compatible"]
 
             self.parent.after(0, self._update_encoding_info, format_info)
 
             if needs_reencoding:
-                # Mit Re-Encoding kombinieren - alle Videos auf 1080p@30fps standardisieren
                 self.parent.after(0, lambda: self.status_label.config(
                     text="Kodiere Videos auf 1080p @ 30fps...", fg="orange"))
                 self.parent.after(0, self.progress_handler.pack_progress_bar)
-
                 self.combined_video_path = self._create_reencoded_combined_video(video_paths)
             else:
-                # Ohne Re-Encoding kombinieren (schnell)
                 self.parent.after(0, lambda: self.status_label.config(
                     text="Kombiniere Videos (schnell)...", fg="blue"))
-
                 self.combined_video_path = self._create_fast_combined_video(video_paths)
 
+            if self.cancellation_event.is_set():
+                self.parent.after(0, self._update_ui_cancelled)
+                return
+
             if self.combined_video_path and os.path.exists(self.combined_video_path):
-                # UI aktualisieren
                 self.parent.after(0, self._update_ui_success, video_paths, needs_reencoding)
             else:
-                self.parent.after(0, self._update_ui_error, "Vorschau konnte nicht erstellt werden")
+                # Avoid showing an error if it was a user cancellation
+                if not self.cancellation_event.is_set():
+                    self.parent.after(0, self._update_ui_error, "Vorschau konnte nicht erstellt werden")
 
         except Exception as e:
-            self.parent.after(0, self._update_ui_error, f"Fehler: {str(e)}")
+            if not self.cancellation_event.is_set():
+                self.parent.after(0, self._update_ui_error, f"Fehler: {str(e)}")
+        finally:
+            self.processing_thread = None
+            self.ffmpeg_process = None
 
     def _create_fast_combined_video(self, video_paths):
         """Kombiniert Videos schnell ohne Re-Encoding"""
         concat_list_path = os.path.join(tempfile.gettempdir(), "preview_concat_list.txt")
         output_path = os.path.join(tempfile.gettempdir(), "preview_combined_fast.mp4")
 
-        # Use ' with open(...) ' to ensure the file is closed automatically
         with open(concat_list_path, "w", encoding="utf-8") as f:
             for video_path in video_paths:
-                # Use os.path.abspath to create safe file paths for ffmpeg
                 f.write(f"file '{os.path.abspath(video_path)}'\n")
 
+        if self.cancellation_event.is_set(): return None
+
         result = subprocess.run([
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", concat_list_path,
-            "-c", "copy",
-            "-movflags", "+faststart",
-            output_path
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path,
+            "-c", "copy", "-movflags", "+faststart", output_path
         ], capture_output=True, text=True)
 
-        # Clean up the temporary list file
         try:
             os.remove(concat_list_path)
         except OSError as e:
@@ -150,48 +171,49 @@ class VideoPreview:
         if result.returncode == 0:
             return output_path
         else:
-            print(f"Fast combine failed: {result.stderr}")
+            if not self.cancellation_event.is_set():
+                print(f"Fast combine failed: {result.stderr}")
             return None
 
     def _monitor_ffmpeg_progress(self, cmd, total_duration_secs):
         """Runs an ffmpeg command and updates the progress bar by reading its output."""
-        if total_duration_secs <= 0:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-            return result.returncode == 0
+        if total_duration_secs <= 0 or self.cancellation_event.is_set():
+            return False
 
-        process = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                   universal_newlines=True, encoding='utf-8', errors='replace')
+        self.ffmpeg_process = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                               universal_newlines=True, encoding='utf-8', errors='replace')
 
-        for line in iter(process.stderr.readline, ''):
+        for line in iter(self.ffmpeg_process.stderr.readline, ''):
+            if self.cancellation_event.is_set():
+                print("Cancellation detected, terminating FFmpeg.")
+                self.ffmpeg_process.terminate()
+                self.ffmpeg_process.wait()
+                return False
+
             match = re.search(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})", line)
             if match:
                 h, m, s, ms = map(int, match.groups())
                 current_secs = h * 3600 + m * 60 + s + ms / 100
                 self.parent.after(0, self.progress_handler.update_progress, current_secs, total_duration_secs)
 
-        process.wait()
-        # Ensure progress bar reaches 100%
-        self.parent.after(0, self.progress_handler.update_progress, total_duration_secs, total_duration_secs)
-        return process.returncode == 0
+        self.ffmpeg_process.wait()
+
+        if self.ffmpeg_process.returncode == 0 and not self.cancellation_event.is_set():
+            self.parent.after(0, self.progress_handler.update_progress, total_duration_secs, total_duration_secs)
+
+        return self.ffmpeg_process.returncode == 0 and not self.cancellation_event.is_set()
 
     def _create_reencoded_combined_video(self, video_paths):
-        """Kombiniert Videos, indem alle auf 1080p@30fps standardisiert werden, ohne das Seitenverhältnis zu verzerren."""
-        if not video_paths:
-            return None
-
+        if not video_paths: return None
         total_duration_secs = self._calculate_total_duration_seconds(video_paths)
-
         target_params = {
             'width': 1920, 'height': 1080, 'fps': 30, 'pix_fmt': 'yuv420p',
             'video_codec': 'libx264', 'audio_codec': 'aac', 'audio_sample_rate': 48000, 'audio_channels': 2
         }
         output_path = os.path.join(tempfile.gettempdir(), "preview_combined_reencoded.mp4")
-
         try:
             cmd = ["ffmpeg", "-y"]
-            for video_path in video_paths:
-                cmd.extend(["-i", video_path])
-
+            for video_path in video_paths: cmd.extend(["-i", video_path])
             filter_complex_parts = []
             for i, _ in enumerate(video_paths):
                 video_filter = (
@@ -201,42 +223,34 @@ class VideoPreview:
                 )
                 audio_filter = f"[{i}:a]aresample={target_params['audio_sample_rate']},asetpts=N/SR/TB[a{i}]"
                 filter_complex_parts.extend([video_filter, audio_filter])
-
             video_outputs = "".join([f"[v{i}]" for i in range(len(video_paths))])
             audio_outputs = "".join([f"[a{i}]" for i in range(len(video_paths))])
             filter_complex_parts.append(f"{video_outputs}concat=n={len(video_paths)}:v=1:a=0[outv]")
             filter_complex_parts.append(f"{audio_outputs}concat=n={len(video_paths)}:v=0:a=1[outa]")
             filter_complex = ";".join(filter_complex_parts)
-
             cmd.extend([
                 "-filter_complex", filter_complex, "-map", "[outv]", "-map", "[outa]",
                 "-c:v", target_params['video_codec'], "-preset", "fast", "-crf", "23",
                 "-c:a", target_params['audio_codec'], "-b:a", "128k",
                 "-movflags", "+faststart", output_path
             ])
-
-            print(f"FFmpeg command: {' '.join(cmd)}")
             success = self._monitor_ffmpeg_progress(cmd, total_duration_secs)
-
             if success:
                 return output_path
-            else:
+            elif not self.cancellation_event.is_set():
                 print("Re-encoding with filter_complex failed. Trying fallback.")
                 return self._create_simple_reencoded_video(video_paths, target_params, total_duration_secs)
-
+            return None
         except Exception as e:
-            print(f"An unexpected error occurred during encoding: {e}")
+            if not self.cancellation_event.is_set():
+                print(f"An unexpected error occurred during encoding: {e}")
             return None
 
     def _create_simple_reencoded_video(self, video_paths, params, total_duration_secs):
-        """Einfachere Fallback-Methode, die den Concat-Demuxer verwendet und das Ergebnis neu kodiert."""
         concat_list_path = os.path.join(tempfile.gettempdir(), "preview_concat_reencode.txt")
         output_path = os.path.join(tempfile.gettempdir(), "preview_combined_simple_reencoded.mp4")
-
         with open(concat_list_path, "w", encoding="utf-8") as f:
-            for video_path in video_paths:
-                f.write(f"file '{os.path.abspath(video_path)}'\n")
-
+            for video_path in video_paths: f.write(f"file '{os.path.abspath(video_path)}'\n")
         try:
             cmd = [
                 "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path,
@@ -248,15 +262,13 @@ class VideoPreview:
                 "-ar", str(params['audio_sample_rate']), "-ac", str(params['audio_channels']),
                 "-movflags", "+faststart", output_path
             ]
-
-            print(f"FFmpeg fallback command: {' '.join(cmd)}")
             success = self._monitor_ffmpeg_progress(cmd, total_duration_secs)
-
             if success:
                 return output_path
-            else:
+            elif not self.cancellation_event.is_set():
                 print("Simple re-encoding fallback also failed.")
                 return None
+            return None
         finally:
             try:
                 os.remove(concat_list_path)
@@ -264,39 +276,31 @@ class VideoPreview:
                 pass
 
     def _check_video_formats(self, video_paths):
-        """Prüft ob alle Videos das gleiche Format haben"""
         if len(video_paths) <= 1:
             return {"compatible": True, "details": "Nur ein Video - kompatibel"}
-
         formats = []
         for video_path in video_paths:
             try:
-                result = subprocess.run([
-                    'ffprobe', '-v', 'quiet', '-print_format', 'json',
-                    '-show_format', '-show_streams', video_path
-                ], capture_output=True, text=True, timeout=10)
-
+                result = subprocess.run(['ffprobe', '-v', 'quiet', '-print_format', 'json',
+                                         '-show_format', '-show_streams', video_path],
+                                        capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
                     info = json.loads(result.stdout)
                     video_stream = next((s for s in info.get('streams', []) if s.get('codec_type') == 'video'), None)
                     if video_stream:
-                        formats.append({
-                            'codec_name': video_stream.get('codec_name', 'unknown'),
-                            'width': video_stream.get('width', 0), 'height': video_stream.get('height', 0),
-                            'r_frame_rate': video_stream.get('r_frame_rate', '0/0'),
-                            'pix_fmt': video_stream.get('pix_fmt', 'unknown'),
-                        })
+                        formats.append({'codec_name': video_stream.get('codec_name', 'unknown'),
+                                        'width': video_stream.get('width', 0), 'height': video_stream.get('height', 0),
+                                        'r_frame_rate': video_stream.get('r_frame_rate', '0/0'),
+                                        'pix_fmt': video_stream.get('pix_fmt', 'unknown')})
                     else:
                         formats.append({'error': 'No video stream'})
                 else:
                     formats.append({'error': 'FFprobe failed'})
             except Exception as e:
                 formats.append({'error': str(e)})
-
         first_format = next((f for f in formats if 'error' not in f), None)
         if not first_format: return {"compatible": False, "details": "No valid video streams found."}
-
-        is_compatible = True
+        is_compatible = True;
         diffs = []
         for i, fmt in enumerate(formats):
             if 'error' in fmt:
@@ -307,7 +311,6 @@ class VideoPreview:
                 if fmt.get(key) != first_format.get(key):
                     is_compatible = False
                     diffs.append(f"V{i + 1} {key}")
-
         details = f"Alle {len(video_paths)} Videos kompatibel." if is_compatible else f"Format-Unterschiede: {', '.join(diffs[:3])}"
         return {"compatible": is_compatible, "details": details}
 
@@ -337,20 +340,33 @@ class VideoPreview:
             self.encoding_label.config(text="Encoding: Direkt kombiniert", fg="green")
 
         self.play_button.config(state="normal")
+        self.action_button.config(state="disabled")
 
     def _update_ui_error(self, error_msg):
         """Aktualisiert UI bei Fehler"""
         if self.progress_handler: self.parent.after(0, self.progress_handler.reset)
         self.status_label.config(text=error_msg, fg="red")
-        self.duration_label.config(text="Gesamtdauer: --:--")
-        self.size_label.config(text="Dateigröße: --")
-        self.clips_label.config(text="Anzahl Clips: 0")
-        self.encoding_label.config(text="Encoding: Fehler", fg="red")
+        self.clear_preview_info()
         self.play_button.config(state="disabled")
+        # --- MODIFIED: Change to a retry button on error ---
+        self.action_button.config(text="🔄 Erneut versuchen",
+                                  command=self.retry_creation,
+                                  state="normal")
+        self.combined_video_path = None
+
+    def _update_ui_cancelled(self):
+        """Updates UI after creation was cancelled."""
+        if self.progress_handler: self.parent.after(0, self.progress_handler.reset)
+        self.status_label.config(text="Vorschau-Erstellung abgebrochen", fg="orange")
+        self.clear_preview_info()
+        self.play_button.config(state="disabled")
+        # --- MODIFIED: Change to a retry button on cancel ---
+        self.action_button.config(text="🔄 Erneut versuchen",
+                                  command=self.retry_creation,
+                                  state="normal")
         self.combined_video_path = None
 
     def _calculate_total_duration_seconds(self, video_paths):
-        """Berechnet die Gesamtdauer aller Videos in Sekunden."""
         total_seconds = 0
         for video_path in video_paths:
             try:
@@ -365,13 +381,11 @@ class VideoPreview:
         return total_seconds
 
     def _calculate_total_duration(self, video_paths):
-        """Berechnet die Gesamtdauer aller Videos und formatiert sie als MM:SS."""
         total_seconds = self._calculate_total_duration_seconds(video_paths)
         minutes, seconds = divmod(total_seconds, 60)
         return f"{int(minutes):02d}:{int(seconds):02d}"
 
     def _calculate_total_size(self, video_paths):
-        """Berechnet die Gesamtgröße aller Videos"""
         total_bytes = sum(os.path.getsize(p) for p in video_paths if os.path.exists(p))
         if total_bytes == 0: return "0 KB"
         if total_bytes > 1024 ** 3: return f"{total_bytes / (1024 ** 3):.1f} GB"
@@ -384,11 +398,7 @@ class VideoPreview:
             self.status_label.config(text="Vorschau-Datei nicht gefunden", fg="red")
             return
 
-        self.is_playing = True
-        self.play_button.config(state="disabled")
-        self.stop_button.config(state="normal")
-        self.status_label.config(text="Wiedergabe läuft...", fg="blue")
-
+        self.status_label.config(text="Starte externen Videoplayer...", fg="blue")
         try:
             if sys.platform == "win32":
                 os.startfile(self.combined_video_path)
@@ -398,31 +408,33 @@ class VideoPreview:
                 subprocess.run(['xdg-open', self.combined_video_path], check=True)
         except Exception as e:
             self.status_label.config(text=f"Player konnte nicht gestartet werden: {e}", fg="red")
-            self._reset_play_state()
-            return
 
-        self.parent.after(3000, self._reset_play_state)
+        self.parent.after(2000, self._reset_play_state)
 
     def _reset_play_state(self):
-        """Setzt den Play-Button zurück"""
+        """Setzt den Wiedergabe-Status zurück."""
         if not self.parent.winfo_exists(): return
-        self.is_playing = False
-        self.play_button.config(state="normal")
-        self.stop_button.config(state="disabled")
         if self.combined_video_path and os.path.exists(self.combined_video_path):
             self.status_label.config(text="Vorschau bereit", fg="green")
 
-    def stop_preview(self):
-        """Stoppt die Vorschau-Wiedergabe (symbolisch, da externer Player)"""
-        if not self.parent.winfo_exists(): return
-        self.is_playing = False
-        self.play_button.config(state="normal")
-        self.stop_button.config(state="disabled")
-        self.status_label.config(text="Vorschau gestoppt", fg="orange")
-        self.parent.after(2000, self._reset_play_state)
+    def cancel_creation(self):
+        """Signals the processing thread to cancel the video creation."""
+        if self.processing_thread and self.processing_thread.is_alive():
+            self.status_label.config(text="Abbruch wird eingeleitet...", fg="orange")
+            self.action_button.config(state="disabled")
+            self.cancellation_event.set()
+
+    # --- NEW: Retry creation method ---
+    def retry_creation(self):
+        """Retries the preview creation with the last used video paths."""
+        if not self.last_video_paths:
+            print("No previous video paths available to retry.")
+            return
+        self.update_preview(self.last_video_paths)
 
     def clear_preview(self):
         """Setzt die Vorschau zurück und löscht die temporäre Datei"""
+        self.cancel_creation()
         if self.combined_video_path and os.path.exists(self.combined_video_path):
             try:
                 os.remove(self.combined_video_path)
@@ -430,14 +442,20 @@ class VideoPreview:
                 print(f"Could not delete temp preview file: {e}")
 
         self.combined_video_path = None
-        self.is_playing = False
-        self.duration_label.config(text="Gesamtdauer: --:--")
-        self.size_label.config(text="Dateigröße: --")
-        self.clips_label.config(text="Anzahl Clips: 0")
-        self.encoding_label.config(text="Encoding: --", fg="gray")
+        self.last_video_paths = None
+        self.clear_preview_info()
         self.status_label.config(text="Keine Vorschau verfügbar", fg="gray")
         self.play_button.config(state="disabled")
-        self.stop_button.config(state="disabled")
+        self.action_button.config(text="⏹ Erstellung abbrechen",
+                                  command=self.cancel_creation,
+                                  state="disabled")
+
+    def clear_preview_info(self):
+        """Helper to clear all text labels."""
+        self.duration_label.config(text="Gesamtdauer: --:--")
+        self.size_label.config(text="Dateigröße: --")
+        self.clips_label.config(text=f"Anzahl Clips: {len(self.last_video_paths) if self.last_video_paths else '--'}")
+        self.encoding_label.config(text="Encoding: --", fg="gray")
 
     def get_combined_video_path(self):
         """Gibt den Pfad des kombinierten Videos zurück"""

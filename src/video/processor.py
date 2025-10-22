@@ -5,7 +5,6 @@ import os
 import tempfile
 import subprocess
 from datetime import date
-from moviepy import VideoFileClip
 
 from .logger import CancellableProgressBarLogger, CancellationError
 from ..utils.file_utils import sanitize_filename

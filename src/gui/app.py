@@ -370,7 +370,7 @@ class VideoGeneratorApp:
         # Verwende das kombinierte Video aus der Vorschau
         combined_video_path = self.video_preview.get_combined_video_path()
         if not combined_video_path or not os.path.exists(combined_video_path):
-            messagebox.showwarning("Fehler", "Bitte erstellen Sie zuerst eine Vorschau durch Drag & Drop von Videos.")
+            messagebox.showwarning("Fehler", "Bitte erstellen Sie zuerst eine Vorschau durch Drag & Drop von Videos oder klicken Sie auf 'Erneut versuchen'.")
             return
 
         # Foto-Pfade holen

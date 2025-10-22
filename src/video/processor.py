@@ -5,7 +5,6 @@ import os
 import tempfile
 import subprocess
 from datetime import date
-from moviepy import VideoFileClip
 
 from .logger import CancellableProgressBarLogger, CancellationError
 from ..utils.file_utils import sanitize_filename
@@ -16,6 +15,9 @@ class VideoProcessor:
         self.progress_callback = progress_callback
         self.status_callback = status_callback
         self.cancel_event = threading.Event()
+        # Hinweis: Der Logger wird hier instanziiert, aber seine Callback-Funktion wird
+        # in diesem Setup nicht direkt von FFmpeg aufgerufen. Der Abbruch
+        # wird durch manuelle Checks im Code gesteuert.
         self.logger = CancellableProgressBarLogger(self.cancel_event)
 
     def create_video_with_intro_only(self, form_data, combined_video_path, photo_paths=None):
@@ -38,6 +40,11 @@ class VideoProcessor:
         finally:
             self._cleanup()
 
+    def _check_for_cancellation(self):
+        """Prüft, ob ein Abbruch angefordert wurde und wirft ggf. eine Exception."""
+        if self.cancel_event.is_set():
+            raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
+
     def _execute_video_creation_with_intro_only(self, form_data, combined_video_path, photo_paths=None):
         """Fügt nur das Intro zum bereits kombinierten Video hinzu, ohne Neukodierung des Hauptvideos."""
         gast = form_data["gast"]
@@ -55,11 +62,13 @@ class VideoProcessor:
 
         try:
             # Schritt 1: Detaillierte Videoinformationen des kombinierten Videos lesen
+            self._check_for_cancellation()
             self._update_progress(1)
             self._update_status("Ermittle detaillierte Videoinformationen...")
             video_params = self._get_video_info(combined_video_path)
 
             # Schritt 2: Textinhalte vorbereiten
+            self._check_for_cancellation()
             self._update_progress(2)
             self._update_status("Bereite Text-Overlays vor...")
             drawtext_filter = self._prepare_text_overlay(
@@ -71,52 +80,81 @@ class VideoProcessor:
                 raise FileNotFoundError("hintergrund.png fehlt im assets/ Ordner")
 
             # Schritt 3: Kompatiblen Intro-Clip mit stiller Audiospur in einem Schritt erstellen
+            self._check_for_cancellation()
             self._update_progress(3)
-            self._update_status("Erstelle kompatiblen Intro-Clip...")
+            self._update_status("Erstelle exakt kompatiblen Intro-Clip...")
             temp_intro_with_audio_path = os.path.join(tempfile.gettempdir(), "intro_with_silent_audio.mp4")
             temp_files.append(temp_intro_with_audio_path)
             self._create_intro_with_silent_audio(
                 temp_intro_with_audio_path, dauer, video_params, drawtext_filter
             )
 
-            # Schritt 4: Concat-Liste für das effiziente Zusammenfügen erstellen
+            # NEUER ANSATZ: Robuste Verkettung über MPEG-TS Zwischenformat
+            # Schritt 4: Videos in .ts-Format umwandeln für stabilere Verkettung
+            self._check_for_cancellation()
             self._update_progress(4)
-            self._update_status("Erstelle Concat-Liste...")
-            concat_list_path = os.path.join(tempfile.gettempdir(), "final_concat_list.txt")
-            temp_files.append(concat_list_path)
-            with open(concat_list_path, "w", encoding="utf-8") as f:
-                f.write(f"file '{os.path.abspath(temp_intro_with_audio_path)}'\n")
-                f.write(f"file '{os.path.abspath(combined_video_path)}'\n")
+            self._update_status("Normalisiere Videos für robustes Zusammenfügen...")
 
-            # Schritt 5: Output-Pfad generieren
+            # Bitstream-Filter basierend auf dem Codec auswählen
+            bsf = "hevc_mp4toannexb" if video_params['vcodec'] == 'hevc' else "h264_mp4toannexb"
+
+            # Schritt 5: Intro nach .ts konvertieren
+            self._check_for_cancellation()
             self._update_progress(5)
+            self._update_status("Konvertiere Intro in Zwischenformat...")
+            temp_intro_ts_path = os.path.join(tempfile.gettempdir(), "intro.ts")
+            temp_files.append(temp_intro_ts_path)
+            subprocess.run([
+                "ffmpeg", "-y", "-i", temp_intro_with_audio_path,
+                "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
+                temp_intro_ts_path
+            ], capture_output=True, text=True, check=True)
+
+            # Schritt 6: Hauptvideo nach .ts konvertieren
+            self._check_for_cancellation()
+            self._update_progress(6)
+            self._update_status("Konvertiere Hauptvideo in Zwischenformat...")
+            temp_combined_ts_path = os.path.join(tempfile.gettempdir(), "combined.ts")
+            temp_files.append(temp_combined_ts_path)
+            subprocess.run([
+                "ffmpeg", "-y", "-i", combined_video_path,
+                "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
+                temp_combined_ts_path
+            ], capture_output=True, text=True, check=True)
+
+            # Schritt 7: Output-Pfad generieren
+            self._check_for_cancellation()
+            self._update_progress(7)
             self._update_status("Generiere Ausgabe-Pfad...")
             full_output_path = self._generate_output_path(
                 form_data['load'], gast, tandemmaster, videospringer,
                 datum, speicherort, outside_video
             )
 
-            # Schritt 6: Endgültiges Video durch Kopieren der Streams erstellen (sehr schnell)
-            self._update_progress(6)
-            self._update_status("Füge Videos effizient zusammen...")
+            # Schritt 8: .ts-Dateien zusammenfügen
+            self._check_for_cancellation()
+            self._update_progress(8)
+            self._update_status("Füge Videos final zusammen...")
+            concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
             subprocess.run([
                 "ffmpeg", "-y",
-                "-f", "concat",
-                "-safe", "0",
-                "-i", concat_list_path,
+                "-i", concat_input,
                 "-c", "copy",
+                "-bsf:a", "aac_adtstoasc",  # Wichtig für korrekte Audio-Header in MP4
+                "-movflags", "+faststart",
                 full_output_path
             ], capture_output=True, text=True, check=True)
 
-
-            # Schritt 7: Fotos in Output-Verzeichnis kopieren
-            self._update_progress(7)
+            # Schritt 9: Fotos in Output-Verzeichnis kopieren
+            self._check_for_cancellation()
+            self._update_progress(9)
             if photo_paths:
                 self._update_status("Kopiere Fotos...")
                 self._copy_photos_to_output_directory(photo_paths, full_output_path)
 
-            # Schritt 8: Auf Server uploaden falls gewünscht
-            self._update_progress(8)
+            # Schritt 10: Auf Server uploaden falls gewünscht
+            self._check_for_cancellation()
+            self._update_progress(10)
             server_message = ""
             if upload_to_server:
                 self._update_status("Lade Video auf Server hoch...")
@@ -124,34 +162,38 @@ class VideoProcessor:
                 server_message = f"\nServer: {message}" if message else ""
 
             # Fertig
-            self._update_progress(10)
+            self._update_progress(11)
             self._show_success_message(full_output_path, server_message)
 
         except subprocess.CalledProcessError as e:
-            print(f"FFmpeg Error: {e.stderr}")
-            raise Exception(f"Fehler bei der Videoverarbeitung: {e.stderr}")
+            # Prüfen, ob der Fehler durch einen Abbruch verursacht wurde
+            if self.cancel_event.is_set():
+                raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
+            error_details = f"FFmpeg Error:\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}"
+            print(error_details)
+            raise Exception(f"Fehler bei der Videoverarbeitung. Details siehe Konsole.")
         except Exception as e:
-            if full_output_path and os.path.exists(full_output_path):
-                os.remove(full_output_path)
+            if not isinstance(e, CancellationError):
+                if full_output_path and os.path.exists(full_output_path):
+                    os.remove(full_output_path)
             raise e
         finally:
             self._cleanup_temp_files(temp_files)
 
     def _create_intro_with_silent_audio(self, output_path, dauer, v_params, drawtext_filter):
         """
-        Erstellt den Intro-Clip inklusive einer passenden stillen Audiospur in einem einzigen Befehl,
-        um maximale Kompatibilität für die Concat-Operation zu gewährleisten.
+        Erstellt den Intro-Clip inklusive einer passenden stillen Audiospur in einem einzigen Befehl.
+        NEU: Nutzt erweiterte Parameter für maximale Kompatibilität, speziell für 4K.
         """
-        print(
-            f"Erstelle Intro mit Parametern: {v_params['width']}x{v_params['height']}, FPS: {v_params['fps']}, Timescale: {v_params['timescale']}")
+        self._check_for_cancellation()
+        print(f"Erstelle Intro mit erweiterten Parametern: {v_params}")
         video_filters = f"scale={v_params['width']}:{v_params['height']},{drawtext_filter}"
 
         command = [
             "ffmpeg", "-y",
-            "-loop", "1", "-i", "assets/hintergrund.png",  # Video-Quelle
+            "-loop", "1", "-i", "assets/hintergrund.png",
             "-f", "lavfi", "-i",
             f"anullsrc=channel_layout={v_params['channel_layout']}:sample_rate={v_params['sample_rate']}",
-            # Audio-Quelle
             "-vf", video_filters,
             "-c:v", v_params['vcodec'],
             "-tag:v", v_params['vtag'],
@@ -160,172 +202,78 @@ class VideoProcessor:
             "-video_track_timescale", v_params['timescale'],
             "-c:a", v_params['acodec'],
             "-t", str(dauer),
-            "-shortest",  # Stellt sicher, dass die Dauer korrekt ist
+            "-shortest",
             "-map", "0:v:0",
             "-map", "1:a:0",
-            output_path
+            # NEU: explizite Qualitätseinstellungen und Farbparameter für bessere Kompatibilität
+            "-preset", "fast",
+            "-crf", "18",  # Visuell verlustfrei, um Artefakte zu vermeiden
         ]
 
-        subprocess.run(command, capture_output=True, text=True, check=True)
+        # Füge die ausgelesenen Farb-Parameter hinzu, falls vorhanden
+        if v_params.get('color_range'):
+            command.extend(["-color_range", v_params['color_range']])
+        if v_params.get('colorspace'):
+            command.extend(["-colorspace", v_params['colorspace']])
+        if v_params.get('color_primaries'):
+            command.extend(["-color_primaries", v_params['color_primaries']])
+        if v_params.get('color_trc'):
+            command.extend(["-color_trc", v_params['color_trc']])
 
-    def _create_matching_title_clip(self, output_path, dauer, v_params, drawtext_filter):
-        """Erstellt den Titel-Clip mit exakt passenden Video-Parametern."""
-        print(f"Erstelle Titelclip mit Parametern: {v_params['width']}x{v_params['height']}, FPS: {v_params['fps']}")
-        video_filters = f"scale={v_params['width']}:{v_params['height']}, {drawtext_filter}"
+        # NEU: Füge Profil und Level hinzu, falls vorhanden.
+        # Dies ist oft der entscheidende Punkt für 4K-Kompatibilität.
+        if v_params.get('profile') and v_params['vcodec'] in ['h264', 'hevc']:
+            # FIX: Der Profil-Name muss für den ffmpeg-Befehl kleingeschrieben werden.
+            profile_str = str(v_params['profile']).lower()
+            command.extend(["-profile:v", profile_str])
+        if v_params.get('level') and v_params['vcodec'] in ['h264', 'hevc']:
+            # Level wird von ffprobe oft als Zahl (z.B. 41 für 4.1) geliefert.
+            # Wir rechnen es für den ffmpeg-Befehl um.
+            try:
+                level_str = str(float(v_params['level']) / 10.0)
+                command.extend(["-level:v", level_str])
+            except (ValueError, TypeError):
+                command.extend(["-level:v", str(v_params['level'])])
 
-        subprocess.run([
-            "ffmpeg", "-y", "-loop", "1", "-i", "assets/hintergrund.png",
-            "-vf", video_filters,
-            "-t", str(dauer),
-            "-r", v_params['fps'],
-            "-c:v", v_params['vcodec'],
-            "-pix_fmt", v_params['pix_fmt'],
-            "-an",
-            output_path
-        ], capture_output=True, text=True, check=True)
+        command.append(output_path)
 
-    def _add_silent_audio_to_intro(self, video_in, video_out, dauer, v_params):
-        """Fügt eine stille Audiospur zu einem Video hinzu, die zum Hauptvideo passt."""
-        temp_silent_audio = os.path.join(tempfile.gettempdir(), "silent.aac")
-
-        # Stille Audiospur erstellen
-        subprocess.run([
-            "ffmpeg", "-y", "-f", "lavfi",
-            "-i", f"anullsrc=channel_layout={v_params['channel_layout']}:sample_rate={v_params['sample_rate']}",
-            "-t", str(dauer),
-            "-c:a", v_params['acodec'],
-            temp_silent_audio
-        ], capture_output=True, text=True, check=True)
-
-        # Video und stille Audiospur zusammenfügen
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-i", video_in,
-            "-i", temp_silent_audio,
-            "-c", "copy",
-            "-map", "0:v:0", "-map", "1:a:0",
-            video_out
-        ], capture_output=True, text=True, check=True)
-
-        os.remove(temp_silent_audio)
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            if self.cancel_event.is_set():
+                raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
+            print(f"Fehler bei Intro-Erstellung: {result.stderr}")
+            raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
 
     def _copy_photos_to_output_directory(self, photo_paths, output_video_path):
         """Kopiert alle Fotos in ein Foto-Unterverzeichnis"""
         if not photo_paths:
             return
 
-        # Verzeichnis des Output-Videos ermitteln
         output_dir = os.path.dirname(output_video_path)
         photos_dir = os.path.join(output_dir, "Fotos")
 
         try:
-            # Foto-Verzeichnis erstellen
             os.makedirs(photos_dir, exist_ok=True)
-
-            # Fotos kopieren
             copied_count = 0
             for photo_path in photo_paths:
+                self._check_for_cancellation()  # Check before copying each file
                 if os.path.exists(photo_path):
                     filename = os.path.basename(photo_path)
                     destination_path = os.path.join(photos_dir, filename)
-
-                    # Datei kopieren (überschreiben falls existiert)
                     shutil.copy2(photo_path, destination_path)
                     copied_count += 1
-                    print(f"Foto kopiert: {filename}")
-
             print(f"{copied_count} Foto(s) nach '{photos_dir}' kopiert")
-
         except Exception as e:
-            print(f"Fehler beim Kopieren der Fotos: {e}")
-
-    def _create_title_clip_no_audio(self, output_path, dauer, fps, width, height, drawtext_filter):
-        """Erstellt den Titel-Clip mit Text-Overlay OHNE Audio, skaliert auf die Zieldimensionen."""
-        print(f"Erstelle Titelclip ohne Audio mit Dimensionen {width}x{height}...")
-
-        # Kombiniert den Skalierungsfilter mit dem bestehenden Text-Overlay-Filter.
-        # Das Hintergrundbild wird zuerst skaliert, danach wird der Text darauf gezeichnet.
-        video_filters = f"scale={width}:{height}, {drawtext_filter}"
-
-        result = subprocess.run([
-            "ffmpeg", "-y",
-            "-loop", "1",
-            "-i", "assets/hintergrund.png",
-            "-vf", video_filters,
-            "-t", str(dauer),
-            "-r", str(fps),
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-preset", "fast",
-            "-an",  # KEINE Audio-Spur
-            output_path
-        ], capture_output=True, text=True)
-
-        if result.returncode != 0:
-            error_message = f"Titelclip-Erstellung fehlgeschlagen: {result.stderr}"
-            print(error_message)
-            raise Exception(error_message)
-
-    def _create_final_video_with_original_audio(self, video_with_intro_path, original_video_path, output_path,
-                                                intro_duration):
-        """Erstellt finales Video mit der originalen Audio (verschoben um Intro-Dauer)"""
-        print("Erstelle finales Video mit verschobener Audio...")
-
-        # Extrahiere Audio aus dem originalen kombinierten Video
-        temp_audio_path = os.path.join(tempfile.gettempdir(), "original_audio.aac")
-
-        # Audio extrahieren
-        result = subprocess.run([
-            "ffmpeg", "-y",
-            "-i", original_video_path,
-            "-vn",
-            "-acodec", "copy",
-            temp_audio_path
-        ], capture_output=True, text=True)
-
-        if result.returncode != 0:
-            print(f"Fehler beim Audio-Extrahieren: {result.stderr}")
-            raise Exception(f"Audio-Extraktion fehlgeschlagen: {result.stderr}")
-
-        # Audio um Intro-Dauer verschieben
-        temp_delayed_audio_path = os.path.join(tempfile.gettempdir(), "delayed_audio.aac")
-        intro_ms = int(intro_duration * 1000)
-
-        result = subprocess.run([
-            "ffmpeg", "-y",
-            "-i", temp_audio_path,
-            "-af", f"adelay={intro_ms}|{intro_ms}",
-            temp_delayed_audio_path
-        ], capture_output=True, text=True)
-
-        if result.returncode != 0:
-            print(f"Fehler beim Audio-Verschieben: {result.stderr}")
-            raise Exception(f"Audio-Verschieben fehlgeschlagen: {result.stderr}")
-
-        # Kombiniere Video (mit Intro) mit verschobener Audio
-        result = subprocess.run([
-            "ffmpeg", "-y",
-            "-i", video_with_intro_path,  # Video mit Intro aber ohne Audio
-            "-i", temp_delayed_audio_path,  # Verschobene Audio
-            "-c:v", "copy",
-            "-c:a", "copy",
-            "-movflags", "+faststart",
-            output_path
-        ], capture_output=True, text=True)
-
-        # Temporäre Audio-Dateien löschen
-        try:
-            os.remove(temp_audio_path)
-            os.remove(temp_delayed_audio_path)
-        except:
-            pass
-
-        if result.returncode != 0:
-            print(f"Fehler beim Final-Video-Erstellen: {result.stderr}")
-            raise Exception(f"Final-Video-Erstellung fehlgeschlagen: {result.stderr}")
+            if not isinstance(e, CancellationError):
+                print(f"Fehler beim Kopieren der Fotos: {e}")
+            raise e
 
     def _get_video_info(self, video_path):
-        """Ermittelt detaillierte Video- und Audio-Stream-Informationen mit ffprobe."""
+        """
+        Ermittelt detaillierte Video- und Audio-Stream-Informationen mit ffprobe.
+        NEU: Liest zusätzliche Farb-Metadaten, Profil und Level aus, die für 4K/HDR-Material entscheidend sind.
+        """
+        self._check_for_cancellation()
         command = [
             "ffprobe", "-v", "quiet",
             "-print_format", "json",
@@ -342,9 +290,8 @@ class VideoProcessor:
         if not audio_stream:
             raise ValueError("Kein Audio-Stream in der Eingabedatei gefunden.")
 
-        # Extrahiere die Timescale aus der time_base (z.B. aus "1/90000" wird 90000)
         time_base = video_stream.get("time_base", "1/25").split('/')
-        timescale = time_base[1] if len(time_base) == 2 else "25"  # Fallback
+        timescale = time_base[1] if len(time_base) == 2 else "25"
 
         return {
             "width": video_stream.get("width"),
@@ -356,7 +303,15 @@ class VideoProcessor:
             "vtag": video_stream.get("codec_tag_string", "avc1"),
             "acodec": audio_stream.get("codec_name"),
             "sample_rate": audio_stream.get("sample_rate"),
-            "channel_layout": video_stream.get("channel_layout", "stereo")  # Default to stereo
+            "channel_layout": audio_stream.get("channel_layout", "stereo"),
+            # Farb-Parameter auslesen
+            "color_range": video_stream.get("color_range"),
+            "colorspace": video_stream.get("color_space"),
+            "color_primaries": video_stream.get("color_primaries"),
+            "color_trc": video_stream.get("color_transfer"),  # 'color_trc' in ffmpeg
+            # NEU: Codec Profile und Level für maximale Kompatibilität
+            "profile": video_stream.get("profile"),
+            "level": video_stream.get("level"),
         }
 
     def _prepare_text_overlay(self, gast, tandemmaster, videospringer, datum, ort, clip_height, outside_video):
@@ -371,7 +326,7 @@ class VideoProcessor:
         text_inhalte.extend([f"Datum: {datum}", f"Ort: {ort}"])
         text_inhalte = [ffmpeg_escape(t) for t in text_inhalte]
 
-        font_size = int(clip_height / 18)
+        font_size = int(clip_height / 22)  # Etwas kleiner für bessere Lesbarkeit bei 4K
         y = clip_height * 0.15
         y_step = clip_height * 0.15
         drawtext_cmds = []
@@ -390,20 +345,16 @@ class VideoProcessor:
             datum_obj = date.fromisoformat('-'.join(datum.split('.')[::-1]))
             datum_formatiert = datum_obj.strftime("%Y%m%d")
         except:
-            # Fallback: aktuelles Datum verwenden
             from datetime import datetime
             datum_formatiert = datetime.now().strftime("%Y%m%d")
 
-        # Basis-Dateiname ohne Endung
         base_filename = f"{datum_formatiert}_L{load}_{gast}_TA_{tandemmaster}"
         if outside_video:
             base_filename += f"_V_{videospringer}"
 
-        # Verzeichnis erstellen
         output_dir = os.path.join(speicherort, sanitize_filename(base_filename))
         os.makedirs(output_dir, exist_ok=True)
 
-        # Vollständiger Pfad mit Dateiname
         output_filename = f"{base_filename}.mp4"
         full_output_path = os.path.join(output_dir, sanitize_filename(output_filename))
 
@@ -413,52 +364,47 @@ class VideoProcessor:
         """Lädt das erstellte Verzeichnis auf den Server hoch"""
         try:
             from ..utils.file_utils import upload_to_server_simple
-
-            # Verzeichnis des Videos ermitteln
             video_dir = os.path.dirname(local_video_path)
-
-            # Upload durchführen
+            # Hinzufügen einer Prüfung vor dem langen Upload-Prozess
+            self._check_for_cancellation()
             success, message, server_path = upload_to_server_simple(video_dir)
-
             if success:
                 print(f"Server Upload erfolgreich: {server_path}")
             else:
                 print(f"Server Upload fehlgeschlagen: {message}")
-
             return success, message, server_path
-
         except Exception as e:
+            if isinstance(e, CancellationError):
+                raise e  # Erneut auslösen, um vom Haupt-Handler gefangen zu werden
             error_msg = f"Upload Fehler: {str(e)}"
             print(error_msg)
             return False, error_msg, ""
 
-    def _update_progress(self, step, total_steps=10):
-        """Aktualisiert den Fortschritt"""
+    def _update_progress(self, step, total_steps=11):
         if self.progress_callback:
             self.progress_callback(step, total_steps)
 
     def _show_success_message(self, output_path, server_message=""):
-        """Zeigt Erfolgsmeldung an"""
         if self.status_callback:
-            self.status_callback("success", f"Das finale Video mit Intro wurde unter '{output_path}' gespeichert." + (f"\n{server_message}" if server_message != "" else server_message))
+            msg = f"Das finale Video mit Intro wurde unter '{output_path}' gespeichert."
+            if server_message:
+                msg += f"\n{server_message}"
+            self.status_callback("success", msg)
 
     def _handle_cancellation(self):
-        """Behandelt Abbruch durch Benutzer"""
+        print("Cancellation signal received and handled in VideoProcessor.")
         if self.status_callback:
             self.status_callback("cancelled", "Erstellung abgebrochen.")
 
     def _handle_error(self, error):
-        """Behandelt Fehler während der Verarbeitung"""
         if self.status_callback:
             self.status_callback("error", f"Fehler bei der Videoerstellung:\n{error}")
 
     def _update_status(self, message):
-        """Aktualisiert den Status"""
         if self.status_callback:
             self.status_callback("update", message)
 
     def _cleanup_temp_files(self, temp_files):
-        """Räumt temporäre Dateien auf"""
         for temp_file in temp_files:
             try:
                 if os.path.exists(temp_file):
@@ -467,13 +413,11 @@ class VideoProcessor:
                 pass
 
     def _cleanup(self):
-        """Führt allgemeine Cleanup-Aufgaben durch"""
         self.reset_cancel_event()
 
     def cancel_process(self):
-        """Bricht die Videoerstellung ab"""
+        print("Cancel event set!")
         self.cancel_event.set()
 
     def reset_cancel_event(self):
-        """Setzt das Cancel-Event zurück"""
         self.cancel_event.clear()

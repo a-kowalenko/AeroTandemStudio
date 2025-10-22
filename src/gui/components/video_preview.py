@@ -64,7 +64,7 @@ class VideoPreview:
         """Erstellt eine Vorschau aus allen Videos und aktualisiert die UI"""
         if not video_paths:
             self.clear_preview()
-            return
+            return None
 
         self.status_label.config(text="Erstelle Vorschau...", fg="blue")
         self.play_button.config(state="disabled")

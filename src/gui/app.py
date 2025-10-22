@@ -331,6 +331,10 @@ class VideoGeneratorApp:
 
         # Aktiviere Erstellen-Button wieder, wenn die Vorschau fertig ist
         def enable_button_when_done():
+            # None Check
+            if update_preview_thread is None:
+                return
+
             update_preview_thread.join()
 
             def restore():

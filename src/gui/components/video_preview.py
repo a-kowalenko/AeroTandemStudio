@@ -87,9 +87,9 @@ class VideoPreview:
             self.parent.after(0, self._update_encoding_info, format_info)
 
             if needs_reencoding:
-                # Mit Re-Encoding kombinieren - alle Videos mit Parametern des ersten Clips
+                # Mit Re-Encoding kombinieren - alle Videos auf 1080p@30fps standardisieren
                 self.parent.after(0, lambda: self.status_label.config(
-                    text="Kodiere mit Parametern des ersten Clips...", fg="orange"))
+                    text="Kodiere Videos auf 1080p @ 30fps...", fg="orange"))
 
                 self.combined_video_path = self._create_reencoded_combined_video(video_paths)
             else:
@@ -108,103 +108,15 @@ class VideoPreview:
         except Exception as e:
             self.parent.after(0, self._update_ui_error, f"Fehler: {str(e)}")
 
-    def _get_video_parameters(self, video_path):
-        """Ermittelt die Video-Parameter des ersten Clips"""
-        try:
-            result = subprocess.run([
-                'ffprobe', '-v', 'quiet',
-                '-print_format', 'json',
-                '-show_streams', '-show_format',
-                video_path
-            ], capture_output=True, text=True, timeout=10)
-
-            if result.returncode == 0:
-                info = json.loads(result.stdout)
-
-                # Finde Video-Stream
-                video_stream = None
-                audio_stream = None
-
-                for stream in info.get('streams', []):
-                    if stream.get('codec_type') == 'video' and video_stream is None:
-                        video_stream = stream
-                    elif stream.get('codec_type') == 'audio' and audio_stream is None:
-                        audio_stream = stream
-
-                params = {}
-
-                if video_stream:
-                    # Video-Parameter
-                    params['width'] = video_stream.get('width', 1920)
-                    params['height'] = video_stream.get('height', 1080)
-                    params['frame_rate'] = video_stream.get('r_frame_rate', '25/1')
-
-                    # Berechne Framerate als Float
-                    try:
-                        num, den = map(int, params['frame_rate'].split('/'))
-                        params['fps'] = num / den if den != 0 else 25.0
-                    except:
-                        params['fps'] = 25.0
-
-                    params['pix_fmt'] = video_stream.get('pix_fmt', 'yuv420p')
-                    params['video_codec'] = video_stream.get('codec_name', 'libx264')
-                    params['has_audio'] = audio_stream is not None
-
-                if audio_stream:
-                    # Audio-Parameter
-                    params['audio_codec'] = audio_stream.get('codec_name', 'aac')
-                    params['audio_sample_rate'] = audio_stream.get('sample_rate', '48000')
-                    params['audio_channels'] = audio_stream.get('channels', 2)
-                    params['has_audio'] = True
-                else:
-                    params['has_audio'] = False
-                    params['audio_codec'] = 'aac'
-                    params['audio_sample_rate'] = '48000'
-                    params['audio_channels'] = 2
-
-                # Fallback-Werte falls nicht ermittelbar
-                if not params.get('width'):
-                    params['width'] = 1920
-                if not params.get('height'):
-                    params['height'] = 1080
-                if not params.get('fps'):
-                    params['fps'] = 25.0
-                if not params.get('pix_fmt'):
-                    params['pix_fmt'] = 'yuv420p'
-                if not params.get('video_codec'):
-                    params['video_codec'] = 'libx264'
-                if not params.get('audio_codec'):
-                    params['audio_codec'] = 'aac'
-                if not params.get('audio_sample_rate'):
-                    params['audio_sample_rate'] = '48000'
-                if not params.get('audio_channels'):
-                    params['audio_channels'] = 2
-
-                return params
-
-        except Exception as e:
-            print(f"Fehler beim Ermitteln der Video-Parameter: {e}")
-
-        # Fallback-Parameter
-        return {
-            'width': 1920,
-            'height': 1080,
-            'fps': 25.0,
-            'pix_fmt': 'yuv420p',
-            'video_codec': 'libx264',
-            'audio_codec': 'aac',
-            'audio_sample_rate': '48000',
-            'audio_channels': 2,
-            'has_audio': True
-        }
-
     def _create_fast_combined_video(self, video_paths):
         """Kombiniert Videos schnell ohne Re-Encoding"""
         concat_list_path = os.path.join(tempfile.gettempdir(), "preview_concat_list.txt")
         output_path = os.path.join(tempfile.gettempdir(), "preview_combined_fast.mp4")
 
+        # Use ' with open(...) ' to ensure the file is closed automatically
         with open(concat_list_path, "w", encoding="utf-8") as f:
             for video_path in video_paths:
+                # Use os.path.abspath to create safe file paths for ffmpeg
                 f.write(f"file '{os.path.abspath(video_path)}'\n")
 
         result = subprocess.run([
@@ -216,11 +128,11 @@ class VideoPreview:
             output_path
         ], capture_output=True, text=True)
 
-        # Aufräumen
+        # Clean up the temporary list file
         try:
             os.remove(concat_list_path)
-        except:
-            pass
+        except OSError as e:
+            print(f"Error removing temp file: {e}")
 
         if result.returncode == 0:
             return output_path
@@ -229,63 +141,70 @@ class VideoPreview:
             return None
 
     def _create_reencoded_combined_video(self, video_paths):
-        """Kombiniert Videos mit Parametern des ersten Clips in einem Durchgang"""
+        """Kombiniert Videos, indem alle auf 1080p@30fps standardisiert werden, ohne das Seitenverhältnis zu verzerren."""
         if not video_paths:
             return None
 
-        # Parameter des ersten Videos ermitteln
-        first_video_params = self._get_video_parameters(video_paths[0])
+        # Standardisierte Zielparameter
+        target_params = {
+            'width': 1920,
+            'height': 1080,
+            'fps': 30,
+            'pix_fmt': 'yuv420p',
+            'video_codec': 'libx264',
+            'audio_codec': 'aac',
+            'audio_sample_rate': 48000,
+            'audio_channels': 2
+        }
+
         output_path = os.path.join(tempfile.gettempdir(), "preview_combined_reencoded.mp4")
 
         try:
             # FFmpeg-Befehl mit Filterkomplex für alle Videos in einem Durchgang
-            cmd = [
-                "ffmpeg", "-y"
-            ]
+            cmd = ["ffmpeg", "-y"]
 
             # Inputs hinzufügen
             for video_path in video_paths:
                 cmd.extend(["-i", video_path])
 
-            # Filterkomplex für Video und Audio
-            filter_complex = ""
+            filter_complex_parts = []
+            video_outputs = []
+            audio_outputs = []
 
-            # Video-Filter: Alle Videos skalieren und zum gleichen Format konvertieren
-            for i in range(len(video_paths)):
-                filter_complex += f"[{i}:v] scale={first_video_params['width']}:{first_video_params['height']}:flags=lanczos, fps={first_video_params['fps']}, format={first_video_params['pix_fmt']} [v{i}]; "
+            # Filter für jeden Input erstellen
+            for i, video_path in enumerate(video_paths):
+                # Video-Filter: Skalieren mit Beibehaltung des Seitenverhältnisses (letterbox/pillarbox) und auf Ziel-FPS/Format setzen
+                video_filter = (
+                    f"[{i}:v]scale={target_params['width']}:{target_params['height']}:force_original_aspect_ratio=decrease,"
+                    f"pad={target_params['width']}:{target_params['height']}:-1:-1:color=black,"
+                    f"fps={target_params['fps']},format={target_params['pix_fmt']}[v{i}]"
+                )
+                filter_complex_parts.append(video_filter)
+                video_outputs.append(f"[v{i}]")
 
-            # Audio-Filter: Alle Audio-Streams konvertieren (nur wenn Audio vorhanden)
-            for i in range(len(video_paths)):
-                if first_video_params.get('has_audio', True):
-                    filter_complex += f"[{i}:a] aresample=48000, asetpts=N/SR/TB [a{i}]; "
-                else:
-                    # Falls kein Audio, silent Audio generieren
-                    filter_complex += f"aevalsrc=0:d=1 [a{i}]; "
+                # Audio-Filter: Auf Standard-Samplerate konvertieren und Timestamps zurücksetzen
+                # Wir gehen davon aus, dass jeder Clip einen Audio-Stream hat (ffmpeg ist robust, wenn nicht)
+                audio_filter = f"[{i}:a]aresample={target_params['audio_sample_rate']},asetpts=N/SR/TB[a{i}]"
+                filter_complex_parts.append(audio_filter)
+                audio_outputs.append(f"[a{i}]")
 
-            # Concatenation für Video
-            filter_complex += f"{''.join([f'[v{i}]' for i in range(len(video_paths))])} concat=n={len(video_paths)}:v=1:a=0 [outv]; "
+            # Concatenation-Filter für Video und Audio
+            filter_complex_parts.append(f"{''.join(video_outputs)}concat=n={len(video_paths)}:v=1:a=0[outv]")
+            filter_complex_parts.append(f"{''.join(audio_outputs)}concat=n={len(video_paths)}:v=0:a=1[outa]")
 
-            # Concatenation für Audio
-            if first_video_params.get('has_audio', True):
-                filter_complex += f"{''.join([f'[a{i}]' for i in range(len(video_paths))])} concat=n={len(video_paths)}:v=0:a=1 [outa]"
-            else:
-                filter_complex += "aevalsrc=0:d=1 [outa]"
+            filter_complex = ";".join(filter_complex_parts)
 
             cmd.extend([
                 "-filter_complex", filter_complex,
                 "-map", "[outv]",
                 "-map", "[outa]",
                 # Video-Encoding-Parameter
-                "-c:v", "libx264",  # Immer H.264 für Kompatibilität
+                "-c:v", target_params['video_codec'],
                 "-preset", "fast",
                 "-crf", "23",
-                "-r", str(first_video_params['fps']),
-                "-pix_fmt", first_video_params['pix_fmt'],
                 # Audio-Encoding-Parameter
-                "-c:a", "aac",  # Immer AAC für Kompatibilität
+                "-c:a", target_params['audio_codec'],
                 "-b:a", "128k",
-                "-ac", "2",
-                "-ar", "48000",
                 # Output
                 "-movflags", "+faststart",
                 output_path
@@ -293,28 +212,27 @@ class VideoPreview:
 
             print(f"FFmpeg command: {' '.join(cmd)}")  # Debug-Ausgabe
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)  # Timeout erhöht
 
             if result.returncode == 0:
                 return output_path
             else:
-                print(f"Reencoding failed: {result.stderr}")
-                # Fallback: Einfacheres concat mit Re-Encoding versuchen
-                return self._create_simple_reencoded_video(video_paths, first_video_params)
+                print(f"Re-encoding with filter_complex failed: {result.stderr}")
+                # Fallback: Einfacheres Concat mit Re-Encoding versuchen, falls der komplexe Filter fehlschlägt
+                return self._create_simple_reencoded_video(video_paths, target_params)
 
         except subprocess.TimeoutExpired:
-            print("Encoding timeout")
+            print("Encoding timed out.")
             return None
         except Exception as e:
-            print(f"Encoding error: {e}")
+            print(f"An unexpected error occurred during encoding: {e}")
             return None
 
     def _create_simple_reencoded_video(self, video_paths, params):
-        """Einfachere Fallback-Methode mit concat demuxer"""
+        """Einfachere Fallback-Methode, die den Concat-Demuxer verwendet und das Ergebnis neu kodiert."""
         concat_list_path = os.path.join(tempfile.gettempdir(), "preview_concat_reencode.txt")
-        output_path = os.path.join(tempfile.gettempdir(), "preview_combined_simple.mp4")
+        output_path = os.path.join(tempfile.gettempdir(), "preview_combined_simple_reencoded.mp4")
 
-        # Concat-Liste erstellen
         with open(concat_list_path, "w", encoding="utf-8") as f:
             for video_path in video_paths:
                 f.write(f"file '{os.path.abspath(video_path)}'\n")
@@ -324,33 +242,39 @@ class VideoPreview:
                 "ffmpeg", "-y",
                 "-f", "concat", "-safe", "0",
                 "-i", concat_list_path,
-                # Erzwinge Re-Encoding mit einheitlichen Parametern
-                "-c:v", "libx264",
+                # Video-Filter, um das Ergebnis zu standardisieren
+                "-vf", f"scale={params['width']}:{params['height']}:force_original_aspect_ratio=decrease,"
+                       f"pad={params['width']}:{params['height']}:-1:-1:color=black,"
+                       f"fps={params['fps']},format={params['pix_fmt']}",
+                # Video- und Audio-Codecs erzwingen
+                "-c:v", params['video_codec'],
                 "-preset", "fast",
                 "-crf", "23",
-                "-r", str(params['fps']),
-                "-s", f"{params['width']}x{params['height']}",
-                "-pix_fmt", params['pix_fmt'],
-                "-c:a", "aac",
+                "-c:a", params['audio_codec'],
                 "-b:a", "128k",
-                "-ac", "2",
-                "-ar", "48000",
+                "-ar", str(params['audio_sample_rate']),
+                "-ac", str(params['audio_channels']),
+                # Output
                 "-movflags", "+faststart",
                 output_path
             ]
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            print(f"FFmpeg fallback command: {' '.join(cmd)}")
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
 
             if result.returncode == 0:
                 return output_path
             else:
-                print(f"Simple reencoding also failed: {result.stderr}")
+                print(f"Simple re-encoding fallback also failed: {result.stderr}")
                 return None
-
+        except Exception as e:
+            print(f"Error in simple re-encoding: {e}")
+            return None
         finally:
             try:
                 os.remove(concat_list_path)
-            except:
+            except OSError:
                 pass
 
     def _check_video_formats(self, video_paths):
@@ -370,13 +294,7 @@ class VideoPreview:
 
                 if result.returncode == 0:
                     info = json.loads(result.stdout)
-
-                    # Finde Video-Stream
-                    video_stream = None
-                    for stream in info.get('streams', []):
-                        if stream.get('codec_type') == 'video':
-                            video_stream = stream
-                            break
+                    video_stream = next((s for s in info.get('streams', []) if s.get('codec_type') == 'video'), None)
 
                     if video_stream:
                         format_info = {
@@ -385,78 +303,52 @@ class VideoPreview:
                             'height': video_stream.get('height', 0),
                             'r_frame_rate': video_stream.get('r_frame_rate', '0/0'),
                             'pix_fmt': video_stream.get('pix_fmt', 'unknown'),
-                            'sample_aspect_ratio': video_stream.get('sample_aspect_ratio', '1:1'),
                         }
                         formats.append(format_info)
                     else:
                         formats.append({'error': 'No video stream'})
                 else:
                     formats.append({'error': 'FFprobe failed'})
-
             except Exception as e:
                 formats.append({'error': str(e)})
 
-        # Vergleiche alle Formate
-        if len(formats) <= 1:
-            return {"compatible": True, "details": "Nur ein Video"}
+        if not formats:
+            return {"compatible": False, "details": "Could not read any video formats."}
 
-        first_format = formats[0]
-        compatible = True
+        first_format = next((f for f in formats if 'error' not in f), None)
+        if not first_format:
+            return {"compatible": False, "details": "No valid video streams found."}
+
+        is_compatible = True
         differences = []
 
-        for i, fmt in enumerate(formats[1:], 1):
+        for i, fmt in enumerate(formats):
             if 'error' in fmt:
-                compatible = False
+                is_compatible = False
                 differences.append(f"Video {i + 1}: {fmt['error']}")
                 continue
 
-            # Prüfe Codec
-            if fmt.get('codec_name') != first_format.get('codec_name'):
-                compatible = False
-                differences.append(f"Video {i + 1}: Codec {fmt['codec_name']} != {first_format['codec_name']}")
+            for key in ['codec_name', 'width', 'height', 'r_frame_rate', 'pix_fmt']:
+                if fmt.get(key) != first_format.get(key):
+                    is_compatible = False
+                    differences.append(f"Video {i + 1} {key}: {fmt.get(key)} != {first_format.get(key)}")
 
-            # Prüfe Auflösung
-            if fmt.get('width') != first_format.get('width') or fmt.get('height') != first_format.get('height'):
-                compatible = False
-                differences.append(
-                    f"Video {i + 1}: {fmt['width']}x{fmt['height']} != {first_format['width']}x{first_format['height']}")
-
-            # Prüfe Framerate (vereinfacht)
-            if fmt.get('r_frame_rate') != first_format.get('r_frame_rate'):
-                compatible = False
-                differences.append(f"Video {i + 1}: FPS {fmt['r_frame_rate']} != {first_format['r_frame_rate']}")
-
-            # Prüfe Pixel-Format
-            if fmt.get('pix_fmt') != first_format.get('pix_fmt'):
-                compatible = False
-                differences.append(f"Video {i + 1}: Pixel-Format {fmt['pix_fmt']} != {first_format['pix_fmt']}")
-
-            # Prüfe Aspect Ratio
-            if fmt.get('sample_aspect_ratio') != first_format.get('sample_aspect_ratio'):
-                compatible = False
-                differences.append(f"Video {i + 1}: SAR {fmt['sample_aspect_ratio']} != {first_format['sample_aspect_ratio']}")
-
-        if compatible:
+        if is_compatible:
             details = f"Alle {len(video_paths)} Videos kompatibel: {first_format['width']}x{first_format['height']}, {first_format['codec_name']}"
         else:
             details = f"Format-Unterschiede: {', '.join(differences[:3])}"
 
-        return {
-            "compatible": compatible,
-            "details": details,
-            "formats": formats
-        }
+        return {"compatible": is_compatible, "details": details}
 
     def _update_encoding_info(self, format_info):
         """Aktualisiert die Encoding-Information in der UI"""
         if format_info["compatible"]:
             self.encoding_label.config(text=f"Encoding: Kompatibel (schnell)", fg="green")
         else:
-            self.encoding_label.config(text=f"Encoding: Einheitliches Format", fg="orange")
+            self.encoding_label.config(text=f"Encoding: Standardisiert (1080p)", fg="orange")
 
     def _update_ui_success(self, video_paths, was_reencoded):
         """Aktualisiert UI nach erfolgreicher Vorschau-Erstellung"""
-        # Gesamtdauer berechnen
         total_duration = self._calculate_total_duration(video_paths)
         total_size = self._calculate_total_size(video_paths)
 
@@ -465,8 +357,8 @@ class VideoPreview:
         self.clips_label.config(text=f"Anzahl Clips: {len(video_paths)}")
 
         if was_reencoded:
-            self.status_label.config(text="Vorschau bereit (einheitliches Format)", fg="green")
-            self.encoding_label.config(text="Encoding: Einheitliches Format", fg="orange")
+            self.status_label.config(text="Vorschau bereit (standardisiert)", fg="green")
+            self.encoding_label.config(text="Encoding: Standardisiert (1080p)", fg="orange")
         else:
             self.status_label.config(text="Vorschau bereit (schnell)", fg="green")
             self.encoding_label.config(text="Encoding: Direkt kombiniert", fg="green")
@@ -494,28 +386,25 @@ class VideoPreview:
                     video_path
                 ], capture_output=True, text=True, timeout=5)
 
-                if result.returncode == 0:
+                if result.returncode == 0 and result.stdout:
                     total_seconds += float(result.stdout.strip())
-            except:
+            except (subprocess.TimeoutExpired, ValueError):
                 continue
 
-        minutes = int(total_seconds // 60)
-        seconds = int(total_seconds % 60)
-        return f"{minutes:02d}:{seconds:02d}"
+        minutes, seconds = divmod(total_seconds, 60)
+        return f"{int(minutes):02d}:{int(seconds):02d}"
 
     def _calculate_total_size(self, video_paths):
         """Berechnet die Gesamtgröße aller Videos"""
-        total_bytes = 0
-        for video_path in video_paths:
-            try:
-                total_bytes += os.path.getsize(video_path)
-            except:
-                continue
+        total_bytes = sum(os.path.getsize(p) for p in video_paths if os.path.exists(p))
 
-        if total_bytes > 1024 * 1024 * 1024:
-            return f"{total_bytes / (1024 * 1024 * 1024):.1f} GB"
-        elif total_bytes > 1024 * 1024:
-            return f"{total_bytes / (1024 * 1024):.1f} MB"
+        if total_bytes == 0:
+            return "0 KB"
+
+        if total_bytes > 1024 ** 3:
+            return f"{total_bytes / (1024 ** 3):.1f} GB"
+        elif total_bytes > 1024 ** 2:
+            return f"{total_bytes / (1024 ** 2):.1f} MB"
         else:
             return f"{total_bytes / 1024:.1f} KB"
 
@@ -530,21 +419,23 @@ class VideoPreview:
         self.stop_button.config(state="normal")
         self.status_label.config(text="Wiedergabe läuft...", fg="blue")
 
-        # Video mit Standard-Player öffnen
         try:
             if os.name == 'nt':  # Windows
                 os.startfile(self.combined_video_path)
-            elif os.name == 'posix':  # macOS/Linux
-                subprocess.run(['open', self.combined_video_path], check=False)
-            # Für Linux: subprocess.run(['xdg-open', self.combined_video_path], check=False)
+            elif sys.platform == 'darwin':  # macOS
+                subprocess.run(['open', self.combined_video_path], check=True)
+            else:  # Linux
+                subprocess.run(['xdg-open', self.combined_video_path], check=True)
         except Exception as e:
             self.status_label.config(text=f"Player konnte nicht gestartet werden: {e}", fg="red")
+            self._reset_play_state()
+            return
 
-        # Zurücksetzen nach kurzer Zeit
         self.parent.after(3000, self._reset_play_state)
 
     def _reset_play_state(self):
         """Setzt den Play-Button zurück"""
+        if not self.parent.winfo_exists(): return
         self.is_playing = False
         self.play_button.config(state="normal")
         self.stop_button.config(state="disabled")
@@ -552,22 +443,21 @@ class VideoPreview:
             self.status_label.config(text="Vorschau bereit", fg="green")
 
     def stop_preview(self):
-        """Stoppt die Vorschau-Wiedergabe"""
+        """Stoppt die Vorschau-Wiedergabe (symbolisch, da externer Player)"""
+        if not self.parent.winfo_exists(): return
         self.is_playing = False
         self.play_button.config(state="normal")
         self.stop_button.config(state="disabled")
         self.status_label.config(text="Vorschau gestoppt", fg="orange")
-        self.parent.after(2000, lambda: self.status_label.config(
-            text="Vorschau bereit" if self.combined_video_path else "Keine Vorschau verfügbar",
-            fg="green" if self.combined_video_path else "gray"))
+        self.parent.after(2000, self._reset_play_state)
 
     def clear_preview(self):
-        """Setzt die Vorschau zurück"""
+        """Setzt die Vorschau zurück und löscht die temporäre Datei"""
         if self.combined_video_path and os.path.exists(self.combined_video_path):
             try:
                 os.remove(self.combined_video_path)
-            except:
-                pass
+            except OSError as e:
+                print(f"Could not delete temp preview file: {e}")
 
         self.combined_video_path = None
         self.is_playing = False

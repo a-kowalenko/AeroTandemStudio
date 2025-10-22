@@ -1,13 +1,18 @@
 ﻿from proglog import ProgressBarLogger
 
+
 class CancellationError(Exception):
     """Eigene Exception, um einen sauberen Abbruch zu signalisieren."""
     pass
+
 
 class CancellableProgressBarLogger(ProgressBarLogger):
     """
     Dieser Logger prüft bei jedem Fortschritts-Update, ob das
     cancel_event gesetzt wurde und wirft dann eine Exception.
+
+    HINWEIS: In der aktuellen Implementierung wird der Abbruch manuell
+    im VideoProcessor geprüft, nicht über diesen Logger-Callback.
     """
 
     def __init__(self, cancel_event):

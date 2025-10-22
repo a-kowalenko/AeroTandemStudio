@@ -1,4 +1,5 @@
 ﻿import platform
+import re
 import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinterdnd2 import DND_FILES
@@ -296,22 +297,25 @@ class DragDropFrame:
                 "details": f"Fehler bei Format-Prüfung: {str(e)}"
             }
 
-    def _parse_dropped_files(self, data):
-        """Parst die abgelegten Dateien"""
-        filepaths = []
-        clean_data = data.strip('{}')
+    def _parse_dropped_files(self, data_string):
+        """Verarbeitet die Zeichenkette eines Drop-Events in eine Liste von Dateipfaden."""
+        # Diese Methode ist für den Aufruf durch einen Drag-and-Drop-Handler vorgesehen.
+        # Tkinter unter Windows liefert eine Tcl-formatierte Liste, bei der Pfade
+        # mit Leerzeichen in {} eingeschlossen sind.
+        # Beispiel: '{C:/Benutzer/Test User/vid 1.mp4}' C:/normaler/pfad/vid2.mp4
 
-        if ' ' in clean_data:
-            potential_files = clean_data.split(' ')
-            for filepath in potential_files:
-                filepath = filepath.strip()
-                if filepath and os.path.exists(filepath):
-                    filepaths.append(filepath)
-        else:
-            if os.path.exists(clean_data):
-                filepaths.append(clean_data)
+        # Verwendung von Regex, um entweder in geschweiften Klammern stehende Inhalte oder Zeichenketten ohne Leerzeichen zu finden
+        path_candidates = re.findall(r'\{[^{}]*\}|[^ ]+', data_string)
 
-        return filepaths
+        cleaned_paths = []
+        for path in path_candidates:
+            # Entfernt die geschweiften Klammern, falls vorhanden
+            if path.startswith('{') and path.endswith('}'):
+                cleaned_paths.append(path[1:-1])
+            else:
+                cleaned_paths.append(path)
+
+        return cleaned_paths
 
     def add_files(self, new_videos, new_photos):
         """Fügt neue Videos und Fotos hinzu und aktualisiert die Tabellen"""

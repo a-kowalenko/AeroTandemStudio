@@ -74,11 +74,16 @@ class VideoProcessor:
             if not os.path.exists("assets/hintergrund.png"):
                 raise FileNotFoundError("hintergrund.png fehlt im assets/ Ordner")
 
-            # Schritt 3: Titelclip OHNE Audio erstellen
+            # Schritt 3: Titelclip OHNE Audio erstellen, unter Verwendung der Video-Infos
             self._update_progress(3)
             self._update_status("Erstelle Titelclip...")
             self._create_title_clip_no_audio(
-                temp_titel_clip_path, dauer, clip_fps, drawtext_filter
+                temp_titel_clip_path,
+                dauer,
+                clip_fps,
+                clip_width,
+                clip_height,
+                drawtext_filter
             )
 
             # Schritt 4: Concat-Liste für Intro + kombiniertes Video erstellen
@@ -181,14 +186,19 @@ class VideoProcessor:
         except Exception as e:
             print(f"Fehler beim Kopieren der Fotos: {e}")
 
-    def _create_title_clip_no_audio(self, output_path, dauer, fps, drawtext_filter):
-        """Erstellt den Titel-Clip mit Text-Overlay OHNE Audio"""
-        print("Erstelle Titelclip ohne Audio...")
+    def _create_title_clip_no_audio(self, output_path, dauer, fps, width, height, drawtext_filter):
+        """Erstellt den Titel-Clip mit Text-Overlay OHNE Audio, skaliert auf die Zieldimensionen."""
+        print(f"Erstelle Titelclip ohne Audio mit Dimensionen {width}x{height}...")
+
+        # Kombiniert den Skalierungsfilter mit dem bestehenden Text-Overlay-Filter.
+        # Das Hintergrundbild wird zuerst skaliert, danach wird der Text darauf gezeichnet.
+        video_filters = f"scale={width}:{height}, {drawtext_filter}"
+
         result = subprocess.run([
             "ffmpeg", "-y",
             "-loop", "1",
             "-i", "assets/hintergrund.png",
-            "-vf", drawtext_filter,
+            "-vf", video_filters,
             "-t", str(dauer),
             "-r", str(fps),
             "-c:v", "libx264",
@@ -199,8 +209,9 @@ class VideoProcessor:
         ], capture_output=True, text=True)
 
         if result.returncode != 0:
-            print(f"Fehler beim Titelclip-Erstellen: {result.stderr}")
-            raise Exception(f"Titelclip-Erstellung fehlgeschlagen: {result.stderr}")
+            error_message = f"Titelclip-Erstellung fehlgeschlagen: {result.stderr}"
+            print(error_message)
+            raise Exception(error_message)
 
     def _create_final_video_with_original_audio(self, video_with_intro_path, original_video_path, output_path,
                                                 intro_duration):

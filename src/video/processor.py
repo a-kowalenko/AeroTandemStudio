@@ -8,10 +8,13 @@ from datetime import date
 
 from .logger import CancellableProgressBarLogger, CancellationError
 from ..utils.file_utils import sanitize_filename
+from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
+from src.utils.constants import HINTERGRUND_PATH
 
 
 class VideoProcessor:
     def __init__(self, progress_callback=None, status_callback=None):
+        self.hintergrund_path = HINTERGRUND_PATH
         self.progress_callback = progress_callback
         self.status_callback = status_callback
         self.cancel_event = threading.Event()
@@ -76,7 +79,9 @@ class VideoProcessor:
                 video_params['height'], outside_video
             )
 
-            if not os.path.exists("assets/hintergrund.png"):
+
+            hintergrund_path = self.hintergrund_path
+            if not os.path.exists(hintergrund_path):
                 raise FileNotFoundError("hintergrund.png fehlt im assets/ Ordner")
 
             # Schritt 3: Kompatiblen Intro-Clip mit stiller Audiospur in einem Schritt erstellen
@@ -108,7 +113,7 @@ class VideoProcessor:
                 "ffmpeg", "-y", "-i", temp_intro_with_audio_path,
                 "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
                 temp_intro_ts_path
-            ], capture_output=True, text=True, check=True)
+            ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
             # Schritt 6: Hauptvideo nach .ts konvertieren
             self._check_for_cancellation()
@@ -120,7 +125,7 @@ class VideoProcessor:
                 "ffmpeg", "-y", "-i", combined_video_path,
                 "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
                 temp_combined_ts_path
-            ], capture_output=True, text=True, check=True)
+            ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
             # Schritt 7: Output-Pfad generieren
             self._check_for_cancellation()
@@ -143,7 +148,7 @@ class VideoProcessor:
                 "-bsf:a", "aac_adtstoasc",  # Wichtig für korrekte Audio-Header in MP4
                 "-movflags", "+faststart",
                 full_output_path
-            ], capture_output=True, text=True, check=True)
+            ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
             # Schritt 9: Fotos in Output-Verzeichnis kopieren
             self._check_for_cancellation()
@@ -196,7 +201,7 @@ class VideoProcessor:
 
         command = [
             "ffmpeg", "-y",
-            "-loop", "1", "-i", "assets/hintergrund.png",
+            "-loop", "1", "-i", self.hintergrund_path,
             "-f", "lavfi", "-i",
             f"anullsrc=channel_layout={v_params['channel_layout']}:sample_rate={v_params['sample_rate']}",
             "-vf", video_filters,
@@ -242,7 +247,7 @@ class VideoProcessor:
 
         command.append(output_path)
 
-        result = subprocess.run(command, capture_output=True, text=True)
+        result = subprocess.run(command, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
         if result.returncode != 0:
             if self.cancel_event.is_set():
                 raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
@@ -284,7 +289,8 @@ class VideoProcessor:
             "-print_format", "json",
             "-show_streams", video_path
         ]
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        result = subprocess.run(command, capture_output=True, text=True, check=True,
+                                creationflags=SUBPROCESS_CREATE_NO_WINDOW)
         streams = json.loads(result.stdout)["streams"]
 
         video_stream = next((s for s in streams if s['codec_type'] == 'video'), None)

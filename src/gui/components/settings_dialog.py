@@ -2,6 +2,7 @@
 from tkinter import messagebox, ttk
 import webbrowser
 
+from src.utils.constants import PAYPAL_LOGO_PATH
 
 class SettingsDialog:
     """Einstellungs-Dialog für Server-Konfiguration"""
@@ -132,7 +133,7 @@ class SettingsDialog:
         donation_frame.pack(fill="x", pady=5)
 
         # PayPal Donation Button (dezent) with logo
-        self.paypal_img = tk.PhotoImage(file="assets/paypal_logo.png", width=30)
+        self.paypal_img = tk.PhotoImage(file=PAYPAL_LOGO_PATH, width=30)
         paypal_button = tk.Button(
             donation_frame,
             text="Entwicklung unterstützen",

@@ -1,17 +1,28 @@
-﻿import tkinter as tk
+﻿import sys
+import tkinter as tk
+import os
 import vlc
-import sys
+
+from src.utils.constants import VLC_PATH, FFMPEG_PATH
 
 
-# Stellt sicher, dass das vlc-Modul gefunden wird, falls es nicht im Standard-PYTHONPATH liegt.
-# Passen Sie 'VLC_PATH' an, wenn Sie eine portable VLC-Version verwenden.
-# try:
-#   	import vlc
-# except ImportError:
-#   	# VLC_PATH = r"C:\Program Files\VideoLAN\VLC"
-#   	# if VLC_PATH not in sys.path:
-#   	# 	sys.path.append(VLC_PATH)
-#   	import vlc
+vlc_path = VLC_PATH
+ffmpeg_path = FFMPEG_PATH
+
+if os.path.exists(vlc_path):
+    os.environ['VLC_PLUGIN_PATH'] = os.path.join(vlc_path, 'plugins')
+    if sys.platform.startswith("win"):
+         try:
+             os.add_dll_directory(vlc_path)
+         except AttributeError:
+             pass
+else:
+    print(f"WARNUNG: VLC-Verzeichnis nicht gefunden unter {vlc_path}")
+
+if os.path.exists(ffmpeg_path):
+    os.environ["PATH"] += os.pathsep + ffmpeg_path
+else:
+     print(f"WARNUNG: FFmpeg-Verzeichnis nicht gefunden unter {ffmpeg_path}")
 
 
 class VideoPlayer:

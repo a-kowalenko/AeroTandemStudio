@@ -34,7 +34,7 @@ class VideoGeneratorApp:
 
     def setup_gui(self):
         self.root.title("Aero Tandem Studio")
-        self.root.geometry("1280x900")
+        self.root.geometry("1600x1000")
         self.root.config(padx=20, pady=20)
 
         # Header mit Titel und Settings-Button

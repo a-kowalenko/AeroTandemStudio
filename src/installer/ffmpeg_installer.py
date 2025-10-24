@@ -4,7 +4,6 @@ import tempfile
 import urllib.request
 import zipfile
 import platform
-import subprocess
 
 # Windows-only imports are guarded when used
 try:

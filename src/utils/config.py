@@ -1,9 +1,10 @@
 ﻿import os
 import json
 
+from src.utils.constants import CONFIG_FILE
 
 class ConfigManager:
-    CONFIG_FILE = "config/config.json"
+    CONFIG_FILE = CONFIG_FILE
 
     def __init__(self):
         self.settings = self.load_settings()

@@ -5,9 +5,9 @@ from tkinter import ttk, messagebox
 from tkinterdnd2 import DND_FILES
 import os
 import subprocess
-import shutil
 import time
 
+from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 
 class DragDropFrame:
     def __init__(self, parent, app_instance):
@@ -221,7 +221,7 @@ class DragDropFrame:
                         '-print_format', 'json',
                         '-show_streams',
                         video_path
-                    ], capture_output=True, text=True, timeout=5)
+                    ], capture_output=True, text=True, timeout=5, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
                     if result.returncode == 0:
                         import json
@@ -381,7 +381,7 @@ class DragDropFrame:
                 'ffprobe', '-v', 'error', '-show_entries',
                 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1',
                 video_path
-            ], capture_output=True, text=True, timeout=5)
+            ], capture_output=True, text=True, timeout=5, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
             if result.returncode == 0:
                 seconds = float(result.stdout.strip())
@@ -530,9 +530,9 @@ class DragDropFrame:
                 os.startfile(file_path)
             elif os.name == 'posix':  # macOS und Linux
                 if platform.system() == 'Darwin':  # macOS
-                    subprocess.run(['open', file_path], check=True)
+                    subprocess.run(['open', file_path], check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
                 else:  # Linux
-                    subprocess.run(['xdg-open', file_path], check=True)
+                    subprocess.run(['xdg-open', file_path], check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
         except Exception as e:
             messagebox.showerror("Fehler", f"Datei konnte nicht geöffnet werden:\n{str(e)}")
 

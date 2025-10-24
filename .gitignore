@@ -14,8 +14,8 @@
 
 
 # Big data assets
-assets/ffmpeg
-assets/vlc
+/assets/vlc/
+/assets/ffmpeg/
 
 # AWS User-specific
 .idea/**/aws.xml

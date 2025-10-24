@@ -67,17 +67,6 @@ class VideoPlayer:
         )
         self.play_pause_btn.pack(side="left", padx=5)
 
-        # --- Rechte Steuerelemente (in umgekehrter Reihenfolge gepackt) ---
-
-        # Vollbild-Button (ganz rechts)
-        self.fullscreen_btn = tk.Button(
-            self.controls_frame, text="⛶",  # Unicode für Vollbild
-            font=("Arial", 12),
-            command=self._toggle_fullscreen, state="disabled",
-            width=3, bg="#333", fg="white", highlightthickness=0, relief="flat"
-        )
-        self.fullscreen_btn.pack(side="right", padx=(5, 5))
-
         # Lautstärkeregler (rechts)
         self.volume_scale = tk.Scale(
             self.controls_frame,
@@ -170,7 +159,6 @@ class VideoPlayer:
 
             # UI zurücksetzen
             self.play_pause_btn.config(text="▶", state="normal")
-            self.fullscreen_btn.config(state="normal")
 
             # Lautstärke zurücksetzen (visuell und intern)
             self.volume_scale.set(50)
@@ -186,7 +174,6 @@ class VideoPlayer:
         except Exception as e:
             print(f"Fehler beim Laden des Videos in den VLC Player: {e}")
             self.play_pause_btn.config(state="disabled")
-            self.fullscreen_btn.config(state="disabled")
 
     def unload_video(self):
         """Entfernt das Video und setzt den Player zurück."""
@@ -202,9 +189,7 @@ class VideoPlayer:
         self.total_duration_ms = 0
 
         self.play_pause_btn.config(text="▶", state="disabled")
-        self.fullscreen_btn.config(state="disabled")
         self.time_label.config(text="--:-- / --:--")
-        self.volume_scale.set(50)
 
         self._stop_updater()
         self._update_progress_ui()  # Setzt den Balken auf 0
@@ -230,18 +215,6 @@ class VideoPlayer:
             self.media_player.audio_set_volume(volume)
         except Exception as e:
             print(f"Fehler beim Setzen der Lautstärke: {e}")
-
-    def _toggle_fullscreen(self):
-        """Schaltet den Vollbildmodus an oder aus."""
-        if not self.media_player:
-            return
-
-        if self.media_player.get_fullscreen():
-            # Wenn im Vollbild, Vollbild verlassen
-            self.media_player.set_fullscreen(0)
-        else:
-            # Wenn nicht im Vollbild, Vollbild starten
-            self.media_player.set_fullscreen(1)
 
     def _on_progress_click(self, event):
         """Springt zur angeklickten Position im Video."""

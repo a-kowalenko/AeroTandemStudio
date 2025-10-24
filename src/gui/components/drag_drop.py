@@ -151,6 +151,8 @@ class DragDropFrame:
     def setup_drag_drop(self):
         self.drop_label.drop_target_register(DND_FILES)
         self.drop_label.dnd_bind('<<Drop>>', self.handle_drop)
+        self.frame.drop_target_register(DND_FILES)
+        self.frame.dnd_bind('<<Drop>>', self.handle_drop)
 
     def handle_drop(self, event):
         """Verarbeitet das Ablegen von Dateien (Videos und Fotos)"""

@@ -165,6 +165,11 @@ class VideoProcessor:
             self._update_progress(11)
             self._show_success_message(full_output_path, server_message)
 
+            # Speichere MARKER Datei im Ausgabeordner
+            marker_path = os.path.join(os.path.dirname(full_output_path), "_fertig.txt")
+            with open(marker_path, 'w') as marker_file:
+                marker_file.write("Videoerstellung abgeschlossen.\n")
+
         except subprocess.CalledProcessError as e:
             # Prüfen, ob der Fehler durch einen Abbruch verursacht wurde
             if self.cancel_event.is_set():

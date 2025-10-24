@@ -10,6 +10,7 @@ from .components.video_preview import VideoPreview
 from .components.progress_indicator import ProgressHandler
 from .components.circular_spinner import CircularSpinner
 from .components.settings_dialog import SettingsDialog
+from .components.video_player import VideoPlayer
 from ..video.processor import VideoProcessor
 from ..utils.config import ConfigManager
 from ..utils.validation import validate_form_data
@@ -26,6 +27,7 @@ class VideoGeneratorApp:
         self.combined_video_path = None
         self.server_status_label = None
         self.server_connected = False
+        self.video_player = None
 
         self.setup_gui()
         self.ensure_dependencies()
@@ -55,7 +57,15 @@ class VideoGeneratorApp:
         self.drag_drop = DragDropFrame(self.left_frame, self)
 
         # Rechte Spalte: Vorschau, Checkbox und Button
-        self.video_preview = VideoPreview(self.right_frame)
+        # Titel
+        self.title_label = tk.Label(self.right_frame, text="Video Vorschau", font=("Arial", 14, "bold"))
+
+
+        # Separator
+        self.preview_separator = ttk.Separator(self.right_frame, orient='horizontal')
+
+        self.video_player = VideoPlayer(self.right_frame, self)
+        self.video_preview = VideoPreview(self.right_frame, self)
 
         # Server-Upload Frame mit Status-Anzeige
         self.upload_frame = tk.Frame(self.right_frame)
@@ -180,14 +190,18 @@ class VideoGeneratorApp:
         self.form_fields.pack(pady=10, fill="x")
         self.drag_drop.pack(fill="both", expand=True, pady=10)
 
+        # Rechte Spalte
+        self.title_label.pack(pady=0)
+        self.preview_separator.pack(fill='x', pady=5)
+        self.video_player.pack(fill="x", pady=(0, 10), side="top")
+        self.video_preview.pack(fill="x", pady=(0, 8), side="top")
+
         # Spacer to push the following right-column elements slightly down
         self.right_spacer = tk.Frame(self.right_frame, height=20, bg=self.right_frame.cget("bg"))
         self.right_spacer.pack(fill="x", expand=True)
 
-        # Rechte Spalte
-        self.video_preview.pack(fill="x", pady=(0, 8))
-        self.upload_frame.pack(pady=10, fill="x")
-        self.erstellen_button.pack(pady=10, fill="x")
+        self.upload_frame.pack(pady=10, fill="x", side="top")
+        self.erstellen_button.pack(pady=10, fill="x", side="top")
 
         # Progress unten
         self.progress_handler.pack_status_label()

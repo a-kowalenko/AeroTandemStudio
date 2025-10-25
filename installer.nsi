@@ -124,95 +124,106 @@ SectionEnd
 
 ; --- FFmpeg (Pflichtinstallation) ---
 Section "FFmpeg (Erforderlich)" SectionFFmpeg
-    ; Admin-Rechte prüfen
-    UserInfo::GetAccountType
-    pop $0
-    StrCmp $0 "Admin" +3
-        MessageBox MB_ICONSTOP "Administrator-Rechte erforderlich!"
-        Abort
-
     SectionIn RO
     SetDetailsPrint both
     DetailPrint "Installiere FFmpeg..."
 
-    ; --- 1. Prüfen, ob die ZIP existiert (KORRIGIERTE LOGIK) ---
-    StrCpy $0 "$EXEDIR\${FFMPEG_SETUP_ZIP_PATH}"
+    ; --- Zielordner im Benutzerprofil ---
+    StrCpy $1 "$LOCALAPPDATA\ffmpeg"
+    DetailPrint "Installiere FFmpeg nach: $1"
 
-    DetailPrint "Prüfe auf Existenz von: $0"
+    ; --- 1. ZIP-Datei aus Installer-Ressourcen extrahieren ---
+    DetailPrint "Extrahiere FFmpeg aus Installer-Ressourcen..."
 
-    ; Wir prüfen NUR noch diesen absoluten Pfad.
-    IfFileExists "$0" zip_exists
+    ; Temporären Ordner für die Extraktion erstellen
+    InitPluginsDir
+    StrCpy $2 "$PLUGINSDIR\ffmpeg_temp"
 
-    ; Wenn wir hier landen, wurde die Datei nicht gefunden.
-    DetailPrint "Fehler: ZIP-Datei nicht am erwarteten Ort gefunden."
-    MessageBox MB_ICONSTOP "FFmpeg-ZIP-Datei nicht gefunden.$\r$\n$\r$\nDie Datei wurde nicht am folgenden Ort gefunden:$\r$\n$0$\r$\n$\r$\nBitte stellen Sie sicher, dass sich der Ordner 'dependency_installer' im selben Verzeichnis wie der Installer befindet."
-    Abort
+    ; Sicherstellen, dass der temporäre Ordner leer ist
+    RMDir /r "$2"
+    CreateDirectory "$2"
 
-    zip_exists:
-        DetailPrint "Extrahiere mitgelieferte FFmpeg ZIP (Quelle: $0)..."
+    ; ZIP-Datei aus Ressourcen in temporären Ordner schreiben
+    SetOutPath "$2"
+    File "/oname=ffmpeg.zip" "${FFMPEG_SETUP_ZIP_PATH}"
+
+    IfFileExists "$2\ffmpeg.zip" zip_extracted zip_extract_failed
+
+    zip_extract_failed:
+        DetailPrint "FEHLER: Konnte FFmpeg-ZIP nicht aus Installer-Ressourcen extrahieren."
+        MessageBox MB_ICONSTOP "FFmpeg-ZIP konnte nicht aus Installer-Ressourcen extrahiert werden.$\r$\nMögliche Ursache: Beschädigter Installer."
+        Abort
+
+    zip_extracted:
+        DetailPrint "FFmpeg-ZIP erfolgreich extrahiert."
 
         ; --- 2. Zielordner vorbereiten ---
-        SetOutPath "$INSTDIR\ffmpeg"
-        RMDir /r "$INSTDIR\ffmpeg_temp"
+        SetOutPath "$1\bin"
+        RMDir /r "$1\temp"
+        CreateDirectory "$1\temp"
 
-        ; $0 ist jetzt garantiert ein absoluter Pfad, CopyFiles wird funktionieren.
-        CopyFiles "$0" "$INSTDIR\ffmpeg.zip"
+        ; ZIP in Installationsverzeichnis kopieren
+        CopyFiles "$2\ffmpeg.zip" "$1\temp.zip"
 
-        IfFileExists "$INSTDIR\ffmpeg.zip" 0 copy_zip_failed
+        ; Temporäre Dateien bereinigen
+        Delete "$2\ffmpeg.zip"
+        RMDir /r "$2"
 
+        IfFileExists "$1\temp.zip" 0 copy_zip_failed
         Goto extract_zip
 
     copy_zip_failed:
-        DetailPrint "FEHLER: Konnte die ZIP-Datei nicht nach $INSTDIR\ffmpeg.zip kopieren."
-        MessageBox MB_ICONSTOP "Konnte die FFmpeg-ZIP nicht in das Installationsverzeichnis kopieren.$\r$\n(Mögliche Ursachen: Antivirus blockiert Zugriff).$\r$\n$\r$\nQuelle: $0$\r$\nZiel: $INSTDIR\ffmpeg.zip"
+        DetailPrint "FEHLER: Konnte die ZIP-Datei nicht nach $1\temp.zip kopieren."
+        MessageBox MB_ICONSTOP "Konnte die FFmpeg-ZIP nicht in das Benutzerverzeichnis kopieren.$\r$\n(Mögliche Ursachen: Fehlende Schreibrechte)."
         Abort
 
     extract_zip:
         ; --- 3. ZIP Extrahieren (mit Fehlerabfang) ---
-        DetailPrint "Entpacke $INSTDIR\ffmpeg.zip nach $INSTDIR\ffmpeg_temp..."
+        DetailPrint "Entpacke $1\temp.zip nach $1\temp..."
 
-        nsExec::ExecToStack "powershell -NoProfile -ExecutionPolicy Bypass -Command $\"$ErrorActionPreference = 'Stop'; & {Add-Type -A System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::ExtractToDirectory('$INSTDIR\ffmpeg.zip', '$INSTDIR\ffmpeg_temp')}$\""
+        ; PowerShell-Befehl mit einfacherer Syntax
+        nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory(\"$1\\temp.zip\", \"$1\\temp\")"'
 
-        Pop $1 ; $1 = Rückgabecode
-        Pop $2 ; $2 = PowerShell-Output/Fehlermeldung
+        Pop $2 ; $2 = Rückgabecode
+        Pop $3 ; $3 = PowerShell-Output/Fehlermeldung
 
-        StrCmp $1 "0" extract_ok extract_fail
+        StrCmp $2 "0" extract_ok extract_fail
 
     extract_fail:
-        DetailPrint "Fehler beim Extrahieren der ZIP. (Code: $1)"
-        MessageBox MB_ICONSTOP "FFmpeg-ZIP konnte nicht extrahiert werden.$\r$\n(Mögl. Ursache: Virenscanner oder fehlende Admin-Rechte).$\r$\n$\r$\nFehlerdetails:$\r$\n$2"
+        DetailPrint "Fehler beim Extrahieren der ZIP. (Code: $2)"
+        MessageBox MB_ICONSTOP "FFmpeg-ZIP konnte nicht extrahiert werden.$\r$\n(Mögl. Ursache: Fehlende Schreibrechte).$\r$\n$\r$\nFehlerdetails:$\r$\n$3"
         ; Aufräumen
-        Delete "$INSTDIR\ffmpeg.zip"
-        RMDir /r "$INSTDIR\ffmpeg_temp"
-        RMDir /r "$INSTDIR\ffmpeg"
+        Delete "$1\temp.zip"
+        RMDir /r "$1\temp"
+        RMDir /r "$1"
         Abort
 
     extract_ok:
         DetailPrint "ZIP erfolgreich extrahiert."
 
         ; --- 4. PRÜFUNG: Wurde der Ordner wirklich erstellt? ---
-        IfFileExists "$INSTDIR\ffmpeg_temp" 0 extract_empty
+        IfFileExists "$1\temp" 0 extract_empty
 
-        DetailPrint "Temporärer Ordner $INSTDIR\ffmpeg_temp wurde gefunden."
+        DetailPrint "Temporärer Ordner $1\temp wurde gefunden."
         Goto copy_files
 
     extract_empty:
-        DetailPrint "FEHLER: Extraktion meldete Erfolg (0), aber der Zielordner '$INSTDIR\ffmpeg_temp' wurde nicht erstellt."
-        MessageBox MB_ICONSTOP "FFmpeg-ZIP konnte nicht installiert werden.$\r$\n(Unbekannter Fehler: Virenscanner oder Rechteproblem).$\r$\nDie ZIP-Datei selbst scheint NICHT leer zu sein."
+        DetailPrint "FEHLER: Extraktion meldete Erfolg (0), aber der Zielordner '$1\temp' wurde nicht erstellt."
+        MessageBox MB_ICONSTOP "FFmpeg-ZIP konnte nicht installiert werden.$\r$\n(Unbekannter Fehler: Fehlende Schreibrechte)."
         ; Aufräumen
-        Delete "$INSTDIR\ffmpeg.zip"
-        RMDir /r "$INSTDIR\ffmpeg"
+        Delete "$1\temp.zip"
+        RMDir /r "$1"
         Abort
 
     copy_files:
-    ; --- 5. Benötigte Dateien kopieren (KORRIGIERT) ---
-    DetailPrint "Kopiere FFmpeg-Binärdateien..."
+    ; --- 5. Benötigte Dateien kopieren ---
+    DetailPrint "Kopiere FFmpeg-Binärdateien nach $1\bin..."
 
-    ; Direkt aus ffmpeg_temp\bin kopieren, falls vorhanden
-    IfFileExists "$INSTDIR\ffmpeg_temp\bin\*.*" copy_from_bin
+    ; Direkt aus temp\bin kopieren, falls vorhanden
+    IfFileExists "$1\temp\bin\*.*" copy_from_bin
 
     ; Falls nicht, prüfen ob es ein Root-Verzeichnis gibt (für andere ZIP-Strukturen)
-    IfFileExists "$INSTDIR\ffmpeg_temp\*\bin\*.*" copy_from_subdir
+    IfFileExists "$1\temp\*\bin\*.*" copy_from_subdir
 
     ; Keine passende Struktur gefunden
     DetailPrint "FEHLER: Keine gültige FFmpeg-Struktur in der ZIP gefunden."
@@ -220,57 +231,125 @@ Section "FFmpeg (Erforderlich)" SectionFFmpeg
 
     copy_from_bin:
         DetailPrint "Kopiere aus direkter bin-Struktur..."
-        CopyFiles "$INSTDIR\ffmpeg_temp\bin\*.*" "$INSTDIR\ffmpeg\"
+        CopyFiles "$1\temp\bin\*.*" "$1\bin\"
         Goto verify_copy
 
     copy_from_subdir:
         DetailPrint "Kopiere aus Unterverzeichnis-Struktur..."
-        ; PowerShell-Logik für den Fall mit Root-Verzeichnis
-        nsExec::ExecToStack "powershell -NoProfile -ExecutionPolicy Bypass -Command $\"$ErrorActionPreference = 'Stop'; $$RootDir = Get-ChildItem '$INSTDIR\ffmpeg_temp' -Directory | Select-Object -First 1; if (-not $$RootDir) { Write-Error 'Kein Stammverzeichnis gefunden'; exit 1 }; $$SourceBinDir = Join-Path -Path $$RootDir.FullName -ChildPath 'bin'; if (Test-Path $$SourceBinDir) { Copy-Item -Path ($$SourceBinDir + '\*') -Destination '$INSTDIR\ffmpeg' -Recurse -Force } else { Write-Error ('bin-Ordner nicht gefunden: ' + $$SourceBinDir); exit 1 }$\""
-        Pop $1
+        ; PowerShell-Befehl mit korrekter Syntax
+        nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -Command "$$RootDir = Get-ChildItem ''$1\temp'' -Directory | Select-Object -First 1; if ($$RootDir) { $$SourceBinDir = Join-Path -Path $$RootDir.FullName -ChildPath ''bin''; if (Test-Path $$SourceBinDir) { Copy-Item -Path (Join-Path $$SourceBinDir ''*'') -Destination ''$1\bin'' -Recurse -Force } else { Write-Error ''bin-Ordner nicht gefunden''; exit 1 } } else { Write-Error ''Kein Stammverzeichnis gefunden''; exit 1 }"'
+
         Pop $2
-        StrCmp $1 "0" verify_copy copy_fail
+        Pop $3
+        StrCmp $2 "0" verify_copy copy_fail
 
     verify_copy:
         ; Prüfen ob Dateien kopiert wurden
-        IfFileExists "$INSTDIR\ffmpeg\ffmpeg.exe" copy_ok
+        IfFileExists "$1\bin\ffmpeg.exe" copy_ok
         DetailPrint "FEHLER: ffmpeg.exe nach Kopiervorgang nicht gefunden."
         Goto copy_fail
 
     copy_fail:
-        DetailPrint "Fehler beim Kopieren der FFmpeg-Dateien. (Code: $1)"
-        MessageBox MB_ICONSTOP "FFmpeg-Dateien konnten nicht kopiert werden.$\r$\nUnerwartete ZIP-Struktur.$\r$\nFehlerdetails:$\r$\n$2"
+        DetailPrint "Fehler beim Kopieren der FFmpeg-Dateien. (Code: $2)"
+        MessageBox MB_ICONSTOP "FFmpeg-Dateien konnten nicht kopiert werden.$\r$\nUnerwartete ZIP-Struktur.$\r$\nFehlerdetails:$\r$\n$3"
         ; Aufräumen
-        Delete "$INSTDIR\ffmpeg.zip"
-        RMDir /r "$INSTDIR\ffmpeg_temp"
-        RMDir /r "$INSTDIR\ffmpeg"
+        Delete "$1\temp.zip"
+        RMDir /r "$1\temp"
+        RMDir /r "$1"
         Abort
 
     copy_ok:
         DetailPrint "FFmpeg-Dateien erfolgreich kopiert."
 
-
         ; --- 6. Aufräumen ---
-        Delete "$INSTDIR\ffmpeg.zip"
-        RMDir /r "$INSTDIR\ffmpeg_temp"
+        Delete "$1\temp.zip"
+        RMDir /r "$1\temp"
 
-        ; --- 7. Finale Prüfung und Registrierung ---
-        IfFileExists "$INSTDIR\ffmpeg\ffmpeg.exe" ffmpeg_ok no_bin
+        ; --- 7. Finale Prüfung und PATH-Registrierung ---
+        IfFileExists "$1\bin\ffmpeg.exe" ffmpeg_ok no_bin
 
     no_bin:
         DetailPrint "FEHLER: ffmpeg.exe wurde nach dem Kopieren nicht am Zielort gefunden."
         MessageBox MB_ICONSTOP "FFmpeg konnte nicht korrekt installiert werden (unbekannter Kopierfehler)."
-        RMDir /r "$INSTDIR\ffmpeg"
+        RMDir /r "$1"
         Abort
 
     ffmpeg_ok:
-        DetailPrint "FFmpeg erfolgreich installiert."
-        WriteRegStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "FFMPEG_PATH" "$INSTDIR\ffmpeg"
+        DetailPrint "FFmpeg erfolgreich installiert in Benutzerverzeichnis."
+
+        ; --- PATH-Registrierung im Benutzerkontext ---
+        DetailPrint "Füge FFmpeg zum Benutzer-PATH hinzu..."
+
+        ; Aktuellen Benutzer-PATH aus Registry lesen
+        ReadRegStr $4 HKCU "Environment" "Path"
+
+        ; Prüfen ob bereits im PATH
+        Push "$4"
+        Push "$1\bin"
+        Call StrContains
+        Pop $5
+        StrCmp $5 "" not_in_path
+
+        DetailPrint "FFmpeg ist bereits im Benutzer-PATH enthalten."
+        Goto path_update_done
+
+        not_in_path:
+            ; Neuen PATH zusammensetzen
+            StrCmp $4 "" 0 path_not_empty
+            StrCpy $4 "$1\bin"
+            Goto write_path
+
+            path_not_empty:
+                StrCpy $4 "$4;$1\bin"
+
+            write_path:
+                WriteRegStr HKCU "Environment" "Path" "$4"
+                DetailPrint "Benutzer-PATH erfolgreich aktualisiert."
+
+                ; Environment-Update broadcasten
+                DetailPrint "Sende Environment-Update an andere Prozesse..."
+                System::Call 'User32::SendMessageTimeout(i 0xFFFF, i 0x1A, i 0, t "Environment", i 2, i 5000, i 0)'
+
+        path_update_done:
 
     SetDetailsPrint lastused
 SectionEnd
 
+; --- Hilfsfunktion: String Contains ---
+Function StrContains
+    Exch $R1 ; $R1=search string
+    Exch     ; swap with $R2
+    Exch $R2 ; $R2=string to search (haystack)
+    Push $R3
+    Push $R4
+    Push $R5
+    Push $R6
 
+    StrCpy $R3 0
+    StrLen $R4 $R1
+    StrLen $R5 $R2
+    loop:
+        StrCpy $R6 $R2 $R4 $R3
+        StrCmp $R6 $R1 found
+        StrCmp $R3 $R5 not_found
+        IntOp $R3 $R3 + 1
+        Goto loop
+
+    found:
+        StrCpy $R1 $R1
+        Goto done
+
+    not_found:
+        StrCpy $R1 ""
+
+    done:
+        Pop $R6
+        Pop $R5
+        Pop $R4
+        Pop $R3
+        Pop $R2
+        Exch $R1
+FunctionEnd
 
 
 ; --- Hauptanwendung ---

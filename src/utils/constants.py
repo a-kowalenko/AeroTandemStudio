@@ -24,8 +24,7 @@ if IS_WINDOWS:
 HINTERGRUND_PATH = get_resource_path("assets/hintergrund.png")
 LOGO_PATH = get_resource_path("assets/logo.png")
 PAYPAL_LOGO_PATH = get_resource_path("assets/paypal_logo.png")
-FFMPEG_PATH = get_resource_path("assets/ffmpeg")
-VLC_PATH = get_resource_path("assets/vlc")
+VLC_PATH = get_resource_path("dependency_installer/vlc")
 
 # --- Konfigurationsdatei-Pfad ---
 CONFIG_FILE = get_resource_path("config/config.json")

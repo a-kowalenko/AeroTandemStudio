@@ -39,7 +39,7 @@ class VideoGeneratorApp:
 
     def setup_gui(self):
         self.root.title("Aero Tandem Studio")
-        self.root.geometry("1600x1000")
+        self.root.geometry("1400x900")
         self.root.config(padx=20, pady=20)
 
         # Header mit Titel und Settings-Button
@@ -464,8 +464,9 @@ class VideoGeneratorApp:
             bg="#D32F2F",
             state="normal"
         )
-        self.progress_handler.progress_bar.pack(pady=5)
-        self.progress_handler.eta_label.pack(pady=2)
+        self.progress_handler.progress_bar.pack(side="right", padx=(0, 5), pady=5)
+        self.progress_handler.eta_label.pack(side="right", pady=5)
+
         self.progress_handler.progress_bar['value'] = 0
 
     def _switch_to_create_mode(self):

@@ -3,7 +3,7 @@
 Unicode true
 
 !define APP_NAME "Aero Tandem Studio"
-!define APP_VERSION "0.0.5.1337"
+!define APP_VERSION "0.0.6.1337"
 !define APP_EXE "${APP_NAME}.exe"
 !define APP_PUBLISHER "Andreas Kowalenko"
 !define APP_WEBSITE "kowalenko.io"

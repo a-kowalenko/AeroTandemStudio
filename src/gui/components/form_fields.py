@@ -138,14 +138,15 @@ class FormFields:
 
     def get_settings_data(self):
         data = self.get_form_data()
-        return {
-            "speicherort": data["speicherort"],
-            "ort": data["ort"],
-            "dauer": data["dauer"],
-            "outside_video": data["outside_video"],
-            "tandemmaster": data["tandemmaster"],
-            "videospringer": data["videospringer"]
-        }
+        current_settings_data = self.config.get_settings()
+        current_settings_data["speicherort"] = data["speicherort"]
+        current_settings_data["ort"] = data["ort"]
+        current_settings_data["dauer"] = data["dauer"]
+        current_settings_data["outside_video"] = data["outside_video"]
+        current_settings_data["tandemmaster"] = data["tandemmaster"]
+        current_settings_data["videospringer"] = data["videospringer"]
+
+        return current_settings_data
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)

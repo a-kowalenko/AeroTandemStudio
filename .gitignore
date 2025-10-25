@@ -12,6 +12,11 @@
 .idea/**/dictionaries
 .idea/**/shelf
 
+
+# Big data assets
+/dependency_installer/vlc/
+/dependency_installer/ffmpeg/
+
 # AWS User-specific
 .idea/**/aws.xml
 

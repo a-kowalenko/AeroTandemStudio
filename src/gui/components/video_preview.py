@@ -1,5 +1,4 @@
 ﻿import tkinter as tk
-from tkinter import ttk
 import os
 import tempfile
 import subprocess
@@ -8,11 +7,13 @@ import json
 import re
 import sys
 from .progress_indicator import ProgressHandler
+from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 
 
 class VideoPreview:
-    def __init__(self, parent):
+    def __init__(self, parent, app_instance=None):
         self.parent = parent
+        self.app = app_instance
         self.frame = tk.Frame(parent)
         self.combined_video_path = None
         self.progress_handler = None
@@ -27,14 +28,19 @@ class VideoPreview:
 
         self.create_widgets()
 
+    def _get_clip_durations_seconds(self, video_paths):
+        """Ermittelt die Dauer jedes einzelnen Clips in Sekunden."""
+        durations = []
+        for video_path in video_paths:
+            try:
+                # Ruft die Dauer für jeden Clip einzeln ab (wird von _calculate_total_duration_seconds benötigt)
+                duration_str = self._get_single_video_duration_str(video_path)
+                durations.append(float(duration_str))
+            except Exception:
+                durations.append(0.0)
+        return durations
+
     def create_widgets(self):
-        # Titel
-        title_label = tk.Label(self.frame, text="Video Vorschau", font=("Arial", 14, "bold"))
-        title_label.pack(pady=5)
-
-        # Separator
-        ttk.Separator(self.frame, orient='horizontal').pack(fill='x', pady=5)
-
         # Video-Info Frame
         info_frame = tk.Frame(self.frame)
         info_frame.pack(fill="x", pady=5)
@@ -88,6 +94,8 @@ class VideoPreview:
         else:
             # No process is running, start directly.
             self._start_preview_creation_thread(video_paths)
+
+
 
     def _start_preview_creation_thread(self, video_paths):
         """Starts the background thread to create the preview."""
@@ -184,7 +192,7 @@ class VideoPreview:
         result = subprocess.run([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path,
             "-c", "copy", "-movflags", "+faststart", output_path
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
         try:
             os.remove(concat_list_path)
@@ -204,7 +212,8 @@ class VideoPreview:
             return False
 
         self.ffmpeg_process = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                               universal_newlines=True, encoding='utf-8', errors='replace')
+                                               universal_newlines=True, encoding='utf-8', errors='replace',
+                                               creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
         for line in iter(self.ffmpeg_process.stderr.readline, ''):
             if self.cancellation_event.is_set():
@@ -306,7 +315,8 @@ class VideoPreview:
             try:
                 result = subprocess.run(['ffprobe', '-v', 'quiet', '-print_format', 'json',
                                          '-show_format', '-show_streams', video_path],
-                                        capture_output=True, text=True, timeout=10)
+                                        capture_output=True, text=True, timeout=10,
+                                        creationflags=SUBPROCESS_CREATE_NO_WINDOW)
                 if result.returncode == 0:
                     info = json.loads(result.stdout)
                     video_stream = next((s for s in info.get('streams', []) if s.get('codec_type') == 'video'), None)
@@ -365,6 +375,11 @@ class VideoPreview:
         self.play_button.config(state="normal")
         self.action_button.config(state="disabled")
 
+        # NEU: Video an den VideoPlayer übergeben
+        clip_durations = self._get_clip_durations_seconds(video_paths)
+        if self.app and hasattr(self.app, 'video_player') and self.app.video_player:
+            self.app.video_player.load_video(self.combined_video_path, clip_durations)
+
     def _update_ui_error(self, error_msg):
         """Aktualisiert UI bei Fehler"""
         if self.progress_handler: self.parent.after(0, self.progress_handler.reset)
@@ -389,18 +404,24 @@ class VideoPreview:
                                   state="normal")
         self.combined_video_path = None
 
+    def _get_single_video_duration_str(self, video_path):
+        """Hilfsmethode: Holt die Dauer EINES Videos als String in Sekunden (z.B. '12.34')."""
+
+        try:
+            result = subprocess.run([
+                'ffprobe', '-v', 'error', '-show_entries',
+                'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path],
+                capture_output = True, text = True, timeout = 5, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+            if result.returncode == 0 and result.stdout:
+                return result.stdout.strip()
+        except (subprocess.TimeoutExpired, ValueError):
+            pass
+        return "0.0"
+
     def _calculate_total_duration_seconds(self, video_paths):
         total_seconds = 0
         for video_path in video_paths:
-            try:
-                result = subprocess.run([
-                    'ffprobe', '-v', 'error', '-show_entries',
-                    'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', video_path
-                ], capture_output=True, text=True, timeout=5)
-                if result.returncode == 0 and result.stdout:
-                    total_seconds += float(result.stdout.strip())
-            except (subprocess.TimeoutExpired, ValueError):
-                continue
+            total_seconds += float(self._get_single_video_duration_str(video_path))
         return total_seconds
 
     def _calculate_total_duration(self, video_paths):
@@ -426,9 +447,13 @@ class VideoPreview:
             if sys.platform == "win32":
                 os.startfile(self.combined_video_path)
             elif sys.platform == "darwin":
-                subprocess.run(['open', self.combined_video_path], check=True)
+                subprocess.run(['open', self.combined_video_path],
+                               check=True,
+                               creationflags=SUBPROCESS_CREATE_NO_WINDOW)
             else:
-                subprocess.run(['xdg-open', self.combined_video_path], check=True)
+                subprocess.run(['xdg-open', self.combined_video_path],
+                               check=True,
+                               creationflags=SUBPROCESS_CREATE_NO_WINDOW)
         except Exception as e:
             self.status_label.config(text=f"Player konnte nicht gestartet werden: {e}", fg="red")
 
@@ -473,6 +498,10 @@ class VideoPreview:
         self.action_button.config(text="⏹ Erstellung abbrechen",
                                   command=self.cancel_creation,
                                   state="disabled")
+
+        # NEU: Player ebenfalls zurücksetzen
+        if self.app and hasattr(self.app, 'video_player') and self.app.video_player:
+            self.app.video_player.unload_video()
 
     def clear_preview_info(self):
         """Helper to clear all text labels."""

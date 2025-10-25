@@ -3,6 +3,8 @@ import shutil
 import subprocess
 import platform
 
+from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
+
 
 def sanitize_filename(filename):
     """Entfernt ungültige Zeichen aus einem potenziellen Dateinamen."""
@@ -92,11 +94,14 @@ def _upload_windows_with_credentials(local_directory, server_url):
 
         # Trenne bestehende Verbindung falls vorhanden
         subprocess.run(f"net use {drive_letter} /delete /y",
-                       shell=True, capture_output=True)
+                       shell=True, capture_output=True,
+                       creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
         # Verbinde mit Server und Anmeldedaten
         net_use_cmd = f'net use {drive_letter} "{server_path}" /user:aero aero'
-        result = subprocess.run(net_use_cmd, shell=True, capture_output=True, text=True)
+        result = subprocess.run(net_use_cmd,
+                                shell=True, capture_output=True, text=True,
+                                creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
         if result.returncode != 0:
             return False, f"Verbindung zum Server fehlgeschlagen: {result.stderr}", ""
@@ -108,7 +113,7 @@ def _upload_windows_with_credentials(local_directory, server_url):
         finally:
             # Verbindung trennen
             subprocess.run(f"net use {drive_letter} /delete /y",
-                           shell=True, capture_output=True)
+                           shell=True, capture_output=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
     except Exception as e:
         return False, f"Upload mit Anmeldedaten fehlgeschlagen: {str(e)}", ""
@@ -138,7 +143,8 @@ def _execute_robocopy(local_directory, target_path, drive_mounted=False):
             shell=True,
             capture_output=True,
             text=True,
-            timeout=300  # 5 Minuten Timeout
+            timeout=300,  # 5 Minuten Timeout
+            creationflags = SUBPROCESS_CREATE_NO_WINDOW
         )
 
         # robocopy gibt spezielle Exit-Codes zurück:
@@ -173,7 +179,8 @@ def _upload_windows_xcopy_fallback(local_directory, server_url):
             shell=True,
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=300,
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW
         )
 
         if result.returncode == 0:
@@ -189,7 +196,10 @@ def _upload_other_systems(local_directory, server_url):
     """Upload für macOS und Linux Systeme"""
     try:
         # Prüfe ob smbclient verfügbar ist
-        result = subprocess.run(["which", "smbclient"], capture_output=True, text=True)
+        result = subprocess.run(["which", "smbclient"],
+                                capture_output=True,
+                                text=True,
+                                creationflags=SUBPROCESS_CREATE_NO_WINDOW)
         if result.returncode != 0:
             return False, "smbclient nicht verfügbar - kann nicht auf Server uploaden", ""
 
@@ -228,7 +238,8 @@ def _upload_smbclient_with_auth(local_directory, server, share):
             shell=True,
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=300,
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW
         )
 
         if result.returncode == 0:
@@ -250,7 +261,9 @@ def _upload_smbclient_recursive(local_directory, server, share):
         dir_name = os.path.basename(local_directory)
         cmd = f'smbclient "//{server}/{share}" -N -c "mkdir {dir_name}; prompt; recurse; cd {dir_name}; lcd {local_directory}; mput *"'
 
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, shell=True,
+                                capture_output=True, text=True, timeout=300,
+                                creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
         if result.returncode == 0:
             return True, f"Erfolgreich auf Server kopiert: //{server}/{share}/{dir_name}", f"//{server}/{share}/{dir_name}"
@@ -311,15 +324,16 @@ def test_server_connection(config_manager=None):
 
             # Bestehende Verbindung trennen
             subprocess.run(f"net use {drive_letter} /delete /y",
-                           shell=True, capture_output=True)
+                           shell=True, capture_output=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
             # Verbindung testen
             net_use_cmd = f'net use {drive_letter} "\\\\{server}\\{share}" /user:aero aero'
-            result = subprocess.run(net_use_cmd, shell=True, capture_output=True, text=True)
+            result = subprocess.run(net_use_cmd, shell=True, capture_output=True, text=True,
+                                    creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
             # Verbindung trennen
             subprocess.run(f"net use {drive_letter} /delete /y",
-                           shell=True, capture_output=True)
+                           shell=True, capture_output=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
             if result.returncode == 0:
                 return True, "Verbindung zum Server erfolgreich"
@@ -329,7 +343,7 @@ def test_server_connection(config_manager=None):
         else:
             # Test mit smbclient auf anderen Systemen
             cmd = ["smbclient", f"//{server}/{share}", "-U", "aero%aero", "-c", "ls"]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
             if result.returncode == 0:
                 return True, "Verbindung zum Server erfolgreich"

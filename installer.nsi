@@ -375,7 +375,7 @@ Section "${APP_NAME} (Erforderlich)" SectionApp
 
     ; --- NEU: App nach Silent-Update neu starten ---
     ; Prüft, ob der Installer im Silent-Modus (/S) aufgerufen wurde.
-    StrCmp $CMDLINE "/S" 0 not_silent
+    IfSilent 0 not_silent ; Springe zu not_silent, WENN NICHT silent
     ; Wir sind im Silent-Mode, also App neu starten
     ; Wir verwenden die Variable ${APP_EXE}, die oben definiert wurde.
     Exec '"$INSTDIR\${APP_EXE}"'

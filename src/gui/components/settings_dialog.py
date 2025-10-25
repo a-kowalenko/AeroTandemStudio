@@ -2,7 +2,7 @@
 from tkinter import messagebox, ttk
 import webbrowser
 
-from src.utils.constants import PAYPAL_LOGO_PATH
+from src.utils.constants import APP_VERSION, PAYPAL_LOGO_PATH
 
 class SettingsDialog:
     """Einstellungs-Dialog für Server-Konfiguration"""
@@ -11,6 +11,7 @@ class SettingsDialog:
         self.parent = parent
         self.config = config
         self.dialog = None
+        self.APP_VERSION = APP_VERSION
 
     def show(self):
         """Zeigt den Einstellungs-Dialog"""
@@ -153,7 +154,7 @@ class SettingsDialog:
         author_frame = tk.Frame(main_frame)
         author_frame.pack(fill="x", pady=10)
 
-        author_text = """Aero Tandem Studio\nby Andreas Kowalenko"""
+        author_text = f"""Aero Tandem Studio v{self.APP_VERSION}\nby Andreas Kowalenko"""
 
         author_label = tk.Label(
             author_frame,

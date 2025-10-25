@@ -39,7 +39,7 @@ class VideoGeneratorApp:
 
     def setup_gui(self):
         self.root.title("Aero Tandem Studio")
-        self.root.geometry("1400x900")
+        self.root.geometry("1400x800")
         self.root.config(padx=20, pady=20)
 
         # Header mit Titel und Settings-Button
@@ -107,7 +107,7 @@ class VideoGeneratorApp:
         )
 
         # Progress Handler (unten über beiden Spalten)
-        self.progress_handler = ProgressHandler(self.root)
+        self.progress_handler = ProgressHandler(self.root, self.upload_frame)
 
         self.pack_components()
         self.load_settings()
@@ -199,10 +199,6 @@ class VideoGeneratorApp:
         self.preview_separator.pack(fill='x', pady=5)
         self.video_player.pack(fill="x", pady=(0, 10), side="top")
         self.video_preview.pack(fill="x", pady=(0, 8), side="top")
-
-        # Spacer to push the following right-column elements slightly down
-        self.right_spacer = tk.Frame(self.right_frame, height=20, bg=self.right_frame.cget("bg"))
-        self.right_spacer.pack(fill="x", expand=True)
 
         self.upload_frame.pack(pady=10, fill="x", side="top")
         self.erstellen_button.pack(pady=10, fill="x", side="top")

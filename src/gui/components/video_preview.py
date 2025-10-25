@@ -41,9 +41,13 @@ class VideoPreview:
         return durations
 
     def create_widgets(self):
-        # Video-Info Frame
-        info_frame = tk.Frame(self.frame)
-        info_frame.pack(fill="x", pady=5)
+        # --- Gemeinsamer Container für Info (links) und Steuerung (rechts) ---
+        top_frame = tk.Frame(self.frame)
+        top_frame.pack(fill="x", pady=5)
+
+        # Linke Seite: Video-Info
+        info_frame = tk.Frame(top_frame)
+        info_frame.pack(side="left", anchor="n", padx=10, pady=5)
 
         self.duration_label = tk.Label(info_frame, text="Gesamtdauer: --:--", font=("Arial", 10))
         self.duration_label.pack(anchor="w")
@@ -57,22 +61,21 @@ class VideoPreview:
         self.encoding_label = tk.Label(info_frame, text="Encoding: --", font=("Arial", 9), fg="gray")
         self.encoding_label.pack(anchor="w")
 
-        # Steuerungs-Buttons
-        control_frame = tk.Frame(self.frame)
-        control_frame.pack(pady=10)
+        # Rechte Seite: Steuerungs-Buttons
+        control_frame = tk.Frame(top_frame)
+        control_frame.pack(side="right", anchor="n", padx=10, pady=5)
 
         self.play_button = tk.Button(control_frame, text="▶ Vorschau abspielen",
                                      command=self.play_preview, state="disabled",
                                      font=("Arial", 11), width=20, height=1)
         self.play_button.pack(pady=2)
 
-        # --- MODIFIED: This button now serves dual purpose (cancel/retry) ---
         self.action_button = tk.Button(control_frame, text="⏹ Erstellung abbrechen",
                                        command=self.cancel_creation, state="disabled",
                                        font=("Arial", 11), width=20, height=1)
         self.action_button.pack(pady=2)
 
-        # Status-Label
+        # Status-Label unter beiden Bereichen
         self.status_label = tk.Label(self.frame, text="Ziehen Sie Videos in das Feld links",
                                      font=("Arial", 10), fg="gray", wraplength=300)
         self.status_label.pack(pady=5)

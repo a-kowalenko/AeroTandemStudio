@@ -21,7 +21,7 @@ class ProgressHandler:
     def update_progress(self, step, total_steps=7):
         progress = (step / total_steps) * 100
         self.progress_bar['value'] = progress
-        self.eta_label.config(text=f"Fortschritt: {math.floor(progress)}%")
+        self.eta_label.config(text=f"{math.floor(progress)}%")
         self.parent.update_idletasks()
 
     def reset(self):

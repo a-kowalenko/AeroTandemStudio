@@ -4,10 +4,14 @@ import math
 
 
 class ProgressHandler:
-    def __init__(self, parent):
+    def __init__(self, parent, second_parent=None):
         self.parent = parent
-        self.progress_bar = ttk.Progressbar(parent, orient='horizontal', mode='determinate', length=280)
-        self.eta_label = tk.Label(parent, text="", font=("Arial", 10))
+        if second_parent is not None:
+            self.progress_bar = ttk.Progressbar(second_parent, orient='horizontal', mode='determinate', length=280)
+            self.eta_label = tk.Label(second_parent, text="", font=("Arial", 10))
+        else:
+            self.progress_bar = ttk.Progressbar(parent, orient='horizontal', mode='determinate', length=280)
+            self.eta_label = tk.Label(parent, text="", font=("Arial", 10))
         self.status_label = tk.Label(parent, text="Status: Bereit.", font=("Arial", 10),
                                      bd=1, relief=tk.SUNKEN, anchor=tk.W)
 

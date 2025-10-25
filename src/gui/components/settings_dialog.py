@@ -17,7 +17,7 @@ class SettingsDialog:
         """Zeigt den Einstellungs-Dialog"""
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("Einstellungen")
-        self.dialog.geometry("600x550")  # Höhe erhöht für neuen Button
+        self.dialog.geometry("600x650")  # Höhe erhöht für neuen Button
         self.dialog.resizable(False, False)
         self.dialog.transient(self.parent)
         self.dialog.grab_set()
@@ -39,8 +39,8 @@ class SettingsDialog:
         parent_width = self.parent.winfo_width()
         parent_height = self.parent.winfo_height()
 
-        dialog_width = 400
-        dialog_height = 400
+        dialog_width = 600
+        dialog_height = 650
 
         x = parent_x + (parent_width - dialog_width) // 2
         y = parent_y + (parent_height - dialog_height) // 2
@@ -95,6 +95,45 @@ class SettingsDialog:
             anchor="w"
         )
         help_label.pack(fill="x")
+
+        # Server Login und Passwort
+        credentials_frame = tk.Frame(main_frame)
+        credentials_frame.pack(fill="x", pady=15)
+
+        login_frame = tk.Frame(credentials_frame, width=300)
+        passwort_frame = tk.Frame(credentials_frame, width=300)
+        login_frame.pack(side="left", pady=5, expand=True)
+        passwort_frame.pack(side="right", pady=5, expand=True)
+
+        tk.Label(
+            login_frame,
+            text="Server Login:",
+            font=("Arial", 11),
+            anchor="w"
+        ).pack(fill="x")
+        self.login_var = tk.StringVar()
+        self.login_entry = tk.Entry(
+            login_frame,
+            textvariable=self.login_var,
+            font=("Arial", 11),
+            width=20
+        )
+        self.login_entry.pack(pady=5, fill="x")
+        tk.Label(
+            passwort_frame,
+            text="Server Passwort:",
+            font=("Arial", 11),
+            anchor="w"
+        ).pack(fill="x")
+        self.password_var = tk.StringVar()
+        self.password_entry = tk.Entry(
+            passwort_frame,
+            textvariable=self.password_var,
+            font=("Arial", 11),
+            width=20,
+            show="*"
+        )
+        self.password_entry.pack(pady=5, fill="x")
 
         # Button Frame für Einstellungen
         settings_button_frame = tk.Frame(main_frame)
@@ -212,10 +251,14 @@ class SettingsDialog:
         """Lädt die gespeicherten Einstellungen"""
         settings = self.config.get_settings()
         self.server_var.set(settings.get("server_url", "smb://169.254.169.254/aktuell"))
+        self.login_var.set(settings.get("server_login", ""))
+        self.password_var.set(settings.get("server_password", ""))
 
     def save_settings(self):
         """Speichert die Einstellungen"""
         server_url = self.server_var.get().strip()
+        server_login = self.login_var.get().strip()
+        server_password = self.password_var.get()
 
         if not server_url:
             messagebox.showwarning("Fehler", "Bitte geben Sie eine Server-Adresse ein.")
@@ -234,6 +277,9 @@ class SettingsDialog:
             current_settings = self.config.get_settings()
             # Server-URL aktualisieren
             current_settings["server_url"] = server_url
+            current_settings["server_login"] = server_login
+            current_settings["server_password"] = server_password # todo: keyring
+
             # Speichern
             self.config.save_settings(current_settings)
 

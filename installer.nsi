@@ -3,7 +3,7 @@
 Unicode true
 
 !define APP_NAME "Aero Tandem Studio"
-!define APP_VERSION "0.0.1.1337"
+!define APP_VERSION "0.0.2.1337"
 !define APP_EXE "${APP_NAME}.exe"
 !define APP_PUBLISHER "Andreas Kowalenko"
 !define APP_WEBSITE "kowalenko.io"
@@ -372,6 +372,16 @@ Section "${APP_NAME} (Erforderlich)" SectionApp
     CreateShortcut "$SMPROGRAMS\${APP_NAME}\Deinstallieren.lnk" "$INSTDIR\uninstall.exe"
 
     DetailPrint "${APP_NAME} wurde installiert."
+
+    ; --- NEU: App nach Silent-Update neu starten ---
+    ; Prüft, ob der Installer im Silent-Modus (/S) aufgerufen wurde.
+    StrCmp $CMDLINE "/S" 0 not_silent
+    ; Wir sind im Silent-Mode, also App neu starten
+    ; Wir verwenden die Variable ${APP_EXE}, die oben definiert wurde.
+    Exec '"$INSTDIR\${APP_EXE}"'
+    not_silent:
+    ; --- ENDE NEU ---
+
     SetDetailsPrint lastused
 SectionEnd
 

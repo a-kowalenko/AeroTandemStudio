@@ -6,6 +6,8 @@ from src.utils.path_helper import get_resource_path
 Zentrale Konstanten-Datei für die Anwendung.
 """
 
+APP_VERSION = "0.0.2.1337"
+
 # --- OS-Erkennung ---
 IS_WINDOWS = (sys.platform == "win32")
 IS_MACOS = (sys.platform == "darwin")

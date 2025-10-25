@@ -40,7 +40,7 @@ class VideoGeneratorApp:
     def setup_gui(self):
         self.root.title("Aero Tandem Studio")
         self.root.geometry("1400x800")
-        self.root.config(padx=20, pady=20)
+        self.root.config(padx=20, pady=0)
 
         # Header mit Titel und Settings-Button
         self.create_header()
@@ -127,7 +127,7 @@ class VideoGeneratorApp:
             try:
                 from PIL import Image, ImageTk
                 img = Image.open(img_path).convert("RGBA")
-                img = img.resize((69, 69), Image.LANCZOS)
+                img = img.resize((60, 60), Image.LANCZOS)
                 self.logo_image = ImageTk.PhotoImage(img)
             except Exception:
                 try:
@@ -143,7 +143,7 @@ class VideoGeneratorApp:
         title_label = tk.Label(
             header_frame,
             text="Aero Tandem Studio",
-            font=("Arial", 20, "bold"),
+            font=("Arial", 18, "bold"),
             fg="#009d8b"
         )
         title_label.pack(side="left")
@@ -199,6 +199,10 @@ class VideoGeneratorApp:
         self.preview_separator.pack(fill='x', pady=5)
         self.video_player.pack(fill="x", pady=(0, 10), side="top")
         self.video_preview.pack(fill="x", pady=(0, 8), side="top")
+
+        # Spacer to push the following right-column elements slightly down
+        self.right_spacer = tk.Frame(self.right_frame, bg=self.right_frame.cget("bg"))
+        self.right_spacer.pack(fill="x", expand=True)
 
         self.upload_frame.pack(pady=10, fill="x", side="top")
         self.erstellen_button.pack(pady=10, fill="x", side="top")

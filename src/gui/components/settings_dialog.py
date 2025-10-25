@@ -17,7 +17,7 @@ class SettingsDialog:
         """Zeigt den Einstellungs-Dialog"""
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("Einstellungen")
-        self.dialog.geometry("600x500")
+        self.dialog.geometry("600x550")  # Höhe erhöht für neuen Button
         self.dialog.resizable(False, False)
         self.dialog.transient(self.parent)
         self.dialog.grab_set()
@@ -40,7 +40,7 @@ class SettingsDialog:
         parent_height = self.parent.winfo_height()
 
         dialog_width = 400
-        dialog_height = 350
+        dialog_height = 400
 
         x = parent_x + (parent_width - dialog_width) // 2
         y = parent_y + (parent_height - dialog_height) // 2
@@ -96,13 +96,13 @@ class SettingsDialog:
         )
         help_label.pack(fill="x")
 
-        # Button Frame
-        button_frame = tk.Frame(main_frame)
-        button_frame.pack(fill="x", pady=20)
+        # Button Frame für Einstellungen
+        settings_button_frame = tk.Frame(main_frame)
+        settings_button_frame.pack(fill="x", pady=15)
 
         # Speichern Button
         save_button = tk.Button(
-            button_frame,
+            settings_button_frame,
             text="Speichern",
             font=("Arial", 11, "bold"),
             command=self.save_settings,
@@ -115,7 +115,7 @@ class SettingsDialog:
 
         # Abbrechen Button
         cancel_button = tk.Button(
-            button_frame,
+            settings_button_frame,
             text="Abbrechen",
             font=("Arial", 11),
             command=self.dialog.destroy,
@@ -125,6 +125,26 @@ class SettingsDialog:
             height=1
         )
         cancel_button.pack(pady=5)
+
+        # Separator
+        ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=10)
+
+        # Update Frame
+        update_frame = tk.Frame(main_frame)
+        update_frame.pack(fill="x", pady=10)
+
+        # Update Check Button
+        update_button = tk.Button(
+            update_frame,
+            text="Nach Updates suchen",
+            font=("Arial", 10),
+            command=self.check_for_updates,
+            bg="#2196F3",
+            fg="white",
+            width=20,
+            height=1
+        )
+        update_button.pack(pady=5)
 
         # Separator
         ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=10)
@@ -169,6 +189,15 @@ class SettingsDialog:
         self.dialog.bind('<Return>', lambda e: self.save_settings())
         # Escape-Taste binden
         self.dialog.bind('<Escape>', lambda e: self.dialog.destroy())
+
+    def check_for_updates(self):
+        """Startet die Update-Prüfung"""
+        try:
+            # Verwende die gleiche Funktion wie beim App-Start, aber mit Benachrichtigung
+            from src.installer.updater import initialize_updater
+            initialize_updater(self.dialog, self.APP_VERSION, show_no_update_message=True)
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Update-Prüfung konnte nicht gestartet werden:\n{str(e)}")
 
     def open_paypal_donation(self):
         """Öffnet die PayPal Donations-Seite"""

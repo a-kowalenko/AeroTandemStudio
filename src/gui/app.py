@@ -16,9 +16,12 @@ from ..utils.config import ConfigManager
 from ..utils.validation import validate_form_data
 from ..installer.ffmpeg_installer import ensure_ffmpeg_installed
 from ..utils.file_utils import test_server_connection
+from ..installer.updater import initialize_updater
+from ..utils.constants import APP_VERSION
 
 
 class VideoGeneratorApp:
+
     def __init__(self):
         self.root = TkinterDnD.Tk()
         self.config = ConfigManager()
@@ -28,9 +31,11 @@ class VideoGeneratorApp:
         self.server_status_label = None
         self.server_connected = False
         self.video_player = None
+        self.APP_VERSION = APP_VERSION
 
         self.setup_gui()
         self.ensure_dependencies()
+
 
     def setup_gui(self):
         self.root.title("Aero Tandem Studio")
@@ -59,7 +64,6 @@ class VideoGeneratorApp:
         # Rechte Spalte: Vorschau, Checkbox und Button
         # Titel
         self.title_label = tk.Label(self.right_frame, text="Video Vorschau", font=("Arial", 14, "bold"))
-
 
         # Separator
         self.preview_separator = ttk.Separator(self.right_frame, orient='horizontal')
@@ -346,6 +350,7 @@ class VideoGeneratorApp:
         # Aktiviere Erstellen-Button wieder, wenn die Vorschau fertig ist
         def enable_button_when_done():
             print("Enabling button")
+
             def restore():
                 try:
                     self.erstellen_button.config(text=old_text, bg=old_bg, state="normal", cursor=old_cursor)
@@ -384,7 +389,8 @@ class VideoGeneratorApp:
         # Verwende das kombinierte Video aus der Vorschau
         combined_video_path = self.video_preview.get_combined_video_path()
         if not combined_video_path or not os.path.exists(combined_video_path):
-            messagebox.showwarning("Fehler", "Bitte erstellen Sie zuerst eine Vorschau durch Drag & Drop von Videos oder klicken Sie auf 'Erneut versuchen'.")
+            messagebox.showwarning("Fehler",
+                                   "Bitte erstellen Sie zuerst eine Vorschau durch Drag & Drop von Videos oder klicken Sie auf 'Erneut versuchen'.")
             return
 
         # Foto-Pfade holen
@@ -482,4 +488,12 @@ class VideoGeneratorApp:
 
     def run(self):
         """Startet die Hauptloop der Anwendung"""
+
+        try:
+            initialize_updater(self.root, self.APP_VERSION)
+        except Exception as e:
+            # Ein Fehler im Updater sollte den Start der App nicht verhindern
+            print(f"Fehler beim Initialisieren des Updaters: {e}")
+        # <<< ENDE NEU 3/3 >>>
+
         self.root.mainloop()

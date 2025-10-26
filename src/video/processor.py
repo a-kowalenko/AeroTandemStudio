@@ -4,6 +4,7 @@ import threading
 import os
 import tempfile
 import subprocess
+from dataclasses import asdict
 from datetime import date
 
 from .logger import CancellableProgressBarLogger, CancellationError
@@ -23,19 +24,19 @@ class VideoProcessor:
         # wird durch manuelle Checks im Code gesteuert.
         self.logger = CancellableProgressBarLogger(self.cancel_event)
 
-    def create_video_with_intro_only(self, form_data, combined_video_path, photo_paths=None):
+    def create_video_with_intro_only(self, form_data, combined_video_path, photo_paths=None, kunde=None):
         """Erstellt nur noch das Intro und hängt es vor das kombinierte Video"""
         thread = threading.Thread(
             target=self._video_creation_with_intro_only_task,
-            args=(form_data, combined_video_path, photo_paths)
+            args=(form_data, combined_video_path, photo_paths, kunde)
         )
         thread.start()
         return thread
 
-    def _video_creation_with_intro_only_task(self, form_data, combined_video_path, photo_paths=None):
+    def _video_creation_with_intro_only_task(self, form_data, combined_video_path, photo_paths=None, kunde=None):
         """Hauptlogik für das Hinzufügen des Intros zum kombinierten Video"""
         try:
-            self._execute_video_creation_with_intro_only(form_data, combined_video_path, photo_paths)
+            self._execute_video_creation_with_intro_only(form_data, combined_video_path, photo_paths, kunde)
         except CancellationError:
             self._handle_cancellation()
         except Exception as e:
@@ -48,7 +49,7 @@ class VideoProcessor:
         if self.cancel_event.is_set():
             raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
 
-    def _execute_video_creation_with_intro_only(self, form_data, combined_video_path, photo_paths=None):
+    def _execute_video_creation_with_intro_only(self, form_data, combined_video_path, photo_paths=None, kunde=None):
         """Fügt nur das Intro zum bereits kombinierten Video hinzu, ohne Neukodierung des Hauptvideos."""
         gast = form_data["gast"]
         tandemmaster = form_data["tandemmaster"]
@@ -173,7 +174,7 @@ class VideoProcessor:
             # Speichere MARKER Datei im Ausgabeordner
             marker_path = os.path.join(os.path.dirname(full_output_path), "_fertig.txt")
             with open(marker_path, 'w') as marker_file:
-                marker_file.write("Videoerstellung abgeschlossen.\n")
+                marker_file.write(json.dumps(asdict(kunde), ensure_ascii=False))
 
         except subprocess.CalledProcessError as e:
             # Prüfen, ob der Fehler durch einen Abbruch verursacht wurde

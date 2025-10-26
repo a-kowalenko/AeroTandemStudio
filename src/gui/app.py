@@ -345,7 +345,37 @@ class VideoGeneratorApp:
 
         self.erstellen_button.config(text="Bitte warten...", bg="#9E9E9E", state="disabled", cursor="watch")
 
-        update_preview_thread = self.video_preview.update_preview(video_paths)
+        kunde = None
+        qr_scan_success = False
+        if video_paths:
+            from src.video.qr_analyser import analysiere_ersten_clip
+            kunde, qr_scan_success = analysiere_ersten_clip(video_paths[0])
+            if qr_scan_success and kunde:
+                print(f"QR-Code gescannt: Kunde ID {kunde.kunde_id}, Email: {kunde.email}, Telefon: {kunde.telefon}, "
+                      f"Foto: {kunde.foto}, Video: {kunde.video}")
+            else:
+                print("Kein gültiger QR-Code im ersten Video gefunden.")
+
+        if qr_scan_success and kunde:
+            # open modal to show kunde info
+            info_text = (
+                f"Kunde erkannt:\n\n"
+                f"ID: {kunde.kunde_id}\n"
+                f"Name: {kunde.vorname} {kunde.nachname}\n"
+                f"Email: {kunde.email}\n"
+                f"Telefon: {kunde.telefon}\n"
+                f"Foto: {'Ja' if kunde.foto else 'Nein'}\n"
+                f"Video: {'Ja' if kunde.video else 'Nein'}\n\n"
+                f"Möchten Sie fortfahren?"
+            )
+            messagebox.showinfo("Kunde erkannt", info_text)
+        elif qr_scan_success and not kunde:
+            messagebox.showwarning("Ungültiger QR-Code", "Ein QR-Code wurde erkannt, aber die Daten sind ungültig.")
+        else:
+            messagebox.showinfo("Kein QR-Code", "Kein QR-Code im ersten Video gefunden.")
+
+
+        update_preview_thread = self.video_preview.update_preview(video_paths, kunde)
 
         # Aktiviere Erstellen-Button wieder, wenn die Vorschau fertig ist
         def enable_button_when_done():
@@ -388,6 +418,10 @@ class VideoGeneratorApp:
 
         # Verwende das kombinierte Video aus der Vorschau
         combined_video_path = self.video_preview.get_combined_video_path()
+        kunde = self.video_preview.get_kunde()
+        if kunde:
+            print(f"Verwende Kunde ID {kunde.kunde_id} für die Videoerstellung.")
+
         if not combined_video_path or not os.path.exists(combined_video_path):
             messagebox.showwarning("Fehler",
                                    "Bitte erstellen Sie zuerst eine Vorschau durch Drag & Drop von Videos oder klicken Sie auf 'Erneut versuchen'.")
@@ -432,7 +466,7 @@ class VideoGeneratorApp:
         # Videoerstellung im Thread starten
         video_thread = threading.Thread(
             target=self.video_processor.create_video_with_intro_only,
-            args=(form_data, combined_video_path, photo_paths)
+            args=(form_data, combined_video_path, photo_paths, kunde)
         )
         video_thread.start()
 

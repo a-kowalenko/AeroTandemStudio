@@ -391,7 +391,6 @@ class VideoGeneratorApp:
             self.form_fields.update_form_layout(qr_success=False, kunde=None)
 
             # Auch Vorschau und Player leeren
-            # (Annahme: Diese Methoden existieren in Ihren Klassen)
             try:
                 if self.video_preview:
                     self.video_preview.clear_preview()
@@ -417,7 +416,6 @@ class VideoGeneratorApp:
         self._set_button_waiting()
 
         # 2. Ladefenster anzeigen (verwendet jetzt die importierte Klasse)
-        # self.root ist das Hauptfenster (master)
         self.loading_window = LoadingWindow(self.root, text="Analysiere QR-Code im Video...")
 
         # 3. Eine Queue erstellen, um das Ergebnis vom Thread zu empfangen
@@ -427,7 +425,7 @@ class VideoGeneratorApp:
         analysis_thread = threading.Thread(
             target=self._run_analysis_thread,
             args=(video_paths[0], self.analysis_queue),
-            daemon=True  # Thread stirbt, wenn die Hauptanwendung schließt
+            daemon=True
         )
         analysis_thread.start()
 
@@ -440,16 +438,12 @@ class VideoGeneratorApp:
         Sie führt die blockierende Analyse aus und legt das Ergebnis in die Queue.
         """
         try:
-            # WICHTIG: Der Import muss hier erfolgen oder threadsicher sein.
             from src.video.qr_analyser import analysiere_ersten_clip
 
             kunde, qr_scan_success = analysiere_ersten_clip(video_path)
-
-            # Legen Sie das Ergebnis in die Queue
             result_queue.put(("success", (kunde, qr_scan_success)))
 
         except Exception as e:
-            # Legen Sie im Fehlerfall die Ausnahme in die Queue
             print(f"Fehler im Analyse-Thread: {e}")
             result_queue.put(("error", e))
 
@@ -476,8 +470,7 @@ class VideoGeneratorApp:
             elif status == "error":
                 messagebox.showerror("Analyse-Fehler",
                                      f"Ein unerwarteter Fehler bei der Videoanalyse ist aufgetreten:\n{result}")
-                self._restore_button_state()  # Button auch bei Fehler zurücksetzen
-                # Formular auch bei Fehler auf manuell setzen
+                self._restore_button_state()
                 self.form_fields.update_form_layout(False, None)
 
 
@@ -486,13 +479,12 @@ class VideoGeneratorApp:
             self.root.after(100, self._check_analysis_result, video_paths)
 
         except Exception as e:
-            # Allgemeiner Fehler beim Abrufen (sollte nicht passieren)
+            # Allgemeiner Fehler beim Abrufen
             if self.loading_window:
                 self.loading_window.destroy()
                 self.loading_window = None
             messagebox.showerror("Fehler", f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}")
-            self._restore_button_state()  # Button auf jeden Fall zurücksetzen
-            # Formular auch bei Fehler auf manuell setzen
+            self._restore_button_state()
             self.form_fields.update_form_layout(False, None)
 
     def _process_analysis_result(self, kunde, qr_scan_success, video_paths):
@@ -502,8 +494,8 @@ class VideoGeneratorApp:
         try:
             if qr_scan_success and kunde:
                 print(f"QR-Code gescannt: Kunde ID {kunde.kunde_id}, Email: {kunde.email}, Telefon: {kunde.telefon}, "
-                        f"Handcam Foto: {kunde.handcam_foto}, Handcam Video: {kunde.handcam_video}, "
-                       f"Outside Foto: {kunde.outside_foto}, Outside Video: {kunde.outside_video}")
+                      f"Handcam Foto: {kunde.handcam_foto}, Handcam Video: {kunde.handcam_video}, "
+                      f"Outside Foto: {kunde.outside_foto}, Outside Video: {kunde.outside_video}")
 
                 info_text = (
                     f"Kunde erkannt:\n\n"
@@ -523,16 +515,11 @@ class VideoGeneratorApp:
                 messagebox.showwarning("Ungültiger QR-Code", "Ein QR-Code wurde erkannt, aber die Daten sind ungültig.")
 
             else:
-                # HIER wird die Anforderung "kein qr code gefunden" behandelt
-                messagebox.showinfo("Kein QR-Code", "Kein QR-Code im ersten Video gefunden. Wechsle zu manueller Eingabe.")
+                messagebox.showinfo("Kein QR-Code",
+                                    "Kein QR-Code im ersten Video gefunden. Wechsle zu manueller Eingabe.")
 
-            # Formular-Layout aktualisieren ---
-            # Diese Methode wird jetzt aufgerufen, egal was das Ergebnis ist,
-            # und die form_fields-Klasse entscheidet, welches Layout angezeigt wird.
-            # update_form_layout(False, None) -> schaltet auf manuell
-            # update_form_layout(True, kunde) -> schaltet auf kunde
+            # Formular-Layout aktualisieren
             self.form_fields.update_form_layout(qr_scan_success, kunde)
-            # ------------------------------------------
 
             # Starten Sie die Aktualisierung der GUI-Vorschau
             update_preview_thread = self.video_preview.update_preview(video_paths)
@@ -540,19 +527,15 @@ class VideoGeneratorApp:
             if update_preview_thread and isinstance(update_preview_thread, threading.Thread):
                 def enable_button_when_done():
                     update_preview_thread.join()
-                    # Stellen Sie sicher, dass die GUI-Änderung im Hauptthread erfolgt
                     self.root.after(0, self._restore_button_state)
 
                 threading.Thread(target=enable_button_when_done, daemon=True).start()
             else:
-                # Wenn update_preview nicht blockiert oder keinen Thread zurückgibt
                 self._restore_button_state()
 
         except Exception as e:
             print(f"Fehler in _process_analysis_result: {e}")
-            # Stellen Sie sicher, dass der Button auch bei einem Fehler hier wiederhergestellt wird
             self._restore_button_state()
-            # Formular auch bei Fehler auf manuell setzen
             self.form_fields.update_form_layout(False, None)
 
     def erstelle_video(self):
@@ -574,11 +557,22 @@ class VideoGeneratorApp:
 
         # Verwende das kombinierte Video aus der Vorschau
         combined_video_path = self.video_preview.get_combined_video_path()
+        # Foto-Pfade holen
+        photo_paths = self.drag_drop.get_photo_paths()
+
+        # NEUE VALIDIERUNG: Prüfen, ob *mindestens* Videos ODER Fotos vorhanden sind.
+        has_video = combined_video_path and os.path.exists(combined_video_path)
+        has_photos = photo_paths and len(photo_paths) > 0
+
+        if not has_video and not has_photos:
+            messagebox.showwarning("Fehler",
+                                   "Bitte fügen Sie per Drag & Drop Videos und/oder Fotos hinzu.")
+            return
 
         # Parse Kundendaten aus der Formular-Eingabe
         kunde_id_val = form_data.get("kunde_id")
         kunde = Kunde(
-            kunde_id=int(kunde_id_val) if kunde_id_val and kunde_id_val.isdigit() else 0, # Robuster gegen leere ID
+            kunde_id=int(kunde_id_val) if kunde_id_val and kunde_id_val.isdigit() else 0,
             vorname=str(form_data["vorname"]),
             nachname=str(form_data["nachname"]),
             email=str(form_data["email"]),
@@ -593,35 +587,30 @@ class VideoGeneratorApp:
             ist_bezahlt_outside_video=bool(form_data["ist_bezahlt_outside_video"])
         )
 
-
-        if not combined_video_path or not os.path.exists(combined_video_path):
-            messagebox.showwarning("Fehler",
-                                   "Bitte erstellen Sie zuerst eine Vorschau durch Drag & Drop von Videos oder klicken Sie auf 'Erneut versuchen'.")
-            return
-
-        # Foto-Pfade holen
-        photo_paths = self.drag_drop.get_photo_paths()
-
-        # Validierung
-        # HINWEIS: validate_form_data muss ggf. an die neue form_data-Struktur angepasst werden!
-        errors = validate_form_data(form_data, [combined_video_path])
+        # Validierung der Formulardaten (Annahme: validate_form_data prüft Textfelder)
+        # Wir signalisieren, dass Ressourcen vorhanden sind (has_video or has_photos)
+        errors = validate_form_data(form_data, has_video or has_photos)
         if errors:
             messagebox.showwarning("Fehlende Eingabe", "\n".join(errors))
             return
 
         # Einstellungen speichern
         settings_data = self.form_fields.get_settings_data()
-        settings_data["upload_to_server"] = form_data["upload_to_server"]  # Hinzufügen
+        settings_data["upload_to_server"] = form_data["upload_to_server"]
         self.config.save_settings(settings_data)
 
         # GUI für Verarbeitung vorbereiten
-        video_count = len(self.drag_drop.get_video_paths())
+        video_count = len(self.drag_drop.get_video_paths()) if has_video else 0
         photo_count = len(photo_paths)
-        status_text = f"Status: Verarbeite {video_count} Video(s)"
-        if photo_count > 0:
-            status_text += f" und kopiere {photo_count} Foto(s)"
 
-        # Server-Upload Info hinzufügen
+        status_parts = []
+        if has_video:
+            status_parts.append(f"Verarbeite {video_count} Video(s)")
+        if has_photos:
+            status_parts.append(f"Kopiere {photo_count} Foto(s)")
+
+        status_text = "Status: " + " und ".join(status_parts)
+
         if form_data["upload_to_server"]:
             status_text += " - Lade auf Server hoch"
 
@@ -638,16 +627,14 @@ class VideoGeneratorApp:
 
         payload = {
             "form_data": form_data,
-            "combined_video_path": combined_video_path,
+            "combined_video_path": combined_video_path if has_video else None,  # None übergeben, wenn kein Video
             "kunde": kunde,
             "photo_paths": photo_paths,
             "settings": self.config.get_settings()
         }
 
         print('kunde in erstelle_video:', kunde)
-        # Videoerstellung im Thread starten
-        # HINWEIS: video_processor.create_video_with_intro_only muss ggf.
-        # an die neue form_data-Struktur angepasst werden!
+
         video_thread = threading.Thread(
             target=self.video_processor.create_video_with_intro_only,
             args=(payload,)
@@ -711,8 +698,6 @@ class VideoGeneratorApp:
         try:
             initialize_updater(self.root, self.APP_VERSION)
         except Exception as e:
-            # Ein Fehler im Updater sollte den Start der App nicht verhindern
             print(f"Fehler beim Initialisieren des Updaters: {e}")
-        # <<< ENDE NEU 3/3 >>>
 
         self.root.mainloop()

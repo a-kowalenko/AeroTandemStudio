@@ -43,3 +43,5 @@ CONFIG_FILE = get_resource_path("config/config.json")
 
 # --- Log-Dateipfad ---
 LOG_FILE = "logs/app.log"
+
+WASSERZEICHEN_PATH = get_resource_path("assets/skydivede_wasserzeichen.png")

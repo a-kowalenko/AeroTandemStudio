@@ -568,6 +568,12 @@ class VideoGeneratorApp:
         video_produkt_gewaehlt = form_data.get("handcam_video", False) or form_data.get("outside_video", False)
         foto_produkt_gewaehlt = form_data.get("handcam_foto", False) or form_data.get("outside_foto", False)
 
+        # Prüfen ob Video gewählt aber nicht bezahlt ist
+        video_gewaehlt_aber_nicht_bezahlt = (
+                (form_data.get("handcam_video", False) and not form_data.get("ist_bezahlt_handcam_video", False)) or
+                (form_data.get("outside_video", False) and not form_data.get("ist_bezahlt_outside_video", False))
+        )
+
         # 1. Prüfen, ob überhaupt ein Produkt ausgewählt ist.
         if not video_produkt_gewaehlt and not foto_produkt_gewaehlt:
             messagebox.showwarning("Fehler",
@@ -607,8 +613,6 @@ class VideoGeneratorApp:
         )
 
         # Validierung der Formulardaten (Textfelder)
-        # Die Ressourcen-Prüfung (has_video or has_photos) ist jetzt redundant, da wir oben
-        # schon detaillierter geprüft haben. Wir übergeben True, wenn ein Produkt gewählt wurde.
         errors = validate_form_data(form_data, (video_produkt_gewaehlt or foto_produkt_gewaehlt))
         if errors:
             messagebox.showwarning("Fehlende Eingabe", "\n".join(errors))
@@ -624,8 +628,12 @@ class VideoGeneratorApp:
         photo_count = len(photo_paths)
 
         status_parts = []
-        if video_produkt_gewaehlt:  # Status basierend auf Auswahl, nicht nur Anwesenheit
-            status_parts.append(f"Verarbeite {video_count} Video(s)")
+        if video_produkt_gewaehlt:
+            if video_gewaehlt_aber_nicht_bezahlt:
+                status_parts.append(f"Erstelle {video_count} Video(s) mit Wasserzeichen (nicht bezahlt)")
+            else:
+                status_parts.append(f"Verarbeite {video_count} Video(s)")
+
         if foto_produkt_gewaehlt:
             status_parts.append(f"Kopiere {photo_count} Foto(s)")
 
@@ -650,7 +658,8 @@ class VideoGeneratorApp:
             "combined_video_path": combined_video_path if has_video else None,
             "kunde": kunde,
             "photo_paths": photo_paths,
-            "settings": self.config.get_settings()
+            "settings": self.config.get_settings(),
+            "create_watermark_version": video_gewaehlt_aber_nicht_bezahlt
         }
 
         print('kunde in erstelle_video:', kunde)

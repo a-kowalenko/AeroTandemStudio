@@ -71,7 +71,7 @@ class VideoGeneratorApp:
         self.right_frame.pack(side="right", fill="y", padx=(20, 0))
 
         # Linke Spalte: Formular und Drag & Drop
-        self.form_fields = FormFields(self.left_frame, self.config)
+        self.form_fields = FormFields(self.left_frame, self.config, self)
         self.drag_drop = DragDropFrame(self.left_frame, self)
 
         # Rechte Spalte: Vorschau, Checkbox und Button
@@ -560,13 +560,32 @@ class VideoGeneratorApp:
         # Foto-Pfade holen
         photo_paths = self.drag_drop.get_photo_paths()
 
-        # NEUE VALIDIERUNG: Prüfen, ob *mindestens* Videos ODER Fotos vorhanden sind.
+        # Physische Anwesenheit von Dateien prüfen
         has_video = combined_video_path and os.path.exists(combined_video_path)
         has_photos = photo_paths and len(photo_paths) > 0
 
-        if not has_video and not has_photos:
+        # Ausgewählte Produkte aus form_data holen
+        video_produkt_gewaehlt = form_data.get("handcam_video", False) or form_data.get("outside_video", False)
+        foto_produkt_gewaehlt = form_data.get("handcam_foto", False) or form_data.get("outside_foto", False)
+
+        # 1. Prüfen, ob überhaupt ein Produkt ausgewählt ist.
+        if not video_produkt_gewaehlt and not foto_produkt_gewaehlt:
             messagebox.showwarning("Fehler",
-                                   "Bitte fügen Sie per Drag & Drop Videos und/oder Fotos hinzu.")
+                                   "Bitte wählen Sie mindestens ein Produkt aus\n"
+                                   "(Handcam Foto/Video oder Outside Foto/Video).")
+            return
+
+        # 2. Prüfen auf Diskrepanz: Produkt ausgewählt, aber keine Datei da
+        error_messages = []
+        if video_produkt_gewaehlt and not has_video:
+            error_messages.append("Sie haben ein Video-Produkt ausgewählt, aber keine Videos hinzugefügt.")
+
+        if foto_produkt_gewaehlt and not has_photos:
+            error_messages.append("Sie haben ein Foto-Produkt ausgewählt, aber keine Fotos hinzugefügt.")
+
+        # Zeige Fehler, wenn Produkt ausgewählt, aber Datei fehlt
+        if error_messages:
+            messagebox.showwarning("Fehlende Dateien", "\n\n".join(error_messages))
             return
 
         # Parse Kundendaten aus der Formular-Eingabe
@@ -587,9 +606,10 @@ class VideoGeneratorApp:
             ist_bezahlt_outside_video=bool(form_data["ist_bezahlt_outside_video"])
         )
 
-        # Validierung der Formulardaten (Annahme: validate_form_data prüft Textfelder)
-        # Wir signalisieren, dass Ressourcen vorhanden sind (has_video or has_photos)
-        errors = validate_form_data(form_data, has_video or has_photos)
+        # Validierung der Formulardaten (Textfelder)
+        # Die Ressourcen-Prüfung (has_video or has_photos) ist jetzt redundant, da wir oben
+        # schon detaillierter geprüft haben. Wir übergeben True, wenn ein Produkt gewählt wurde.
+        errors = validate_form_data(form_data, (video_produkt_gewaehlt or foto_produkt_gewaehlt))
         if errors:
             messagebox.showwarning("Fehlende Eingabe", "\n".join(errors))
             return
@@ -604,9 +624,9 @@ class VideoGeneratorApp:
         photo_count = len(photo_paths)
 
         status_parts = []
-        if has_video:
+        if video_produkt_gewaehlt:  # Status basierend auf Auswahl, nicht nur Anwesenheit
             status_parts.append(f"Verarbeite {video_count} Video(s)")
-        if has_photos:
+        if foto_produkt_gewaehlt:
             status_parts.append(f"Kopiere {photo_count} Foto(s)")
 
         status_text = "Status: " + " und ".join(status_parts)
@@ -627,7 +647,7 @@ class VideoGeneratorApp:
 
         payload = {
             "form_data": form_data,
-            "combined_video_path": combined_video_path if has_video else None,  # None übergeben, wenn kein Video
+            "combined_video_path": combined_video_path if has_video else None,
             "kunde": kunde,
             "photo_paths": photo_paths,
             "settings": self.config.get_settings()
@@ -660,6 +680,11 @@ class VideoGeneratorApp:
             return
 
         self.root.after(0, self._switch_to_create_mode)
+
+    def on_files_added(self, has_videos, has_photos):
+        """Wird von DragDropFrame aufgerufen, um FormFields zu aktualisieren."""
+        if self.form_fields:
+            self.form_fields.auto_check_products(has_videos, has_photos)
 
     def _switch_to_cancel_mode(self):
         """Wechselt den Button zum Abbrechen-Modus"""
@@ -701,3 +726,4 @@ class VideoGeneratorApp:
             print(f"Fehler beim Initialisieren des Updaters: {e}")
 
         self.root.mainloop()
+

@@ -322,6 +322,8 @@ class DragDropFrame:
     def add_files(self, new_videos, new_photos):
         """Fügt neue Videos und Fotos hinzu und aktualisiert die Tabellen"""
         new_videos_added = False
+        new_photos_added = False
+
         # Videos hinzufügen (ohne Duplikate)
         for video_path in new_videos:
             if video_path not in self.video_paths:
@@ -332,6 +334,7 @@ class DragDropFrame:
         for photo_path in new_photos:
             if photo_path not in self.photo_paths:
                 self.photo_paths.append(photo_path)
+                new_photos_added = True
 
         self._update_video_table()
         self._update_photo_table()
@@ -339,6 +342,11 @@ class DragDropFrame:
         # Vorschau nur mit Videos aktualisieren
         if new_videos_added:
             self._update_app_preview()
+
+        # App über *alle* neuen Dateien benachrichtigen
+        if new_videos_added or new_photos_added:
+            if hasattr(self.app, 'on_files_added'):
+                self.app.on_files_added(new_videos_added, new_photos_added)
 
     def _update_app_preview(self, video_paths=None):
         """Fordert eine Aktualisierung der Vorschau über die Hauptanwendung an."""

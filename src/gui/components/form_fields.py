@@ -4,9 +4,10 @@ from datetime import date
 
 
 class FormFields:
-    def __init__(self, parent, config):
+    def __init__(self, parent, config, app_instance):
         self.parent = parent
         self.config = config
+        self.app = app_instance  # Referenz zur Haupt-App
         self.frame = tk.Frame(parent)
         self.frame.grid_columnconfigure(1, weight=1)  # Spalte 1 dehnbar machen
         self.frame.grid_columnconfigure(3, weight=1)  # Spalte 3 dehnbar machen
@@ -388,6 +389,15 @@ class FormFields:
         row += 1  # Wichtig: Zeile für die Frames erhöhen
         self.toggle_video_mode_visibility()  # Rufe auf, um korrekte Sektion anzuzeigen
 
+        # Prüfe auf bereits vorhandene Dateien ---
+        # Dies geschieht, wenn ein QR-Scan fehlschlägt, aber Dateien vorhanden sind.
+        if hasattr(self.app, 'drag_drop') and self.app.drag_drop:
+            has_videos = self.app.drag_drop.has_videos()
+            has_photos = self.app.drag_drop.has_photos()
+
+            # Rufe die bestehende auto_check-Logik auf
+            self.auto_check_products(has_videos, has_photos)
+
     # --- Methoden zum Erstellen gemeinsamer Felder ---
 
     def _create_load_kunde_id_fields(self, row, mode, load_nr_val="", kunde_id_val=""):
@@ -632,5 +642,29 @@ class FormFields:
 
         return current_settings_data
 
+    def auto_check_products(self, has_videos, has_photos):
+        """
+        Aktiviert automatisch die Produkt-Checkboxen basierend auf
+        hinzugefügten Dateien und dem aktuellen Modus.
+        Funktioniert nur im 'manual'-Modus.
+        """
+        # Nur im manuellen Modus automatisch ändern
+        if self.form_mode != 'manual':
+            return
+
+        mode = self.video_mode_var.get()
+
+        if mode == "handcam":
+            if has_videos:
+                self.handcam_video_var.set(True)
+            if has_photos:
+                self.handcam_foto_var.set(True)
+        elif mode == "outside":
+            if has_videos:
+                self.outside_video_var.set(True)
+            if has_photos:
+                self.outside_foto_var.set(True)
+
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
+

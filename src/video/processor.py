@@ -24,19 +24,19 @@ class VideoProcessor:
         # wird durch manuelle Checks im Code gesteuert.
         self.logger = CancellableProgressBarLogger(self.cancel_event)
 
-    def create_video_with_intro_only(self, form_data, combined_video_path, photo_paths=None, kunde=None):
+    def create_video_with_intro_only(self, payload):
         """Erstellt nur noch das Intro und hängt es vor das kombinierte Video"""
         thread = threading.Thread(
             target=self._video_creation_with_intro_only_task,
-            args=(form_data, combined_video_path, photo_paths, kunde)
+            args=(payload,)
         )
         thread.start()
         return thread
 
-    def _video_creation_with_intro_only_task(self, form_data, combined_video_path, photo_paths=None, kunde=None):
+    def _video_creation_with_intro_only_task(self, payload):
         """Hauptlogik für das Hinzufügen des Intros zum kombinierten Video"""
         try:
-            self._execute_video_creation_with_intro_only(form_data, combined_video_path, photo_paths, kunde)
+            self._execute_video_creation_with_intro_only(payload)
         except CancellationError:
             self._handle_cancellation()
         except Exception as e:
@@ -49,15 +49,23 @@ class VideoProcessor:
         if self.cancel_event.is_set():
             raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
 
-    def _execute_video_creation_with_intro_only(self, form_data, combined_video_path, photo_paths=None, kunde=None):
+    def _execute_video_creation_with_intro_only(self, payload):
         """Fügt nur das Intro zum bereits kombinierten Video hinzu, ohne Neukodierung des Hauptvideos."""
+
+        form_data = payload["form_data"]
+        combined_video_path = payload["combined_video_path"]
+        photo_paths = payload.get("photo_paths", None)
+        kunde = payload.get("kunde")
+        settings = payload.get("settings")
+
+        print("kunde Objekt:", kunde)
         gast = form_data["gast"]
         tandemmaster = form_data["tandemmaster"]
         videospringer = form_data["videospringer"]
         datum = form_data["datum"]
-        dauer = form_data["dauer"]
+        dauer = settings.get("dauer", "8")
         ort = form_data["ort"]
-        speicherort = form_data["speicherort"]
+        speicherort = settings.get("speicherort", "")
         outside_video = form_data["video_mode"] == "outside"
         upload_to_server = form_data["upload_to_server"]
 

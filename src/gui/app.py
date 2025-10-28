@@ -362,27 +362,55 @@ class VideoGeneratorApp:
     def _restore_button_state(self):
         """Stellt den ursprünglichen Zustand des Buttons wieder her."""
         # Nur wiederherstellen, wenn der Button nicht im "Abbrechen"-Modus ist
-        if self.erstellen_button.cget("text") == "Bitte warten...":
-            if self.old_button_text:  # Nur wiederherstellen, wenn ein Zustand gespeichert wurde
+        current_text = self.erstellen_button.cget("text")
+        if current_text == "Bitte warten..." or current_text == "Erstellen":
+            if self.old_button_text and self.old_button_text != "Abbrechen":  # Nur wiederherstellen, wenn ein gültiger Zustand gespeichert wurde
                 self.erstellen_button.config(text=self.old_button_text,
                                              bg=self.old_button_bg,
                                              state="normal",
                                              cursor=self.old_button_cursor)
             else:
-                # Fallback, falls kein Zustand gespeichert wurde
+                # Fallback, falls kein Zustand gespeichert wurde oder "Abbrechen" gespeichert war
                 self.erstellen_button.config(text="Erstellen",
                                              bg="#4CAF50",
                                              state="normal",
                                              cursor="")
+        # Wenn der Button "Abbrechen" anzeigt, ändere nichts
 
     def update_video_preview(self, video_paths: List[str]):
         """
         Aktualisiert die Video-Vorschau. Startet die QR-Analyse in einem
-        separaten Thread und zeigt ein Ladefenster an.
+        separaten Thread oder setzt das Formular zurück, wenn keine Videos vorhanden sind.
         (Diese Methode ersetzt die alte, blockierende Version)
         """
         if not video_paths:
+            # --- NEU: Anforderung des Users umsetzen ---
+            # Wenn alle Videos gelöscht wurden, setze das Formular
+            # auf den manuellen Modus zurück.
+            print("Keine Videos gefunden, setze Formular auf manuell zurück.")
+            self.form_fields.update_form_layout(qr_success=False, kunde=None)
+
+            # Auch Vorschau und Player leeren
+            # (Annahme: Diese Methoden existieren in Ihren Klassen)
+            try:
+                if self.video_preview:
+                    self.video_preview.clear_preview()
+            except AttributeError:
+                print("Hinweis: video_preview hat keine 'clear_preview' Methode.")
+            except Exception as e:
+                print(f"Fehler beim Leeren der Vorschau: {e}")
+
+            try:
+                if self.video_player:
+                    self.video_player.unload_video()
+            except AttributeError:
+                print("Hinweis: video_player hat keine 'unload_video' Methode.")
+            except Exception as e:
+                print(f"Fehler beim Entladen des Players: {e}")
+
+            self._restore_button_state()  # Button auch zurücksetzen
             return
+            # --- ENDE NEU ---
 
         # 1. Button-Zustand speichern und auf "Warten" setzen
         self._save_button_state()
@@ -495,11 +523,14 @@ class VideoGeneratorApp:
                 messagebox.showwarning("Ungültiger QR-Code", "Ein QR-Code wurde erkannt, aber die Daten sind ungültig.")
 
             else:
-                messagebox.showinfo("Kein QR-Code", "Kein QR-Code im ersten Video gefunden.")
+                # HIER wird die Anforderung "kein qr code gefunden" behandelt
+                messagebox.showinfo("Kein QR-Code", "Kein QR-Code im ersten Video gefunden. Wechsle zu manueller Eingabe.")
 
             # Formular-Layout aktualisieren ---
             # Diese Methode wird jetzt aufgerufen, egal was das Ergebnis ist,
             # und die form_fields-Klasse entscheidet, welches Layout angezeigt wird.
+            # update_form_layout(False, None) -> schaltet auf manuell
+            # update_form_layout(True, kunde) -> schaltet auf kunde
             self.form_fields.update_form_layout(qr_scan_success, kunde)
             # ------------------------------------------
 
@@ -545,8 +576,13 @@ class VideoGeneratorApp:
         combined_video_path = self.video_preview.get_combined_video_path()
 
         # Parse Kundendaten aus der Formular-Eingabe
+        kunde_id_val = form_data.get("kunde_id")
         kunde = Kunde(
-            kunde_id=int(form_data["kunde_id"], 0),
+            kunde_id=int(kunde_id_val) if kunde_id_val and kunde_id_val.isdigit() else 0, # Robuster gegen leere ID
+            vorname=str(form_data["vorname"]),
+            nachname=str(form_data["nachname"]),
+            email=str(form_data["email"]),
+            telefon=str(form_data["telefon"]),
             handcam_foto=bool(form_data["handcam_foto"]),
             handcam_video=bool(form_data["handcam_video"]),
             outside_foto=bool(form_data["outside_foto"]),
@@ -600,12 +636,21 @@ class VideoGeneratorApp:
             status_callback=self._handle_status_update
         )
 
+        payload = {
+            "form_data": form_data,
+            "combined_video_path": combined_video_path,
+            "kunde": kunde,
+            "photo_paths": photo_paths,
+            "settings": self.config.get_settings()
+        }
+
+        print('kunde in erstelle_video:', kunde)
         # Videoerstellung im Thread starten
         # HINWEIS: video_processor.create_video_with_intro_only muss ggf.
         # an die neue form_data-Struktur angepasst werden!
         video_thread = threading.Thread(
             target=self.video_processor.create_video_with_intro_only,
-            args=(form_data, combined_video_path, photo_paths, kunde)
+            args=(payload,)
         )
         video_thread.start()
 

@@ -1,5 +1,4 @@
 ﻿import tkinter as tk
-from tkinter import filedialog
 from tkcalendar import DateEntry
 from datetime import date
 
@@ -10,12 +9,10 @@ class FormFields:
         self.config = config
         self.frame = tk.Frame(parent)
         self.frame.grid_columnconfigure(1, weight=1)  # Spalte 1 dehnbar machen
-        self.frame.grid_columnconfigure(3, weight=1)  # NEU: Spalte 3 dehnbar machen
+        self.frame.grid_columnconfigure(3, weight=1)  # Spalte 3 dehnbar machen
 
         # --- Variablen für ALLE Formular-Typen ---
-        self.speicherort_var = tk.StringVar()
         self.ort_var = tk.StringVar(value="Calden")
-        self.dauer_var = tk.StringVar(value="8")
         self.tandemmaster_var = tk.StringVar()
         self.videospringer_var = tk.StringVar()
 
@@ -24,7 +21,8 @@ class FormFields:
 
         # Variablen für Kunde/Manuell-Form
         self.kunde_id_var = tk.StringVar()
-        self.gast_var = tk.StringVar()
+        self.vorname_var = tk.StringVar()  # NEU
+        self.nachname_var = tk.StringVar()  # NEU
         self.email_var = tk.StringVar()
         self.telefon_var = tk.StringVar()
 
@@ -43,7 +41,8 @@ class FormFields:
         # --- Widget-Platzhalter ---
         self.entry_load = None
         self.entry_kunde_id = None
-        self.entry_gast = None
+        self.entry_vorname = None  # NEU
+        self.entry_nachname = None  # NEU
         self.entry_email = None
         self.entry_telefon = None
         self.entry_tandemmaster = None
@@ -52,7 +51,7 @@ class FormFields:
         self.entry_videospringer = None
 
         # NEU: Platzhalter für Bearbeiten-Buttons
-        self.btn_gast = None
+        self.btn_gast = None  # Bleibt (kontrolliert jetzt Vor- und Nachname)
         self.btn_email = None
         self.btn_telefon = None
         self.btn_video_mode = None
@@ -78,6 +77,24 @@ class FormFields:
         # NEU: Widget-Liste leeren
         self.video_widgets_list = []
 
+        # NEU: Referenzen auf zerstörte Widgets löschen, um Fehler zu vermeiden
+        self.entry_load = None
+        self.entry_kunde_id = None
+        self.entry_vorname = None
+        self.entry_nachname = None
+        self.entry_email = None
+        self.entry_telefon = None
+        self.entry_tandemmaster = None
+        self.entry_datum = None
+        self.label_videospringer = None
+        self.entry_videospringer = None
+        self.btn_gast = None
+        self.btn_email = None
+        self.btn_telefon = None
+        self.btn_video_mode = None
+        self.handcam_frame = None
+        self.outside_frame = None
+
     def update_form_layout(self, qr_success, kunde=None):
         """
         Aktualisiert das Formular-Layout basierend auf dem QR-Scan-Ergebnis.
@@ -91,6 +108,7 @@ class FormFields:
             self.form_mode = 'kunde'
             self.build_kunde_form(kunde, load_nr_val)
         else:
+            # Dies fängt qr_success=False ODER kunde=None ab
             self.form_mode = 'manual'
             self.build_manual_form(load_nr_val)
 
@@ -99,60 +117,77 @@ class FormFields:
     def build_kunde_form(self, kunde, load_nr_val=""):
         """Baut das Formular für einen erkannten Kunden."""
         row = 0
-        # NEU: Load Nr und Kunde ID in einer Zeile
+        # Load Nr und Kunde ID in einer Zeile
         row = self._create_load_kunde_id_fields(row, 'kunde', load_nr_val, kunde.kunde_id)
 
-        # Gast (vorbelegt, nicht bearbeitbar)
-        tk.Label(self.frame, text="Gast:", font=("Arial", 12)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
-        self.gast_var.set(f"{kunde.vorname} {kunde.nachname}")
-        self.entry_gast = tk.Entry(self.frame, textvariable=self.gast_var, font=("Arial", 12),
-                                   state='disabled', relief='flat', bg='#f0f0f0')
-        self.entry_gast.grid(row=row, column=1, columnspan=2, padx=5, pady=5, sticky="ew")  # Colspan 2
+        # Name (Vorname, Nachname) - gleiches Layout wie im manuellen Modus
+        tk.Label(self.frame, text="Vorname:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
+
+        self.vorname_var.set(kunde.vorname)
+        self.entry_vorname = tk.Entry(self.frame, textvariable=self.vorname_var, font=("Arial", 11),
+                                      state='disabled', relief='flat', bg='#f0f0f0')
+        self.entry_vorname.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
+
+        tk.Label(self.frame, text="Nachname:", font=("Arial", 11)).grid(row=row, column=2, padx=(10, 5), pady=5,
+                                                                        sticky="w")
+
+        self.nachname_var.set(kunde.nachname)
+        self.entry_nachname = tk.Entry(self.frame, textvariable=self.nachname_var, font=("Arial", 11),
+                                       state='disabled', relief='flat', bg='#f0f0f0')
+        self.entry_nachname.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
+
         self.btn_gast = tk.Button(self.frame, text="Bearbeiten", command=self.toggle_edit_gast)
-        self.btn_gast.grid(row=row, column=3, padx=5, pady=5)
+        self.btn_gast.grid(row=row, column=4, padx=5, pady=5)
         row += 1
 
         # Email (vorbelegt, nicht bearbeitbar)
-        tk.Label(self.frame, text="Email:", font=("Arial", 12)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        tk.Label(self.frame, text="Email:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
         self.email_var.set(kunde.email)
-        self.entry_email = tk.Entry(self.frame, textvariable=self.email_var, font=("Arial", 12),
+        self.entry_email = tk.Entry(self.frame, textvariable=self.email_var, font=("Arial", 11),
                                     state='disabled', relief='flat', bg='#f0f0f0')
-        self.entry_email.grid(row=row, column=1, columnspan=2, padx=5, pady=5, sticky="ew")  # Colspan 2
+        self.entry_email.grid(row=row, column=1, columnspan=3, padx=5, pady=5, sticky="ew")  # Colspan 3
         self.btn_email = tk.Button(self.frame, text="Bearbeiten", command=self.toggle_edit_email)
-        self.btn_email.grid(row=row, column=3, padx=5, pady=5)
+        self.btn_email.grid(row=row, column=4, padx=5, pady=5)
         row += 1
 
         # Telefon (vorbelegt, nicht bearbeitbar)
-        tk.Label(self.frame, text="Telefon:", font=("Arial", 12)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        tk.Label(self.frame, text="Telefon:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
         self.telefon_var.set(kunde.telefon)
-        self.entry_telefon = tk.Entry(self.frame, textvariable=self.telefon_var, font=("Arial", 12),
+        self.entry_telefon = tk.Entry(self.frame, textvariable=self.telefon_var, font=("Arial", 11),
                                       state='disabled', relief='flat', bg='#f0f0f0')
-        self.entry_telefon.grid(row=row, column=1, columnspan=2, padx=5, pady=5, sticky="ew")  # Colspan 2
+        self.entry_telefon.grid(row=row, column=1, columnspan=3, padx=5, pady=5, sticky="ew")  # Colspan 3
         self.btn_telefon = tk.Button(self.frame, text="Bearbeiten", command=self.toggle_edit_telefon)
-        self.btn_telefon.grid(row=row, column=3, padx=5, pady=5)
+        self.btn_telefon.grid(row=row, column=4, padx=5, pady=5)
         row += 1
+
+        # --- VERSCHOBENE Felder ---
+        row = self._create_tandemmaster_field(row)
+        row = self._create_datum_ort_fields(row)
+        # --- ENDE VERSCHOBEN ---
 
         # --- Video Modus Radio-Buttons (nicht bearbeitbar) ---
         self.video_widgets_list = []  # Zurücksetzen
         mode_frame = tk.Frame(self.frame)
-        mode_frame.grid(row=row, column=0, columnspan=4, pady=5, sticky="w")
+        mode_frame.grid(row=row, column=0, columnspan=5, pady=5, sticky="w")
 
         self.radio_handcam = tk.Radiobutton(mode_frame, text="Handcam", variable=self.video_mode_var, value="handcam",
-                                            command=self.toggle_video_mode_visibility, font=("Arial", 12, "bold"),
+                                            command=self.toggle_video_mode_visibility, font=("Arial", 11, "bold"),
                                             state='disabled')
         self.radio_handcam.pack(side="left", padx=5)
         self.video_widgets_list.append(self.radio_handcam)
 
         self.radio_outside = tk.Radiobutton(mode_frame, text="Outside", variable=self.video_mode_var, value="outside",
-                                            command=self.toggle_video_mode_visibility, font=("Arial", 12, "bold"),
+                                            command=self.toggle_video_mode_visibility, font=("Arial", 11, "bold"),
                                             state='disabled')
         self.radio_outside.pack(side="left", padx=5)
         self.video_widgets_list.append(self.radio_outside)
 
         # Videospringer-Widgets (state='disabled')
-        self.label_videospringer = tk.Label(mode_frame, text="Videospringer:", font=("Arial", 12))
-        self.entry_videospringer = tk.Entry(mode_frame, font=("Arial", 12),
+        self.label_videospringer = tk.Label(mode_frame, text="Videospringer:", font=("Arial", 11))
+        self.entry_videospringer = tk.Entry(mode_frame, font=("Arial", 11),
                                             textvariable=self.videospringer_var)
+        # Videospringer-Variable aus Settings laden, falls vorhanden (wird im Kunde-Modus oft leer sein)
+        self.videospringer_var.set(self.config.get_settings().get("videospringer", ""))
 
         # Button für Video-Modus
         self.btn_video_mode = tk.Button(mode_frame, text="Bearbeiten", command=self.toggle_edit_video_mode)
@@ -162,61 +197,61 @@ class FormFields:
 
         # --- Handcam Frame (Checkbuttons state='disabled') ---
         self.handcam_frame = tk.Frame(self.frame)
-        self.handcam_frame.grid(row=row, column=0, columnspan=4, sticky="w", padx=(20, 0))
+        self.handcam_frame.grid(row=row, column=0, columnspan=5, sticky="w", padx=(20, 0))
 
         # Handcam Foto
         self.handcam_foto_var.set(kunde.handcam_foto)
         chk_hf = tk.Checkbutton(self.handcam_frame, text="Handcam Foto", variable=self.handcam_foto_var,
-                                font=("Arial", 12), state='disabled')
+                                font=("Arial", 11), state='disabled')
         chk_hf.grid(row=0, column=0, pady=5, sticky="w")
         self.video_widgets_list.append(chk_hf)
 
         self.handcam_foto_bezahlt_var.set(kunde.ist_bezahlt_handcam_foto)
         chk_hfb = tk.Checkbutton(self.handcam_frame, text="Bezahlt", variable=self.handcam_foto_bezahlt_var,
-                                 font=("Arial", 12), state='disabled')
+                                 font=("Arial", 11), state='disabled')
         chk_hfb.grid(row=0, column=1, padx=10, pady=5, sticky="w")
         self.video_widgets_list.append(chk_hfb)
 
         # Handcam Video
         self.handcam_video_var.set(kunde.handcam_video)
         chk_hv = tk.Checkbutton(self.handcam_frame, text="Handcam Video", variable=self.handcam_video_var,
-                                font=("Arial", 12), state='disabled')
+                                font=("Arial", 11), state='disabled')
         chk_hv.grid(row=1, column=0, pady=5, sticky="w")
         self.video_widgets_list.append(chk_hv)
 
         self.handcam_video_bezahlt_var.set(kunde.ist_bezahlt_handcam_video)
         chk_hvb = tk.Checkbutton(self.handcam_frame, text="Bezahlt", variable=self.handcam_video_bezahlt_var,
-                                 font=("Arial", 12), state='disabled')
+                                 font=("Arial", 11), state='disabled')
         chk_hvb.grid(row=1, column=1, padx=10, pady=5, sticky="w")
         self.video_widgets_list.append(chk_hvb)
 
         # --- Outside Frame (Checkbuttons state='disabled') ---
         self.outside_frame = tk.Frame(self.frame)
-        self.outside_frame.grid(row=row, column=0, columnspan=4, sticky="w", padx=(20, 0))
+        self.outside_frame.grid(row=row, column=0, columnspan=5, sticky="w", padx=(20, 0))
 
         # Outside Foto
         self.outside_foto_var.set(kunde.outside_foto)
         chk_of = tk.Checkbutton(self.outside_frame, text="Outside Foto", variable=self.outside_foto_var,
-                                font=("Arial", 12), state='disabled')
+                                font=("Arial", 11), state='disabled')
         chk_of.grid(row=0, column=0, pady=5, sticky="w")
         self.video_widgets_list.append(chk_of)
 
         self.outside_foto_bezahlt_var.set(kunde.ist_bezahlt_outside_foto)
         chk_ofb = tk.Checkbutton(self.outside_frame, text="Bezahlt", variable=self.outside_foto_bezahlt_var,
-                                 font=("Arial", 12), state='disabled')
+                                 font=("Arial", 11), state='disabled')
         chk_ofb.grid(row=0, column=1, padx=10, pady=5, sticky="w")
         self.video_widgets_list.append(chk_ofb)
 
         # Outside Video
         self.outside_video_var.set(kunde.outside_video)
         chk_ov = tk.Checkbutton(self.outside_frame, text="Outside Video", variable=self.outside_video_var,
-                                font=("Arial", 12), state='disabled')
+                                font=("Arial", 11), state='disabled')
         chk_ov.grid(row=1, column=0, pady=5, sticky="w")
         self.video_widgets_list.append(chk_ov)
 
         self.outside_video_bezahlt_var.set(kunde.ist_bezahlt_outside_video)
         chk_ovb = tk.Checkbutton(self.outside_frame, text="Bezahlt", variable=self.outside_video_bezahlt_var,
-                                 font=("Arial", 12), state='disabled')
+                                 font=("Arial", 11), state='disabled')
         chk_ovb.grid(row=1, column=1, padx=10, pady=5, sticky="w")
         self.video_widgets_list.append(chk_ovb)
 
@@ -224,180 +259,192 @@ class FormFields:
         if kunde.outside_foto or kunde.outside_video:
             self.video_mode_var.set("outside")
         else:
+            # Fallback, falls weder Handcam noch Outside gebucht, aber QR gescannt wurde
+            # (sollte nicht passieren, aber sicher ist sicher)
             mode = self.config.get_settings().get("video_mode", "handcam")
             if not (kunde.handcam_foto or kunde.handcam_video):
                 self.video_mode_var.set(mode)
             else:
-                self.video_mode_var.set("handcam")
+                self.video_mode_var.set("handcam")  # Standard ist Handcam, wenn Handcam gebucht
 
         row += 1  # Wichtig: Zeile für die Frames erhöhen
         self.toggle_video_mode_visibility()  # Rufe auf, um korrekte Sektion anzuzeigen
 
-        # --- Gemeinsame Felder ---
-        row = self._create_tandemmaster_field(row)
-        row = self._create_datum_ort_fields(row)  # NEU: Datum und Ort
-        row = self._create_dauer_field(row)
-        row = self._create_speicherort_field(row)
-
     def build_manual_form(self, load_nr_val=""):
         """Baut das Formular für die manuelle Eingabe."""
         row = 0
-        # NEU: Load Nr und Kunde ID in einer Zeile
+        # Load Nr und Kunde ID in einer Zeile
         row = self._create_load_kunde_id_fields(row, 'manual', load_nr_val)
 
-        # Gast (bearbeitbar)
-        tk.Label(self.frame, text="Gast:", font=("Arial", 12)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
-        self.gast_var.set("")  # Zurücksetzen
-        self.entry_gast = tk.Entry(self.frame, textvariable=self.gast_var, font=("Arial", 12))
-        self.entry_gast.grid(row=row, column=1, columnspan=3, padx=5, pady=5, sticky="ew")  # columnspan=3
+        # Vorname (bearbeitbar)
+        tk.Label(self.frame, text="Vorname:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        self.vorname_var.set("")  # Zurücksetzen
+        self.entry_vorname = tk.Entry(self.frame, textvariable=self.vorname_var, font=("Arial", 11))
+        self.entry_vorname.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
+
+        # Nachname (bearbeitbar)
+        tk.Label(self.frame, text="Nachname:", font=("Arial", 11)).grid(row=row, column=2, padx=(10, 5), pady=5,
+                                                                        sticky="w")
+        self.nachname_var.set("")  # Zurücksetzen
+        self.entry_nachname = tk.Entry(self.frame, textvariable=self.nachname_var, font=("Arial", 11))
+        self.entry_nachname.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
         row += 1
 
+        # Email (im manuellen Modus nicht vorhanden)
+        self.email_var.set("")
+        # Telefon (im manuellen Modus nicht vorhanden)
+        self.telefon_var.set("")
+
+        # --- VERSCHOBENE Felder ---
+        row = self._create_tandemmaster_field(row)
+        row = self._create_datum_ort_fields(row)
+        # --- ENDE VERSCHOBEN ---
+
         # --- Video Modus Radio-Buttons (normal) ---
+        self.video_widgets_list = []  # Zurücksetzen
         mode_frame = tk.Frame(self.frame)
-        mode_frame.grid(row=row, column=0, columnspan=4, pady=5, sticky="w")
-        tk.Radiobutton(mode_frame, text="Handcam", variable=self.video_mode_var, value="handcam",
-                       command=self.toggle_video_mode_visibility, font=("Arial", 12, "bold")).pack(side="left", padx=5)
-        tk.Radiobutton(mode_frame, text="Outside", variable=self.video_mode_var, value="outside",
-                       command=self.toggle_video_mode_visibility, font=("Arial", 12, "bold")).pack(side="left", padx=5)
+        mode_frame.grid(row=row, column=0, columnspan=5, pady=5, sticky="w")
+
+        radio_handcam = tk.Radiobutton(mode_frame, text="Handcam", variable=self.video_mode_var, value="handcam",
+                                       command=self.toggle_video_mode_visibility, font=("Arial", 11, "bold"))
+        radio_handcam.pack(side="left", padx=5)
+        self.video_widgets_list.append(radio_handcam)  # Hinzufügen zur Liste (für Kunde-Modus)
+
+        radio_outside = tk.Radiobutton(mode_frame, text="Outside", variable=self.video_mode_var, value="outside",
+                                       command=self.toggle_video_mode_visibility, font=("Arial", 11, "bold"))
+        radio_outside.pack(side="left", padx=5)
+        self.video_widgets_list.append(radio_outside)  # Hinzufügen zur Liste (für Kunde-Modus)
 
         # Videospringer-Widgets (normal)
-        self.label_videospringer = tk.Label(mode_frame, text="Videospringer:", font=("Arial", 12))
-        self.entry_videospringer = tk.Entry(mode_frame, font=("Arial", 12),
+        self.label_videospringer = tk.Label(mode_frame, text="Videospringer:", font=("Arial", 11))
+        # Videospringer-Variable aus Settings laden
+        self.videospringer_var.set(self.config.get_settings().get("videospringer", ""))
+        self.entry_videospringer = tk.Entry(mode_frame, font=("Arial", 11),
                                             textvariable=self.videospringer_var)
         row += 1
 
         # --- Handcam Frame (normal) ---
         self.handcam_frame = tk.Frame(self.frame)
-        self.handcam_frame.grid(row=row, column=0, columnspan=4, sticky="w", padx=(20, 0))
+        self.handcam_frame.grid(row=row, column=0, columnspan=5, sticky="w", padx=(20, 0))
 
         # Handcam Foto
         self.handcam_foto_var.set(False)
-        tk.Checkbutton(self.handcam_frame, text="Handcam Foto", variable=self.handcam_foto_var,
-                       font=("Arial", 12)).grid(row=0, column=0, pady=5, sticky="w")
+        chk_hf = tk.Checkbutton(self.handcam_frame, text="Handcam Foto", variable=self.handcam_foto_var,
+                                font=("Arial", 11))
+        chk_hf.grid(row=0, column=0, pady=5, sticky="w")
+        self.video_widgets_list.append(chk_hf)  # Hinzufügen
+
         self.handcam_foto_bezahlt_var.set(False)
-        tk.Checkbutton(self.handcam_frame, text="Bezahlt", variable=self.handcam_foto_bezahlt_var,
-                       font=("Arial", 12)).grid(row=0, column=1, padx=10, pady=5, sticky="w")
+        chk_hfb = tk.Checkbutton(self.handcam_frame, text="Bezahlt", variable=self.handcam_foto_bezahlt_var,
+                                 font=("Arial", 11))
+        chk_hfb.grid(row=0, column=1, padx=10, pady=5, sticky="w")
+        self.video_widgets_list.append(chk_hfb)  # Hinzufügen
 
         # Handcam Video
         self.handcam_video_var.set(False)
-        tk.Checkbutton(self.handcam_frame, text="Handcam Video", variable=self.handcam_video_var,
-                       font=("Arial", 12)).grid(row=1, column=0, pady=5, sticky="w")
+        chk_hv = tk.Checkbutton(self.handcam_frame, text="Handcam Video", variable=self.handcam_video_var,
+                                font=("Arial", 11))
+        chk_hv.grid(row=1, column=0, pady=5, sticky="w")
+        self.video_widgets_list.append(chk_hv)  # Hinzufügen
+
         self.handcam_video_bezahlt_var.set(False)
-        tk.Checkbutton(self.handcam_frame, text="Bezahlt", variable=self.handcam_video_bezahlt_var,
-                       font=("Arial", 12)).grid(row=1, column=1, padx=10, pady=5, sticky="w")
+        chk_hvb = tk.Checkbutton(self.handcam_frame, text="Bezahlt", variable=self.handcam_video_bezahlt_var,
+                                 font=("Arial", 11))
+        chk_hvb.grid(row=1, column=1, padx=10, pady=5, sticky="w")
+        self.video_widgets_list.append(chk_hvb)  # Hinzufügen
 
         # --- Outside Frame (normal) ---
         self.outside_frame = tk.Frame(self.frame)
-        self.outside_frame.grid(row=row, column=0, columnspan=4, sticky="w", padx=(20, 0))
+        self.outside_frame.grid(row=row, column=0, columnspan=5, sticky="w", padx=(20, 0))
 
         # Outside Foto
         self.outside_foto_var.set(False)
-        tk.Checkbutton(self.outside_frame, text="Outside Foto", variable=self.outside_foto_var,
-                       font=("Arial", 12)).grid(row=0, column=0, pady=5, sticky="w")
+        chk_of = tk.Checkbutton(self.outside_frame, text="Outside Foto", variable=self.outside_foto_var,
+                                font=("Arial", 11))
+        chk_of.grid(row=0, column=0, pady=5, sticky="w")
+        self.video_widgets_list.append(chk_of)  # Hinzufügen
+
         self.outside_foto_bezahlt_var.set(False)
-        tk.Checkbutton(self.outside_frame, text="Bezahlt", variable=self.outside_foto_bezahlt_var,
-                       font=("Arial", 12)).grid(row=0, column=1, padx=10, pady=5, sticky="w")
+        chk_ofb = tk.Checkbutton(self.outside_frame, text="Bezahlt", variable=self.outside_foto_bezahlt_var,
+                                 font=("Arial", 11))
+        chk_ofb.grid(row=0, column=1, padx=10, pady=5, sticky="w")
+        self.video_widgets_list.append(chk_ofb)  # Hinzufügen
 
         # Outside Video
         self.outside_video_var.set(False)
-        tk.Checkbutton(self.outside_frame, text="Outside Video", variable=self.outside_video_var,
-                       font=("Arial", 12)).grid(row=1, column=0, pady=5, sticky="w")
+        chk_ov = tk.Checkbutton(self.outside_frame, text="Outside Video", variable=self.outside_video_var,
+                                font=("Arial", 11))
+        chk_ov.grid(row=1, column=0, pady=5, sticky="w")
+        self.video_widgets_list.append(chk_ov)  # Hinzufügen
+
         self.outside_video_bezahlt_var.set(False)
-        tk.Checkbutton(self.outside_frame, text="Bezahlt", variable=self.outside_video_bezahlt_var,
-                       font=("Arial", 12)).grid(row=1, column=1, padx=10, pady=5, sticky="w")
+        chk_ovb = tk.Checkbutton(self.outside_frame, text="Bezahlt", variable=self.outside_video_bezahlt_var,
+                                 font=("Arial", 11))
+        chk_ovb.grid(row=1, column=1, padx=10, pady=5, sticky="w")
+        self.video_widgets_list.append(chk_ovb)  # Hinzufügen
 
         # Setze initialen Modus (aus geladenen Settings)
         self.video_mode_var.set(self.config.get_settings().get("video_mode", "handcam"))
         row += 1  # Wichtig: Zeile für die Frames erhöhen
         self.toggle_video_mode_visibility()  # Rufe auf, um korrekte Sektion anzuzeigen
 
-        # --- Gemeinsame Felder ---
-        row = self._create_tandemmaster_field(row)
-        row = self._create_datum_ort_fields(row)  # NEU
-        row = self._create_dauer_field(row)
-        row = self._create_speicherort_field(row)
-
     # --- Methoden zum Erstellen gemeinsamer Felder ---
 
     def _create_load_kunde_id_fields(self, row, mode, load_nr_val="", kunde_id_val=""):
-        # ... (unverändert) ...
-        """NEU: Erstellt Load Nr und Kunde ID in einer Zeile."""
+        """Erstellt Load Nr und Kunde ID in einer Zeile."""
         # Load Nr
-        tk.Label(self.frame, text="Load Nr:", font=("Arial", 12)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        tk.Label(self.frame, text="Load Nr:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
 
         def _validate_digits(new_value):
             return new_value.isdigit() or new_value == ""
 
         vcmd_loadnr = self.frame.register(_validate_digits)
 
-        self.entry_load = tk.Entry(self.frame, font=("Arial", 12),
+        self.entry_load = tk.Entry(self.frame, font=("Arial", 11),
                                    validate='key', validatecommand=(vcmd_loadnr, '%P'))
         self.entry_load.insert(0, load_nr_val)
         self.entry_load.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
 
         # Kunde ID
-        tk.Label(self.frame, text="Kunde ID:", font=("Arial", 12)).grid(row=row, column=2, padx=(10, 5), pady=5,
+        tk.Label(self.frame, text="Kunde ID:", font=("Arial", 11)).grid(row=row, column=2, padx=(10, 5), pady=5,
                                                                         sticky="w")
 
         self.kunde_id_var.set(kunde_id_val)
 
         if mode == 'kunde':
-            self.entry_kunde_id = tk.Entry(self.frame, textvariable=self.kunde_id_var, font=("Arial", 12),
+            self.entry_kunde_id = tk.Entry(self.frame, textvariable=self.kunde_id_var, font=("Arial", 11),
                                            state='disabled', relief='flat', bg='#f0f0f0')
         else:  # 'manual'
-            self.entry_kunde_id = tk.Entry(self.frame, textvariable=self.kunde_id_var, font=("Arial", 12))
+            self.entry_kunde_id = tk.Entry(self.frame, textvariable=self.kunde_id_var, font=("Arial", 11))
 
         self.entry_kunde_id.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
         return row + 1
 
     def _create_tandemmaster_field(self, row):
-        # ... (unverändert) ...
-        tk.Label(self.frame, text="Tandemmaster:", font=("Arial", 12)).grid(row=row, column=0, padx=5, pady=5,
+        tk.Label(self.frame, text="Tandemmaster:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5,
                                                                             sticky="w")
-        self.entry_tandemmaster = tk.Entry(self.frame, font=("Arial", 12),
+        # Tandemmaster-Variable aus Settings laden
+        self.tandemmaster_var.set(self.config.get_settings().get("tandemmaster", ""))
+        self.entry_tandemmaster = tk.Entry(self.frame, font=("Arial", 11),
                                            textvariable=self.tandemmaster_var)
-        self.entry_tandemmaster.grid(row=row, column=1, columnspan=3, padx=5, pady=5, sticky="ew")  # columnspan=3
+        self.entry_tandemmaster.grid(row=row, column=1, columnspan=4, padx=5, pady=5, sticky="ew")  # columnspan=4
         return row + 1
 
     def _create_datum_ort_fields(self, row):
-        # ... (unverändert) ...
-        """NEU: Erstellt Datum und Ort in einer Zeile."""
+        """Erstellt Datum und Ort in einer Zeile."""
         # Datum
-        tk.Label(self.frame, text="Datum:", font=("Arial", 12)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
-        self.entry_datum = DateEntry(self.frame, width=15, font=("Arial", 12),  # Breite angepasst
+        tk.Label(self.frame, text="Datum:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        self.entry_datum = DateEntry(self.frame, width=15, font=("Arial", 11),  # Breite angepasst
                                      date_pattern='dd.mm.yyyy', set_date=date.today())
         self.entry_datum.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
 
         # Ort
-        tk.Label(self.frame, text="Ort:", font=("Arial", 12)).grid(row=row, column=2, padx=(10, 5), pady=5, sticky="w")
+        tk.Label(self.frame, text="Ort:", font=("Arial", 11)).grid(row=row, column=2, padx=(10, 5), pady=5, sticky="w")
+        # Ort-Variable aus Settings laden
+        self.ort_var.set(self.config.get_settings().get("ort", "Calden"))
         dropdown_ort = tk.OptionMenu(self.frame, self.ort_var, "Calden", "Gera")
         dropdown_ort.config(font=("Arial", 10), width=10)  # Etwas Styling
         dropdown_ort.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
-        return row + 1
-
-    def _create_dauer_field(self, row):
-        # ... (unverändert) ...
-        tk.Label(self.frame, text="Dauer (Sekunden):", font=("Arial", 12)).grid(row=row, column=0, padx=5, pady=5,
-                                                                                sticky="w")
-        dropdown_dauer = tk.OptionMenu(self.frame, self.dauer_var, "1", "3", "4", "5", "6", "7", "8", "9", "10")
-        dropdown_dauer.config(font=("Arial", 10))  # Etwas Styling
-        dropdown_dauer.grid(row=row, column=1, columnspan=3, padx=5, pady=5, sticky="ew")  # columnspan=3
-        return row + 1
-
-    def _create_speicherort_field(self, row):
-        # ... (unverändert) ...
-        tk.Label(self.frame, text="Speicherort:", font=("Arial", 12)).grid(row=row, column=0, padx=5, pady=10,
-                                                                           sticky="w")
-
-        speicherort_frame = tk.Frame(self.frame)
-        speicherort_frame.grid(row=row, column=1, columnspan=3, sticky="ew")  # columnspan=3
-
-        speicherort_button = tk.Button(speicherort_frame, text="Wählen...", command=self.waehle_speicherort)
-        speicherort_button.pack(side=tk.LEFT)
-
-        speicherort_label = tk.Label(speicherort_frame, textvariable=self.speicherort_var,
-                                     font=("Arial", 10), anchor="w", fg="grey")
-        speicherort_label.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
         return row + 1
 
     # --- Hilfs- und Datenmethoden ---
@@ -448,8 +495,34 @@ class FormFields:
             print("Fehler beim Umschalten des Widget-Status.")
 
     def toggle_edit_gast(self):
-        """Schaltet das 'Gast'-Feld um."""
-        self.toggle_edit_state(self.entry_gast, self.btn_gast)
+        """Schaltet die 'Vorname' und 'Nachname' Felder um."""
+        if not self.btn_gast or not self.entry_vorname or not self.entry_nachname:
+            return
+
+        try:
+            if self.btn_gast.cget('text') == "Bearbeiten":
+                # Zu "Bearbeiten" wechseln
+                new_state = 'normal'
+                new_text = "Übernehmen"
+                new_relief = 'sunken'
+                new_bg = 'white'
+            else:
+                # Zu "Nur-Lesen" wechseln
+                new_state = 'disabled'
+                new_text = "Bearbeiten"
+                new_relief = 'flat'
+                new_bg = '#f0f0f0'
+
+            # Button ändern
+            self.btn_gast.config(text=new_text)
+
+            # Felder ändern
+            self.entry_vorname.config(state=new_state, relief=new_relief, bg=new_bg)
+            self.entry_nachname.config(state=new_state, relief=new_relief, bg=new_bg)
+
+        except tk.TclError:
+            # Widget existiert möglicherweise nicht mehr
+            print("Fehler beim Umschalten des Widget-Status (Gast).")
 
     def toggle_edit_email(self):
         """Schaltet das 'Email'-Feld um."""
@@ -476,7 +549,7 @@ class FormFields:
 
             # Alle Radios und Checkboxen umschalten
             for widget in self.video_widgets_list:
-                if widget:
+                if widget and widget.winfo_exists():  # Prüfen ob Widget noch existiert
                     widget.config(state=new_state)
 
         except tk.TclError:
@@ -484,25 +557,15 @@ class FormFields:
 
     # --- Bestehende Hilfs- und Datenmethoden ---
 
-    def waehle_speicherort(self):
-        # ... (unverändert) ...
-        directory = filedialog.askdirectory()
-        if directory:
-            self.speicherort_var.set(directory)
-
     def load_initial_settings(self):
-        # ... (unverändert) ...
         """Lädt Einstellungen nur in die Variablen (Widgets existieren noch nicht)."""
         settings = self.config.get_settings()
-        self.speicherort_var.set(settings.get("speicherort", ""))
         self.ort_var.set(settings.get("ort", "Calden"))
-        self.dauer_var.set(str(settings.get("dauer", 8)))
         self.tandemmaster_var.set(settings.get("tandemmaster", ""))
         self.videospringer_var.set(settings.get("videospringer", ""))
         self.video_mode_var.set(settings.get("video_mode", "handcam"))
 
     def get_form_data(self):
-        # ... (unverändert) ...
         """Sammelt Daten aus dem *aktuell* angezeigten Formular."""
         mode = self.video_mode_var.get()  # Hol den Modus ZUERST
 
@@ -512,21 +575,23 @@ class FormFields:
             # NEU: Videospringer nur im Outside-Modus
             "videospringer": self.videospringer_var.get().strip() if mode == "outside" else "",
             "datum": self.entry_datum.get() if self.entry_datum else date.today().strftime('%d.%m.%Y'),
-            "dauer": int(self.dauer_var.get()),
             "ort": self.ort_var.get(),
-            "speicherort": self.speicherort_var.get(),
             "video_mode": mode,
         }
 
         # Formular-spezifische Daten
+        data["vorname"] = self.vorname_var.get().strip()
+        data["nachname"] = self.nachname_var.get().strip()
+        data["gast"] = f"{data['vorname']} {data['nachname']}".strip()  # .strip() für leere Felder
+
         if self.form_mode == 'kunde':
             data["kunde_id"] = self.kunde_id_var.get()
-            data["gast"] = self.gast_var.get()
+            # gast, vorname, nachname sind schon gesetzt
             data["email"] = self.email_var.get()
             data["telefon"] = self.telefon_var.get()
         else:  # 'manual'
             data["kunde_id"] = self.kunde_id_var.get().strip()
-            data["gast"] = self.gast_var.get().strip()
+            # gast, vorname, nachname sind schon gesetzt
             data["email"] = ""  # Nicht im Formular
             data["telefon"] = ""  # Nicht im Formular
 
@@ -560,9 +625,7 @@ class FormFields:
         current_settings_data = self.config.get_settings()
 
         # Nur allgemeine, nicht-kunden-spezifische Daten speichern
-        current_settings_data["speicherort"] = self.speicherort_var.get()
         current_settings_data["ort"] = self.ort_var.get()
-        current_settings_data["dauer"] = int(self.dauer_var.get())
         current_settings_data["tandemmaster"] = self.tandemmaster_var.get()
         current_settings_data["video_mode"] = self.video_mode_var.get()
         current_settings_data["videospringer"] = self.videospringer_var.get()
@@ -571,4 +634,3 @@ class FormFields:
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
-

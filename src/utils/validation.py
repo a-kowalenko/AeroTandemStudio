@@ -9,8 +9,7 @@ def validate_form_data(form_data, video_paths):
         ("load", "Load Nr"),
         ("gast", "Gast"),
         ("tandemmaster", "Tandemmaster"),
-        ("datum", "Datum"),
-        ("speicherort", "Speicherort")
+        ("datum", "Datum")
     ]
 
     for field_key, field_name in required_fields:

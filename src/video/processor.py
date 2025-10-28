@@ -4,7 +4,7 @@ import threading
 import os
 import tempfile
 import subprocess
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from datetime import date
 
 from .logger import CancellableProgressBarLogger, CancellationError
@@ -174,7 +174,16 @@ class VideoProcessor:
             # Speichere MARKER Datei im Ausgabeordner
             marker_path = os.path.join(os.path.dirname(full_output_path), "_fertig.txt")
             with open(marker_path, 'w') as marker_file:
-                marker_file.write(json.dumps(asdict(kunde), ensure_ascii=False))
+                try:
+                    # Überprüfen, ob 'kunde' eine gültige Dataclass-Instanz ist
+                    if kunde is not None and is_dataclass(kunde):
+                        # 'asdict' hier sicher aufrufen
+                        marker_file.write(json.dumps(asdict(kunde), ensure_ascii=False))
+                    else:
+                        marker_file.write(json.dumps({}, ensure_ascii=False))
+                        print(f"Warnung: 'kunde'-Objekt ist 'None' oder keine Dataclass.")
+                except TypeError as json_err:
+                    print(f"Fehler beim Serialisieren der 'kunde'-Daten: {json_err}")
 
         except subprocess.CalledProcessError as e:
             # Prüfen, ob der Fehler durch einen Abbruch verursacht wurde

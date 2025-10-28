@@ -2,6 +2,8 @@
 from tkinter import messagebox, ttk
 import threading
 import os
+import queue
+from typing import List
 from tkinterdnd2 import TkinterDnD
 
 from .components.form_fields import FormFields
@@ -11,6 +13,8 @@ from .components.progress_indicator import ProgressHandler
 from .components.circular_spinner import CircularSpinner
 from .components.settings_dialog import SettingsDialog
 from .components.video_player import VideoPlayer
+from .components.loading_window import LoadingWindow
+
 from ..video.processor import VideoProcessor
 from ..utils.config import ConfigManager
 from ..utils.validation import validate_form_data
@@ -33,9 +37,17 @@ class VideoGeneratorApp:
         self.video_player = None
         self.APP_VERSION = APP_VERSION
 
+        # Für Threading und Ladefenster ---
+        self.analysis_queue = None
+        self.loading_window = None
+
+        # Speichern der Button-Originalzustände
+        self.old_button_text = ""
+        self.old_button_bg = ""
+        self.old_button_cursor = ""
+
         self.setup_gui()
         self.ensure_dependencies()
-
 
     def setup_gui(self):
         self.root.title("Aero Tandem Studio")
@@ -333,71 +345,168 @@ class VideoGeneratorApp:
         t = threading.Thread(target=installer_thread, daemon=True)
         t.start()
 
-    def update_video_preview(self, video_paths):
-        """Aktualisiert die Video-Vorschau (wird von DragDrop aufgerufen)"""
-        # Erstelle Waiting-State für den Button (Text, Farbe, Cursor)
-        old_text = self.erstellen_button.cget("text")
-        old_bg = self.erstellen_button.cget("bg")
+    def _save_button_state(self):
+        """Speichert den aktuellen Zustand des Buttons."""
+        self.old_button_text = self.erstellen_button.cget("text")
+        self.old_button_bg = self.erstellen_button.cget("bg")
         try:
-            old_cursor = self.erstellen_button.cget("cursor")
-        except Exception:
-            old_cursor = ""
+            self.old_button_cursor = self.erstellen_button.cget("cursor")
+        except tk.TclError:
+            self.old_button_cursor = ""  # Standard-Cursor
 
+    def _set_button_waiting(self):
+        """Setzt den Button in den Wartezustand."""
         self.erstellen_button.config(text="Bitte warten...", bg="#9E9E9E", state="disabled", cursor="watch")
 
-        kunde = None
-        qr_scan_success = False
-        if video_paths:
+    def _restore_button_state(self):
+        """Stellt den ursprünglichen Zustand des Buttons wieder her."""
+        # Nur wiederherstellen, wenn der Button nicht im "Abbrechen"-Modus ist
+        if self.erstellen_button.cget("text") == "Bitte warten...":
+            if self.old_button_text:  # Nur wiederherstellen, wenn ein Zustand gespeichert wurde
+                self.erstellen_button.config(text=self.old_button_text,
+                                             bg=self.old_button_bg,
+                                             state="normal",
+                                             cursor=self.old_button_cursor)
+            else:
+                # Fallback, falls kein Zustand gespeichert wurde
+                self.erstellen_button.config(text="Erstellen",
+                                             bg="#4CAF50",
+                                             state="normal",
+                                             cursor="")
+
+    def update_video_preview(self, video_paths: List[str]):
+        """
+        Aktualisiert die Video-Vorschau. Startet die QR-Analyse in einem
+        separaten Thread und zeigt ein Ladefenster an.
+        (Diese Methode ersetzt die alte, blockierende Version)
+        """
+        if not video_paths:
+            return
+
+        # 1. Button-Zustand speichern und auf "Warten" setzen
+        self._save_button_state()
+        self._set_button_waiting()
+
+        # 2. Ladefenster anzeigen (verwendet jetzt die importierte Klasse)
+        # self.root ist das Hauptfenster (master)
+        self.loading_window = LoadingWindow(self.root, text="Analysiere QR-Code im Video...")
+
+        # 3. Eine Queue erstellen, um das Ergebnis vom Thread zu empfangen
+        self.analysis_queue = queue.Queue()
+
+        # 4. Den Analyse-Thread starten
+        analysis_thread = threading.Thread(
+            target=self._run_analysis_thread,
+            args=(video_paths[0], self.analysis_queue),
+            daemon=True  # Thread stirbt, wenn die Hauptanwendung schließt
+        )
+        analysis_thread.start()
+
+        # 5. Eine "Polling"-Funktion starten, die auf das Ergebnis wartet
+        self.root.after(100, self._check_analysis_result, video_paths)
+
+    def _run_analysis_thread(self, video_path: str, result_queue: queue.Queue):
+        """
+        Diese Funktion läuft im separaten Thread.
+        Sie führt die blockierende Analyse aus und legt das Ergebnis in die Queue.
+        """
+        try:
+            # WICHTIG: Der Import muss hier erfolgen oder threadsicher sein.
             from src.video.qr_analyser import analysiere_ersten_clip
-            kunde, qr_scan_success = analysiere_ersten_clip(video_paths[0])
+
+            kunde, qr_scan_success = analysiere_ersten_clip(video_path)
+
+            # Legen Sie das Ergebnis in die Queue
+            result_queue.put(("success", (kunde, qr_scan_success)))
+
+        except Exception as e:
+            # Legen Sie im Fehlerfall die Ausnahme in die Queue
+            print(f"Fehler im Analyse-Thread: {e}")
+            result_queue.put(("error", e))
+
+    def _check_analysis_result(self, video_paths: List[str]):
+        """
+        Überprüft alle 100ms, ob ein Ergebnis in der Queue liegt.
+        Diese Funktion läuft im Haupt-Thread und kann die GUI sicher aktualisieren.
+        """
+        try:
+            # Versuchen, ein Ergebnis zu holen, ohne zu blockieren
+            status, result = self.analysis_queue.get_nowait()
+
+            # --- Ergebnis ist da ---
+
+            # 1. Ladefenster schließen
+            if self.loading_window:
+                self.loading_window.destroy()
+                self.loading_window = None
+
+            # 2. Ergebnis verarbeiten
+            if status == "success":
+                kunde, qr_scan_success = result
+                self._process_analysis_result(kunde, qr_scan_success, video_paths)
+            elif status == "error":
+                messagebox.showerror("Analyse-Fehler",
+                                     f"Ein unerwarteter Fehler bei der Videoanalyse ist aufgetreten:\n{result}")
+                self._restore_button_state()  # Button auch bei Fehler zurücksetzen
+
+        except queue.Empty:
+            # Wenn die Queue leer ist, erneut in 100ms prüfen
+            self.root.after(100, self._check_analysis_result, video_paths)
+
+        except Exception as e:
+            # Allgemeiner Fehler beim Abrufen (sollte nicht passieren)
+            if self.loading_window:
+                self.loading_window.destroy()
+                self.loading_window = None
+            messagebox.showerror("Fehler", f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}")
+            self._restore_button_state()  # Button auf jeden Fall zurücksetzen
+
+    def _process_analysis_result(self, kunde, qr_scan_success, video_paths):
+        """
+        Verarbeitet das erfolgreiche Analyseergebnis (im Haupt-Thread).
+        """
+        try:
             if qr_scan_success and kunde:
                 print(f"QR-Code gescannt: Kunde ID {kunde.kunde_id}, Email: {kunde.email}, Telefon: {kunde.telefon}, "
                       f"Foto: {kunde.foto}, Video: {kunde.video}")
+
+                info_text = (
+                    f"Kunde erkannt:\n\n"
+                    f"ID: {kunde.kunde_id}\n"
+                    f"Name: {kunde.vorname} {kunde.nachname}\n"
+                    f"Email: {kunde.email}\n"
+                    f"Telefon: {kunde.telefon}\n"
+                    f"Foto: {'Ja' if kunde.foto else 'Nein'}\n"
+                    f"Video: {'Ja' if kunde.video else 'Nein'}\n\n"
+                    f"Möchten Sie fortfahren?"
+                )
+                messagebox.showinfo("Kunde erkannt", info_text)
+
+            elif qr_scan_success and not kunde:
+                messagebox.showwarning("Ungültiger QR-Code", "Ein QR-Code wurde erkannt, aber die Daten sind ungültig.")
+
             else:
-                print("Kein gültiger QR-Code im ersten Video gefunden.")
+                messagebox.showinfo("Kein QR-Code", "Kein QR-Code im ersten Video gefunden.")
 
-        if qr_scan_success and kunde:
-            # open modal to show kunde info
-            info_text = (
-                f"Kunde erkannt:\n\n"
-                f"ID: {kunde.kunde_id}\n"
-                f"Name: {kunde.vorname} {kunde.nachname}\n"
-                f"Email: {kunde.email}\n"
-                f"Telefon: {kunde.telefon}\n"
-                f"Foto: {'Ja' if kunde.foto else 'Nein'}\n"
-                f"Video: {'Ja' if kunde.video else 'Nein'}\n\n"
-                f"Möchten Sie fortfahren?"
-            )
-            messagebox.showinfo("Kunde erkannt", info_text)
-        elif qr_scan_success and not kunde:
-            messagebox.showwarning("Ungültiger QR-Code", "Ein QR-Code wurde erkannt, aber die Daten sind ungültig.")
-        else:
-            messagebox.showinfo("Kein QR-Code", "Kein QR-Code im ersten Video gefunden.")
+            # Starten Sie die Aktualisierung der GUI-Vorschau
 
+            update_preview_thread = self.video_preview.update_preview(video_paths, kunde)
 
-        update_preview_thread = self.video_preview.update_preview(video_paths, kunde)
+            if update_preview_thread and isinstance(update_preview_thread, threading.Thread):
+                def enable_button_when_done():
+                    update_preview_thread.join()
+                    # Stellen Sie sicher, dass die GUI-Änderung im Hauptthread erfolgt
+                    self.root.after(0, self._restore_button_state)
 
-        # Aktiviere Erstellen-Button wieder, wenn die Vorschau fertig ist
-        def enable_button_when_done():
-            print("Enabling button")
+                threading.Thread(target=enable_button_when_done, daemon=True).start()
+            else:
+                # Wenn update_preview nicht blockiert oder keinen Thread zurückgibt
+                self._restore_button_state()
 
-            def restore():
-                try:
-                    self.erstellen_button.config(text=old_text, bg=old_bg, state="normal", cursor=old_cursor)
-                except Exception:
-                    # Fallback, falls cursor o.ä. nicht gesetzt werden kann
-                    self.erstellen_button.config(text=old_text, bg=old_bg, state="normal")
-
-            # None Check
-            if update_preview_thread is None:
-                restore()
-                return
-
-            update_preview_thread.join()
-
-            self.root.after(0, restore)
-
-        threading.Thread(target=enable_button_when_done, daemon=True).start()
+        except Exception as e:
+            print(f"Fehler in _process_analysis_result: {e}")
+            # Stellen Sie sicher, dass der Button auch bei einem Fehler hier wiederhergestellt wird
+            self._restore_button_state()
 
     def erstelle_video(self):
         """Bereitet die Videoerstellung mit Intro vor"""
@@ -532,3 +641,4 @@ class VideoGeneratorApp:
         # <<< ENDE NEU 3/3 >>>
 
         self.root.mainloop()
+

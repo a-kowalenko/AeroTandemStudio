@@ -146,9 +146,40 @@ class VideoProcessor:
                     temp_combined_ts_path
                 ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
+                # Schritt 6a: Hauptvideo mit Wasserzeichen erstellen (falls gewünscht)
+                temp_combined_with_watermark_path = None
+                if create_watermark_version:
+                    self._check_for_cancellation()
+                    self._update_progress(7, TOTAL_STEPS)
+                    self._update_status("Füge Wasserzeichen zum Hauptvideo hinzu...")
+
+                    # Temporäre Datei für Hauptvideo mit Wasserzeichen
+                    temp_combined_with_watermark_path = os.path.join(tempfile.gettempdir(),
+                                                                     "combined_with_watermark.mp4")
+                    temp_files.append(temp_combined_with_watermark_path)
+
+                    # Wasserzeichen nur auf das Hauptvideo anwenden
+                    self._create_video_with_watermark(
+                        combined_video_path,  # Originales Hauptvideo
+                        temp_combined_with_watermark_path,  # Ausgabe mit Wasserzeichen
+                        video_params
+                    )
+
+                    # Jetzt das Wasserzeichen-Video in .ts konvertieren
+                    temp_combined_with_watermark_ts_path = os.path.join(tempfile.gettempdir(),
+                                                                        "combined_with_watermark.ts")
+                    temp_files.append(temp_combined_with_watermark_ts_path)
+                    subprocess.run([
+                        "ffmpeg", "-y", "-i", temp_combined_with_watermark_path,
+                        "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
+                        temp_combined_with_watermark_ts_path
+                    ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                else:
+                    self._update_progress(7, TOTAL_STEPS)
+
                 # Schritt 7: Finalen Video-Output-Pfad generieren (inkl. Unterordner)
                 self._check_for_cancellation()
-                self._update_progress(7, TOTAL_STEPS)
+                self._update_progress(8, TOTAL_STEPS)
                 self._update_status("Generiere Video-Ausgabe-Pfad...")
 
                 # NEU: Prüfen ob normale Video-Version erstellt werden soll
@@ -163,7 +194,7 @@ class VideoProcessor:
                 # Schritt 8: .ts-Dateien zusammenfügen (nur wenn normale Version gewünscht)
                 if full_video_output_path:
                     self._check_for_cancellation()
-                    self._update_progress(8, TOTAL_STEPS)
+                    self._update_progress(9, TOTAL_STEPS)
                     self._update_status("Füge Videos final zusammen...")
                     concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
                     subprocess.run([
@@ -175,39 +206,42 @@ class VideoProcessor:
                         full_video_output_path
                     ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
                 else:
-                    self._update_progress(8, TOTAL_STEPS)
+                    self._update_progress(9, TOTAL_STEPS)
                     self._update_status("Überspringe normale Video-Erstellung...")
 
-                # NEU: Schritt 8a: Wasserzeichen-Version erstellen (falls gewünscht)
+                # Schritt 8a: Wasserzeichen-Version erstellen (falls gewünscht)
                 if create_watermark_version:
                     self._check_for_cancellation()
-                    self._update_progress(9, TOTAL_STEPS)
+                    self._update_progress(10, TOTAL_STEPS)
                     self._update_status("Erstelle Video mit Wasserzeichen...")
 
                     watermark_video_output_path = self._generate_watermark_video_path(
                         base_output_dir, base_filename
                     )
 
-                    # Wasserzeichen über das gesamte Video legen
-                    self._create_video_with_watermark(
-                        temp_intro_ts_path,
-                        temp_combined_ts_path,
-                        watermark_video_output_path,
-                        video_params
-                    )
+                    # Intro (ohne Wasserzeichen) mit Hauptvideo (mit Wasserzeichen) kombinieren
+                    concat_input_watermark = f"concat:{temp_intro_ts_path}|{temp_combined_with_watermark_ts_path}"
+                    subprocess.run([
+                        "ffmpeg", "-y",
+                        "-i", concat_input_watermark,
+                        "-c", "copy",
+                        "-bsf:a", "aac_adtstoasc",
+                        "-movflags", "+faststart",
+                        watermark_video_output_path
+                    ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
                 else:
-                    self._update_progress(9, TOTAL_STEPS)
+                    self._update_progress(10, TOTAL_STEPS)
 
             else:
                 # Schritte 2-8 überspringen, wenn kein Video vorhanden ist
                 self._update_status("Kein Video zur Verarbeitung ausgewählt. Überspringe...")
-                for i in range(2, 10 if create_watermark_version else 9):  # Schritte 2 bis 8/9
+                for i in range(2, 11 if create_watermark_version else 10):  # Schritte 2 bis 10/9
                     self._update_progress(i, TOTAL_STEPS)
                 full_video_output_path = None  # Sicherstellen, dass es None ist
 
-            # --- FOTO VERARBEITUNG (Schritt 10) ---
+            # --- FOTO VERARBEITUNG (Schritt 11) ---
             self._check_for_cancellation()
-            step_photo = 10 if create_watermark_version else 9
+            step_photo = 11 if create_watermark_version else 10
             self._update_progress(step_photo, TOTAL_STEPS)
             photo_copy_message = ""
             if photo_paths:
@@ -217,9 +251,9 @@ class VideoProcessor:
             else:
                 self._update_status("Keine Fotos zum Kopieren ausgewählt.")
 
-            # --- SERVER UPLOAD (Schritt 11) ---
+            # --- SERVER UPLOAD (Schritt 12) ---
             self._check_for_cancellation()
-            step_server = 11 if create_watermark_version else 10
+            step_server = 12 if create_watermark_version else 11
             self._update_progress(step_server, TOTAL_STEPS)
             server_message = ""
             if upload_to_server:
@@ -229,7 +263,7 @@ class VideoProcessor:
                 server_message = f"\nServer: {message}" if message else ""
 
             # --- ABSCHLUSS (letzter Schritt) ---
-            final_step = 12 if create_watermark_version else 11
+            final_step = 13 if create_watermark_version else 12
             self._update_progress(final_step, TOTAL_STEPS)
 
             # Speichere MARKER Datei im Ausgabeordner
@@ -295,7 +329,7 @@ class VideoProcessor:
 
         return full_output_path
 
-    def _create_video_with_watermark(self, intro_ts_path, main_ts_path, output_path, video_params):
+    def _create_video_with_watermark(self, input_video_path, output_path, video_params):
         """Erstellt eine Video-Version mit Wasserzeichen über dem gesamten Video"""
 
         # Pfad zum Wasserzeichen-Bild
@@ -304,45 +338,22 @@ class VideoProcessor:
         if not os.path.exists(wasserzeichen_path):
             raise FileNotFoundError("skydivede_wasserzeichen.png fehlt im assets/ Ordner")
 
-        # Temporäre zusammengefügte Datei ohne Wasserzeichen
-        temp_concat_path = os.path.join(tempfile.gettempdir(), "temp_concat.mp4")
+        # Wasserzeichen-Filter: mittig positioniert, volle Breite des Videos
+        watermark_filter = (
+            f"[1]scale={video_params['width']}:{video_params['height']}:force_original_aspect_ratio=decrease:"
+            f"eval=frame[wm_scaled];"
+            f"[0][wm_scaled]overlay=(W-w)/2:(H-h)/2"
+        )
 
-        try:
-            # Zuerst die Videos ohne Wasserzeichen zusammenfügen
-            concat_input = f"concat:{intro_ts_path}|{main_ts_path}"
-            subprocess.run([
-                "ffmpeg", "-y",
-                "-i", concat_input,
-                "-c", "copy",
-                "-bsf:a", "aac_adtstoasc",
-                temp_concat_path
-            ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-
-            # Jetzt Wasserzeichen über das gesamte Video legen
-            # Wasserzeichen-Filter: mittig positioniert, volle Breite des Videos
-            watermark_filter = (
-                f"[1]scale={video_params['width']}:{video_params['height']}:force_original_aspect_ratio=decrease:"
-                f"eval=frame[wm_scaled];"
-                f"[0][wm_scaled]overlay=(W-w)/2:(H-h)/2"
-            )
-
-            subprocess.run([
-                "ffmpeg", "-y",
-                "-i", temp_concat_path,
-                "-i", wasserzeichen_path,
-                "-filter_complex", watermark_filter,
-                "-c:a", "copy",
-                "-movflags", "+faststart",
-                output_path
-            ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-
-        finally:
-            # Temporäre Datei bereinigen
-            if os.path.exists(temp_concat_path):
-                try:
-                    os.remove(temp_concat_path)
-                except Exception:
-                    pass
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", input_video_path,
+            "-i", wasserzeichen_path,
+            "-filter_complex", watermark_filter,
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            output_path
+        ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
     def _create_intro_with_silent_audio(self, output_path, dauer, v_params, drawtext_filter):
         """

@@ -14,6 +14,7 @@ from .components.circular_spinner import CircularSpinner
 from .components.settings_dialog import SettingsDialog
 from .components.video_player import VideoPlayer
 from .components.loading_window import LoadingWindow
+from ..model.kunde import Kunde
 
 from ..video.processor import VideoProcessor
 from ..utils.config import ConfigManager
@@ -448,6 +449,9 @@ class VideoGeneratorApp:
                 messagebox.showerror("Analyse-Fehler",
                                      f"Ein unerwarteter Fehler bei der Videoanalyse ist aufgetreten:\n{result}")
                 self._restore_button_state()  # Button auch bei Fehler zurücksetzen
+                # Formular auch bei Fehler auf manuell setzen
+                self.form_fields.update_form_layout(False, None)
+
 
         except queue.Empty:
             # Wenn die Queue leer ist, erneut in 100ms prüfen
@@ -460,6 +464,8 @@ class VideoGeneratorApp:
                 self.loading_window = None
             messagebox.showerror("Fehler", f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}")
             self._restore_button_state()  # Button auf jeden Fall zurücksetzen
+            # Formular auch bei Fehler auf manuell setzen
+            self.form_fields.update_form_layout(False, None)
 
     def _process_analysis_result(self, kunde, qr_scan_success, video_paths):
         """
@@ -468,7 +474,8 @@ class VideoGeneratorApp:
         try:
             if qr_scan_success and kunde:
                 print(f"QR-Code gescannt: Kunde ID {kunde.kunde_id}, Email: {kunde.email}, Telefon: {kunde.telefon}, "
-                      f"Foto: {kunde.foto}, Video: {kunde.video}")
+                        f"Handcam Foto: {kunde.handcam_foto}, Handcam Video: {kunde.handcam_video}, "
+                       f"Outside Foto: {kunde.outside_foto}, Outside Video: {kunde.outside_video}")
 
                 info_text = (
                     f"Kunde erkannt:\n\n"
@@ -476,8 +483,10 @@ class VideoGeneratorApp:
                     f"Name: {kunde.vorname} {kunde.nachname}\n"
                     f"Email: {kunde.email}\n"
                     f"Telefon: {kunde.telefon}\n"
-                    f"Foto: {'Ja' if kunde.foto else 'Nein'}\n"
-                    f"Video: {'Ja' if kunde.video else 'Nein'}\n\n"
+                    f"Handcam Foto: {'Ja' if kunde.handcam_foto else 'Nein'}\n"
+                    f"Handcam Video: {'Ja' if kunde.handcam_video else 'Nein'}\n"
+                    f"Outside Foto: {'Ja' if kunde.outside_foto else 'Nein'}\n"
+                    f"Outside Video: {'Ja' if kunde.outside_video else 'Nein'}\n"
                     f"Möchten Sie fortfahren?"
                 )
                 messagebox.showinfo("Kunde erkannt", info_text)
@@ -488,9 +497,14 @@ class VideoGeneratorApp:
             else:
                 messagebox.showinfo("Kein QR-Code", "Kein QR-Code im ersten Video gefunden.")
 
-            # Starten Sie die Aktualisierung der GUI-Vorschau
+            # Formular-Layout aktualisieren ---
+            # Diese Methode wird jetzt aufgerufen, egal was das Ergebnis ist,
+            # und die form_fields-Klasse entscheidet, welches Layout angezeigt wird.
+            self.form_fields.update_form_layout(qr_scan_success, kunde)
+            # ------------------------------------------
 
-            update_preview_thread = self.video_preview.update_preview(video_paths, kunde)
+            # Starten Sie die Aktualisierung der GUI-Vorschau
+            update_preview_thread = self.video_preview.update_preview(video_paths)
 
             if update_preview_thread and isinstance(update_preview_thread, threading.Thread):
                 def enable_button_when_done():
@@ -507,6 +521,8 @@ class VideoGeneratorApp:
             print(f"Fehler in _process_analysis_result: {e}")
             # Stellen Sie sicher, dass der Button auch bei einem Fehler hier wiederhergestellt wird
             self._restore_button_state()
+            # Formular auch bei Fehler auf manuell setzen
+            self.form_fields.update_form_layout(False, None)
 
     def erstelle_video(self):
         """Bereitet die Videoerstellung mit Intro vor"""
@@ -527,9 +543,20 @@ class VideoGeneratorApp:
 
         # Verwende das kombinierte Video aus der Vorschau
         combined_video_path = self.video_preview.get_combined_video_path()
-        kunde = self.video_preview.get_kunde()
-        if kunde:
-            print(f"Verwende Kunde ID {kunde.kunde_id} für die Videoerstellung.")
+
+        # Parse Kundendaten aus der Formular-Eingabe
+        kunde = Kunde(
+            kunde_id=int(form_data["kunde_id"], 0),
+            handcam_foto=bool(form_data["handcam_foto"]),
+            handcam_video=bool(form_data["handcam_video"]),
+            outside_foto=bool(form_data["outside_foto"]),
+            outside_video=bool(form_data["outside_video"]),
+            ist_bezahlt_handcam_foto=bool(form_data["ist_bezahlt_handcam_foto"]),
+            ist_bezahlt_handcam_video=bool(form_data["ist_bezahlt_handcam_video"]),
+            ist_bezahlt_outside_foto=bool(form_data["ist_bezahlt_outside_foto"]),
+            ist_bezahlt_outside_video=bool(form_data["ist_bezahlt_outside_video"])
+        )
+
 
         if not combined_video_path or not os.path.exists(combined_video_path):
             messagebox.showwarning("Fehler",
@@ -540,6 +567,7 @@ class VideoGeneratorApp:
         photo_paths = self.drag_drop.get_photo_paths()
 
         # Validierung
+        # HINWEIS: validate_form_data muss ggf. an die neue form_data-Struktur angepasst werden!
         errors = validate_form_data(form_data, [combined_video_path])
         if errors:
             messagebox.showwarning("Fehlende Eingabe", "\n".join(errors))
@@ -573,6 +601,8 @@ class VideoGeneratorApp:
         )
 
         # Videoerstellung im Thread starten
+        # HINWEIS: video_processor.create_video_with_intro_only muss ggf.
+        # an die neue form_data-Struktur angepasst werden!
         video_thread = threading.Thread(
             target=self.video_processor.create_video_with_intro_only,
             args=(form_data, combined_video_path, photo_paths, kunde)
@@ -641,4 +671,3 @@ class VideoGeneratorApp:
         # <<< ENDE NEU 3/3 >>>
 
         self.root.mainloop()
-

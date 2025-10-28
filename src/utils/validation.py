@@ -1,4 +1,7 @@
-﻿def validate_form_data(form_data, video_paths):
+﻿import os
+
+
+def validate_form_data(form_data, video_paths):
     """Validiert die Formulardaten und gibt Fehlermeldungen zurück"""
     errors = []
 

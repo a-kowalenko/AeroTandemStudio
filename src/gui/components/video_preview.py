@@ -18,7 +18,6 @@ class VideoPreview:
         self.combined_video_path = None
         self.progress_handler = None
         self.last_video_paths = None
-        self.kunde = None
 
         # --- State and Threading Control Attributes ---
         self.processing_thread = None
@@ -85,7 +84,7 @@ class VideoPreview:
         self.progress_frame = tk.Frame(self.frame)
         self.progress_frame.pack(pady=5, fill='x')
 
-    def update_preview(self, video_paths, kunde=None):
+    def update_preview(self, video_paths):
         """
         Public entry point to update the preview.
         Handles cancellation of an ongoing process before starting a new one.
@@ -97,11 +96,11 @@ class VideoPreview:
             print("Preview creation in progress. Queuing a restart.")
         else:
             # No process is running, start directly.
-            self._start_preview_creation_thread(video_paths, kunde)
+            self._start_preview_creation_thread(video_paths)
 
 
 
-    def _start_preview_creation_thread(self, video_paths, kunde=None):
+    def _start_preview_creation_thread(self, video_paths):
         """Starts the background thread to create the preview."""
         if not video_paths:
             self.clear_preview()
@@ -124,10 +123,10 @@ class VideoPreview:
 
         self.cancellation_event.clear()
 
-        self.processing_thread = threading.Thread(target=self._create_combined_preview, args=(video_paths, kunde,))
+        self.processing_thread = threading.Thread(target=self._create_combined_preview, args=(video_paths,))
         self.processing_thread.start()
 
-    def _create_combined_preview(self, video_paths, kunde=None):
+    def _create_combined_preview(self, video_paths):
         """Erstellt ein kombiniertes Vorschau-Video aus allen Clips"""
         try:
             if self.cancellation_event.is_set():
@@ -155,7 +154,6 @@ class VideoPreview:
 
             if self.combined_video_path and os.path.exists(self.combined_video_path):
                 self.parent.after(0, self._update_ui_success, video_paths, needs_reencoding)
-                self.kunde = kunde
             else:
                 # Avoid showing an error if it was a user cancellation
                 if not self.cancellation_event.is_set():
@@ -396,7 +394,6 @@ class VideoPreview:
                                   command=self.retry_creation,
                                   state="normal")
         self.combined_video_path = None
-        self.kunde = None
 
     def _update_ui_cancelled(self):
         """Updates UI after creation was cancelled."""
@@ -409,7 +406,6 @@ class VideoPreview:
                                   command=self.retry_creation,
                                   state="normal")
         self.combined_video_path = None
-        self.kunde = None
 
     def _get_single_video_duration_str(self, video_path):
         """Hilfsmethode: Holt die Dauer EINES Videos als String in Sekunden (z.B. '12.34')."""
@@ -498,7 +494,6 @@ class VideoPreview:
                 print(f"Could not delete temp preview file: {e}")
 
         self.combined_video_path = None
-        self.kunde = None
         self.last_video_paths = None
         self.clear_preview_info()
         self.status_label.config(text="Keine Vorschau verfügbar", fg="gray")
@@ -521,10 +516,6 @@ class VideoPreview:
     def get_combined_video_path(self):
         """Gibt den Pfad des kombinierten Videos zurück"""
         return self.combined_video_path
-
-    def get_kunde(self):
-        """Gibt das zugeordnete Kunde-Objekt zurück"""
-        return self.kunde
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)

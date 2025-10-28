@@ -58,7 +58,7 @@ class VideoProcessor:
         dauer = form_data["dauer"]
         ort = form_data["ort"]
         speicherort = form_data["speicherort"]
-        outside_video = form_data["outside_video"]
+        outside_video = form_data["video_mode"] == "outside"
         upload_to_server = form_data["upload_to_server"]
 
         full_output_path = ""

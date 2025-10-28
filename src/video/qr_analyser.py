@@ -70,8 +70,14 @@ def analysiere_ersten_clip(video_pfad: str) -> Tuple[Optional[Kunde], bool]:
                             vorname=str(daten_dict.get('vorname')),
                             nachname=str(daten_dict.get('nachname')),
                             telefon=str(daten_dict.get('telefon')),
-                            foto=bool(daten_dict.get('foto')),
-                            video=bool(daten_dict.get('video'))
+                            handcam_foto=bool(daten_dict.get('handcam_foto')),
+                            handcam_video=bool(daten_dict.get('handcam_video')),
+                            outside_foto=bool(daten_dict.get('outside_foto')),
+                            outside_video=bool(daten_dict.get('outside_video')),
+                            ist_bezahlt_handcam_foto=bool(daten_dict.get('ist_bezahlt_handcam_foto')),
+                            ist_bezahlt_handcam_video=bool(daten_dict.get('ist_bezahlt_handcam_video')),
+                            ist_bezahlt_outside_foto=bool(daten_dict.get('ist_bezahlt_outside_foto')),
+                            ist_bezahlt_outside_video=bool(daten_dict.get('ist_bezahlt_outside_video'))
                         )
 
                         # Erfolgreich gefunden UND geparst!

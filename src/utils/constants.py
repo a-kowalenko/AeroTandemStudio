@@ -1,4 +1,5 @@
-﻿import sys
+﻿import os
+import sys
 import subprocess
 from src.utils.path_helper import get_resource_path
 
@@ -6,7 +7,16 @@ from src.utils.path_helper import get_resource_path
 Zentrale Konstanten-Datei für die Anwendung.
 """
 
-APP_VERSION = "0.0.6.1337"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+VERSION_FILE = os.path.join(BASE_DIR, 'VERSION.txt')
+
+try:
+    # 'utf-8-sig' verwenden, um ein BOM (ï»¿) automatisch zu entfernen
+    with open(VERSION_FILE, 'r', encoding='utf-8-sig') as f:
+        APP_VERSION = f.read().strip()
+except FileNotFoundError:
+    print(f"WARNUNG: {VERSION_FILE} nicht gefunden. Verwende Standardversion.")
+    APP_VERSION = "0.0.0-dev"
 
 # --- OS-Erkennung ---
 IS_WINDOWS = (sys.platform == "win32")

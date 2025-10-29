@@ -718,12 +718,25 @@ class VideoGeneratorApp:
 
     def _switch_to_cancel_mode(self):
         """Wechselt den Button zum Abbrechen-Modus"""
+        # Initial: Button deaktivieren während der Kodierung
         self.erstellen_button.config(
-            text="Abbrechen",
-            command=self.abbrechen_prozess,
-            bg="#D32F2F",
-            state="normal"
+            text="Kodierung läuft...",
+            bg="#808080",
+            state="disabled"
         )
+
+        # Nach kurzer Verzögerung: Button als "Abbrechen" aktivieren
+        def enable_cancel_button():
+            self.erstellen_button.config(
+                text="Abbrechen",
+                command=self.abbrechen_prozess,
+                bg="#D32F2F",
+                state="normal"
+            )
+
+        # Aktiviere den Abbrechen-Button nach 500ms
+        self.root.after(500, enable_cancel_button)
+
         self.progress_handler.progress_bar.pack(side="right", padx=(0, 5), pady=5)
         self.progress_handler.eta_label.pack(side="right", pady=5)
 

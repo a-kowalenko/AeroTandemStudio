@@ -256,7 +256,7 @@ class VideoPreview:
             "-movflags", "+faststart", output_path
         ]
 
-        self.ffmpeg_process = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        self.ffmpeg_process = subprocess.Popen(cmd, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                                universal_newlines=True, encoding='utf-8', errors='replace',
                                                creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 

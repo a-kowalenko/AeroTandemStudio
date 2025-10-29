@@ -103,11 +103,37 @@ class VideoCutterDialog(tk.Toplevel):
         self._load_video_info_and_start()
 
     def show(self):
-        """Macht das Fenster sichtbar."""
+        """Macht das Fenster sichtbar und zentriert es auf dem Parent-Fenster."""
         # Überprüfen, ob die Initialisierung fehlgeschlagen ist (VLC nicht geladen)
         if not hasattr(self, 'vlc_instance') or not self.vlc_instance:
             print("Dialog kann nicht angezeigt werden, VLC-Initialisierung fehlgeschlagen.")
             return  # Verhindert das Anzeigen eines leeren/fehlerhaften Fensters
+
+        # NEU: Zentriere den Dialog auf dem Parent-Fenster
+        self.update_idletasks()  # Erzwinge Layout-Update, um Größe zu berechnen
+
+        # Hole die Größe und Position des Parent-Fensters
+        parent_x = self.parent.winfo_x()
+        parent_y = self.parent.winfo_y()
+        parent_width = self.parent.winfo_width()
+        parent_height = self.parent.winfo_height()
+
+        # Hole die Größe des Dialog-Fensters
+        dialog_width = self.winfo_width()
+        dialog_height = self.winfo_height()
+
+        # Berechne die Position für die Zentrierung
+        x = parent_x + (parent_width - dialog_width) // 2
+        y = parent_y + (parent_height - dialog_height) // 2
+
+        # Stelle sicher, dass der Dialog nicht außerhalb des Bildschirms positioniert wird
+        if x < 0:
+            x = 0
+        if y < 0:
+            y = 0
+
+        # Setze die Fensterposition
+        self.geometry(f"+{x}+{y}")
 
         self.lift()
         self.focus_force()
@@ -471,11 +497,40 @@ class VideoCutterDialog(tk.Toplevel):
         current_time = self.media_player.get_time()
         new_time = max(0, min(self.total_duration_ms, current_time + step_ms))
 
-        # 3. Zeit setzen (löst _on_time_changed aus für UI-Update)
-        self.media_player.set_time(int(new_time))
+        # 3. FIX: set_time() in separatem Thread, um UI nicht einzufrieren
+        threading.Thread(
+            target=self._set_time_thread_safe,
+            args=(int(new_time),),
+            daemon=True
+        ).start()
 
         # 4. Sicherstellen, dass Button auf Play steht (da wir pausiert haben)
         self.play_pause_btn.config(text="▶")
+
+    def _set_time_thread_safe(self, target_time_ms: int):
+        """[THREAD] Setzt die Zeit im VLC-Player mit Timeout-Schutz."""
+        try:
+            # Setze Timeout mit threading Event
+            timeout_event = threading.Event()
+
+            def set_time_with_timeout():
+                try:
+                    self.media_player.set_time(target_time_ms)
+                except Exception as e:
+                    print(f"Fehler beim set_time: {e}")
+
+            thread = threading.Thread(target=set_time_with_timeout, daemon=True)
+            thread.start()
+            thread.join(timeout=1.0)  # Warte max 1 Sekunde
+
+            if thread.is_alive():
+                print(f"WARNUNG: VLC set_time() hat timeout (>1s)")
+
+            # UI aktualisieren im Main-Thread
+            if self.winfo_exists():
+                self.after(100, lambda: self._on_time_changed(None))
+        except Exception as e:
+            print(f"Fehler in _set_time_thread_safe: {e}")
 
     def _set_in(self):
         """Setzt den IN-Punkt (Start) auf die aktuelle Playhead-Position."""

@@ -17,6 +17,8 @@ class DragDropFrame:
         self.frame = tk.Frame(parent, relief="sunken", borderwidth=2, padx=10, pady=10)
         self.video_paths = []
         self.photo_paths = []
+        self.last_first_video = None  # NEU: Speichert den ersten Clip für Vergleich
+        self.qr_check_enabled = tk.BooleanVar(value=True)  # NEU: Checkbox-Variable für QR-Prüfung
         self.create_widgets()
 
     def create_widgets(self):
@@ -25,6 +27,15 @@ class DragDropFrame:
                                    text="Videos (.mp4) und Fotos (.jpg, .png) hierher ziehen",
                                    font=("Arial", 12))
         self.drop_label.pack(pady=10)
+
+        # NEU: Checkbox für QR-Code-Prüfung
+        self.qr_check_checkbox = tk.Checkbutton(
+            self.frame,
+            text="Auf QR-Code im ersten Clip prüfen",
+            variable=self.qr_check_enabled,
+            font=("Arial", 10)
+        )
+        self.qr_check_checkbox.pack(pady=5)
 
         # Notebook (Tabs) erstellen
         self.notebook = ttk.Notebook(self.frame)
@@ -198,14 +209,10 @@ class DragDropFrame:
 
             self.drop_label.config(text=status_text, fg="green")
 
-            # Zeige Warnung falls Re-Encoding nötig
+            # Info: Re-Encoding-Info wird in der Konsole ausgegeben
             if needs_reencoding_info and not needs_reencoding_info["compatible"]:
-                messagebox.showinfo(
-                    "Verschiedene Video-Formate",
-                    f"Die hinzugefügten Videos haben verschiedene Formate:\n\n"
-                    f"{needs_reencoding_info['details']}\n\n"
-                    f"Die Vorschau-Erstellung kann länger dauern, da die Videos neu kodiert werden müssen."
-                )
+                print(f"Videos mit unterschiedlichen Formaten erkannt: {needs_reencoding_info['details']}")
+                print("Die Vorschau-Erstellung kann länger dauern, da die Videos neu kodiert werden müssen.")
         else:
             self.drop_label.config(text="Keine gültigen Video- oder Foto-Dateien gefunden", fg="red")
 
@@ -355,11 +362,25 @@ class DragDropFrame:
                 self.app.on_files_added(new_videos_added, new_photos_added)
 
     def _update_app_preview(self, video_paths=None):
-        """Fordert eine Aktualisierung der Vorschau über die Hauptanwendung an."""
+        """
+        Fordert eine Aktualisierung der Vorschau über die Hauptanwendung an.
+        NEU: QR-Prüfung wird nur ausgelöst, wenn sich der erste Clip ändert UND die Checkbox aktiviert ist.
+        """
         paths = self.video_paths.copy() if video_paths is None else video_paths.copy()
 
+        # NEU: Prüfe, ob sich der erste Clip geändert hat
+        current_first_video = paths[0] if paths else None
+        first_video_changed = (current_first_video != self.last_first_video)
+
+        # Aktualisiere die gespeicherte Referenz
+        self.last_first_video = current_first_video
+
+        # NEU: QR-Prüfung nur wenn Checkbox aktiviert ist UND sich der erste Clip geändert hat
+        run_qr_check = self.qr_check_enabled.get() and first_video_changed
+
         if hasattr(self.app, 'update_video_preview'):
-            self.app.update_video_preview(paths)
+            # NEU: Übergebe Information, ob QR-Prüfung nötig ist
+            self.app.update_video_preview(paths, run_qr_check=run_qr_check)
 
     def _update_video_table(self):
         """
@@ -606,6 +627,15 @@ class DragDropFrame:
 
         # Rufe die Methode in app.py auf
         self.app.request_cut_dialog(original_path)
+
+    def set_cut_button_enabled(self, enabled: bool):
+        """Sperrt/Entsperrt den Schneiden-Button basierend auf Vorschau-Status."""
+        if hasattr(self, 'cut_button'):
+            self.cut_button.config(state="normal" if enabled else "disabled")
+            if enabled:
+                self.cut_button.config(text="✂ Schneiden", fg="black")
+            else:
+                self.cut_button.config(text="✂ Schneiden (Vorschau wird erstellt...)", fg="gray")
 
     def _on_video_double_click(self, event):
         """Öffnet das ausgewählte Video beim Doppelklick"""

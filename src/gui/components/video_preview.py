@@ -108,14 +108,10 @@ class VideoPreview:
         """
         Public entry point to update the preview.
         Handles cancellation of an ongoing process before starting a new one.
+        NEU: Cleanup nur noch wenn wirklich nötig (komplett neue Videos).
         """
-        # KORREKTUR: Cleanup muss Player entladen, bevor es hier aufgerufen wird.
-        # Rufen Sie zuerst clear_preview() auf, wenn Sie neu starten.
-        # Hier rufen wir _cleanup_temp_copies auf, was sicher sein sollte, WENN
-        # clear_preview() (das den Player entlädt) zuvor aufgerufen wurde.
-        # Wir rufen _cleanup_temp_copies HIER auf, um sicherzustellen, dass alte
-        # Verzeichnisse weg sind, BEVOR ein neuer Thread startet.
-        self._cleanup_temp_copies()
+        # NEU: Cleanup NICHT mehr hier aufrufen - wird intelligent in _start_preview_creation_thread gehandhabt
+        # self._cleanup_temp_copies()  # ENTFERNT!
 
         if self.processing_thread and self.processing_thread.is_alive():
             self.pending_restart_callback = lambda: self._start_preview_creation_thread(video_paths)
@@ -131,7 +127,11 @@ class VideoPreview:
             return
 
         self.last_video_paths = video_paths
-        self._create_temp_directory()  # Erstellt auch leere Caches/Maps
+
+        # NEU: Erstelle temp_dir nur wenn noch nicht vorhanden
+        # (verhindert unnötiges Löschen bereits kodierter Videos)
+        if not self.temp_dir or not os.path.exists(self.temp_dir):
+            self._create_temp_directory()  # Erstellt auch leere Caches/Maps
 
         if not self.progress_handler:
             self.progress_handler = ProgressHandler(self.progress_frame)
@@ -146,6 +146,11 @@ class VideoPreview:
         self.clips_label.config(text=f"Anzahl Videos: {len(video_paths)}")
 
         self.cancellation_event.clear()
+
+        # NEU: Schneiden-Button wird nur gesperrt wenn tatsächlich neu kodiert wird
+        # Das wird in _create_combined_preview entschieden
+        # if self.app and hasattr(self.app, 'drag_drop'):
+        #     self.app.drag_drop.set_cut_button_enabled(False)
 
         self.processing_thread = threading.Thread(target=self._create_combined_preview, args=(video_paths,))
         self.processing_thread.start()
@@ -181,6 +186,10 @@ class VideoPreview:
         """
         if not self.temp_dir:
             raise Exception("Temporäres Verzeichnis nicht initialisiert.")
+
+        # NEU: Sperre Schneiden-Button nur wenn tatsächlich neu kodiert wird
+        if needs_reencoding and self.app and hasattr(self.app, 'drag_drop'):
+            self.parent.after(0, lambda: self.app.drag_drop.set_cut_button_enabled(False))
 
         self.video_copies_map.clear()
         self.metadata_cache.clear()  # Cache bei voller Ne-Erstellung leeren
@@ -231,6 +240,10 @@ class VideoPreview:
             self._cache_metadata_for_copy(original_path, copy_path)
 
             self.parent.after(0, self.progress_handler.update_progress, i + 1, total_clips)
+
+        # NEU: Entsperre Schneiden-Button nach Kopieren/Kodieren
+        if self.app and hasattr(self.app, 'drag_drop'):
+            self.parent.after(0, lambda: self.app.drag_drop.set_cut_button_enabled(True))
 
         self.parent.after(0, self.progress_handler.reset)
         return temp_copy_paths
@@ -286,18 +299,39 @@ class VideoPreview:
     def _create_combined_preview(self, video_paths):
         """
         Erstellt ein kombiniertes Vorschau-Video.
+        NEU: Verwendet bereits existierende Kopien wieder, wenn die gleichen Videos nur umsortiert wurden.
         """
         try:
             if self.cancellation_event.is_set():
                 self.parent.after(0, self._update_ui_cancelled)
                 return
 
-            format_info = self._check_video_formats(video_paths)
-            needs_reencoding = not format_info["compatible"]
-            self.parent.after(0, self._update_encoding_info, format_info)
+            # NEU: Prüfe, ob wir bereits Kopien für alle Videos haben
+            all_videos_cached = all(original_path in self.video_copies_map for original_path in video_paths)
 
-            # Diese Methode füllt jetzt auch self.metadata_cache
-            temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding)
+            if all_videos_cached and self.temp_dir and os.path.exists(self.temp_dir):
+                # Alle Videos sind bereits kopiert/kodiert, verwende existierende Kopien
+                print("Verwende bereits existierende Video-Kopien (keine Neu-Kodierung nötig).")
+                temp_copy_paths = [self.video_copies_map[original_path] for original_path in video_paths]
+                needs_reencoding = False  # Bereits kodiert
+
+                # Prüfe, ob alle Kopien noch existieren
+                if all(os.path.exists(copy_path) for copy_path in temp_copy_paths):
+                    self.parent.after(0, lambda: self.encoding_label.config(
+                        text="Encoding: Verwende existierende Kopien"))
+                else:
+                    # Mindestens eine Kopie fehlt, muss neu erstellt werden
+                    print("Einige Kopien fehlen, erstelle Videos neu...")
+                    all_videos_cached = False
+
+            if not all_videos_cached:
+                # Neue oder geänderte Video-Liste, Format prüfen und ggf. neu kodieren
+                format_info = self._check_video_formats(video_paths)
+                needs_reencoding = not format_info["compatible"]
+                self.parent.after(0, self._update_encoding_info, format_info)
+
+                # Diese Methode füllt jetzt auch self.metadata_cache
+                temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding)
 
             if self.cancellation_event.is_set():
                 self.parent.after(0, self._update_ui_cancelled)
@@ -490,6 +524,10 @@ class VideoPreview:
         if self.app and hasattr(self.app, 'video_player') and self.app.video_player:
             self.app.video_player.load_video(self.combined_video_path, clip_durations)
 
+        # NEU: Entsperren Sie den Schneiden-Button, wenn Vorschau bereit ist
+        if self.app and hasattr(self.app, 'drag_drop'):
+            self.app.drag_drop.set_cut_button_enabled(True)
+
     def _update_ui_error(self, error_msg):
         """Aktualisiert UI bei Fehler"""
         if self.progress_handler: self.parent.after(0, self.progress_handler.reset)
@@ -579,7 +617,7 @@ class VideoPreview:
         total_duration_s = 0
         total_bytes = 0
 
-        for original_path in self.last_video_paths:  # self.last_video_paths wurde aktualisiert
+        for original_path in self.last_video_paths: # self.last_video_paths wurde aktualisiert
             metadata = self.metadata_cache.get(original_path)
             if metadata:
                 try:
@@ -600,6 +638,7 @@ class VideoPreview:
         self.play_button.config(state="normal")
         self.action_button.config(state="disabled")
 
+        # NEU: Video-Player aktualisieren
         clip_durations = self._get_clip_durations_seconds(copy_paths)
         if self.app and hasattr(self.app, 'video_player') and self.app.video_player:
             self.app.video_player.load_video(self.combined_video_path, clip_durations)
@@ -618,10 +657,10 @@ class VideoPreview:
         return "0.0"
 
     def _calculate_total_duration(self, video_paths):
-        """Veraltet (wird nicht mehr verwendet, da _update_ui_success jetzt Cache nutzt), aber als Fallback behalten"""
-        total_seconds = self._calculate_total_duration_seconds(video_paths)
-        minutes, seconds = divmod(total_seconds, 60)
-        return f"{int(minutes):02d}:{int(seconds):02d}"
+        """Veraltet - wird nicht mehr verwendet, da _update_ui_success jetzt Cache nutzt"""
+        # Diese Methode wird nicht mehr verwendet
+        # Der Cache wird in _update_ui_success verwendet
+        pass
 
     def _calculate_total_size(self, video_paths):
         """Veraltet (wird nicht mehr verwendet, da _update_ui_success jetzt Cache nutzt), aber als Fallback behalten"""
@@ -759,6 +798,11 @@ class VideoPreview:
                 "date": date_str,
                 "timestamp": time_str
             }
+
+            # NEU: Aktualisiere die Tabelle im Haupt-Thread, wenn Metadaten hinzugefügt werden
+            if self.app and hasattr(self.app, 'drag_drop'):
+                self.parent.after(0, self.app.drag_drop._update_video_table)
+
         except Exception as e:
             print(f"Fehler beim Cachen der Metadaten für {original_path}: {e}")
             self.metadata_cache[original_path] = {
@@ -861,4 +905,3 @@ class VideoPreview:
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
-

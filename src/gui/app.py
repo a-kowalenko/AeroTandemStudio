@@ -383,11 +383,11 @@ class VideoGeneratorApp:
                                              cursor="")
         # Wenn der Button "Abbrechen" anzeigt, ändere nichts
 
-    def update_video_preview(self, video_paths: List[str]):
+    def update_video_preview(self, video_paths: List[str], run_qr_check: bool = True):
         """
         Aktualisiert die Video-Vorschau. Startet die QR-Analyse in einem
         separaten Thread oder setzt das Formular zurück, wenn keine Videos vorhanden sind.
-        (Diese Methode ersetzt die alte, blockierende Version)
+        NEU: run_qr_check steuert, ob die QR-Analyse durchgeführt werden soll.
         """
         if not video_paths:
             # --- NEU: Anforderung des Users umsetzen ---
@@ -417,26 +417,33 @@ class VideoGeneratorApp:
             return
             # --- ENDE NEU ---
 
-        # 1. Button-Zustand speichern und auf "Warten" setzen
-        self._save_button_state()
-        self._set_button_waiting()
+        # NEU: QR-Prüfung nur starten, wenn run_qr_check True ist
+        if run_qr_check:
+            # 1. Button-Zustand speichern und auf "Warten" setzen
+            self._save_button_state()
+            self._set_button_waiting()
 
-        # 2. Ladefenster anzeigen (verwendet jetzt die importierte Klasse)
-        self.loading_window = LoadingWindow(self.root, text="Analysiere QR-Code im Video...")
+            # 2. Ladefenster anzeigen (verwendet jetzt die importierte Klasse)
+            self.loading_window = LoadingWindow(self.root, text="Analysiere QR-Code im Video...")
 
-        # 3. Eine Queue erstellen, um das Ergebnis vom Thread zu empfangen
-        self.analysis_queue = queue.Queue()
+            # 3. Eine Queue erstellen, um das Ergebnis vom Thread zu empfangen
+            self.analysis_queue = queue.Queue()
 
-        # 4. Den Analyse-Thread starten
-        analysis_thread = threading.Thread(
-            target=self._run_analysis_thread,
-            args=(video_paths[0], self.analysis_queue),
-            daemon=True
-        )
-        analysis_thread.start()
+            # 4. Den Analyse-Thread starten
+            analysis_thread = threading.Thread(
+                target=self._run_analysis_thread,
+                args=(video_paths[0], self.analysis_queue),
+                daemon=True
+            )
+            analysis_thread.start()
 
-        # 5. Eine "Polling"-Funktion starten, die auf das Ergebnis wartet
-        self.root.after(100, self._check_analysis_result, video_paths)
+            # 5. Eine "Polling"-Funktion starten, die auf das Ergebnis wartet
+            self.root.after(100, self._check_analysis_result, video_paths)
+        else:
+            # Keine QR-Prüfung, nur Vorschau aktualisieren
+            print("QR-Prüfung übersprungen - erster Clip hat sich nicht geändert.")
+            if self.video_preview:
+                self.video_preview.update_preview(video_paths)
 
     def _run_analysis_thread(self, video_path: str, result_queue: queue.Queue):
         """
@@ -515,14 +522,15 @@ class VideoGeneratorApp:
                     f"Outside Video: {'Ja' if kunde.outside_video else 'Nein'}\n"
                     f"Möchten Sie fortfahren?"
                 )
-                messagebox.showinfo("Kunde erkannt", info_text)
+                # Dialog entfernt - QR-Code wurde gefunden und wird automatisch verarbeitet
+                print(f"QR-Code erfolgreich gescannt: {kunde.vorname} {kunde.nachname}")
 
             elif qr_scan_success and not kunde:
                 messagebox.showwarning("Ungültiger QR-Code", "Ein QR-Code wurde erkannt, aber die Daten sind ungültig.")
 
             else:
-                messagebox.showinfo("Kein QR-Code",
-                                    "Kein QR-Code im ersten Video gefunden. Wechsle zu manueller Eingabe.")
+                # Dialog entfernt - Wechsel zu manueller Eingabe erfolgt automatisch
+                print("Kein QR-Code im ersten Video gefunden. Wechsle zu manueller Eingabe.")
 
             # Formular-Layout aktualisieren
             self.form_fields.update_form_layout(qr_scan_success, kunde)

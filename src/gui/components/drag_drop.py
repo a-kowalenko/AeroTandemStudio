@@ -9,10 +9,11 @@ import time
 
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 
+
 class DragDropFrame:
     def __init__(self, parent, app_instance):
         self.parent = parent
-        self.app = app_instance
+        self.app = app_instance  # Wichtig: Referenz zur Haupt-App
         self.frame = tk.Frame(parent, relief="sunken", borderwidth=2, padx=10, pady=10)
         self.video_paths = []
         self.photo_paths = []
@@ -96,6 +97,11 @@ class DragDropFrame:
 
         tk.Button(video_button_frame, text="Nach oben", command=self.move_video_up).pack(side=tk.LEFT, padx=2)
         tk.Button(video_button_frame, text="Nach unten", command=self.move_video_down).pack(side=tk.LEFT, padx=2)
+
+        # NEU: Button zum Schneiden
+        self.cut_button = tk.Button(video_button_frame, text="✂ Schneiden", command=self.open_cut_dialog)
+        self.cut_button.pack(side=tk.LEFT, padx=5)
+
         tk.Button(video_button_frame, text="Entfernen", command=self.remove_selected_video).pack(side=tk.LEFT, padx=2)
         tk.Button(video_button_frame, text="Alle Videos löschen", command=self.clear_videos).pack(side=tk.LEFT, padx=2)
 
@@ -356,16 +362,52 @@ class DragDropFrame:
             self.app.update_video_preview(paths)
 
     def _update_video_table(self):
-        """Aktualisiert die Video-Tabelle"""
+        """
+        Aktualisiert die Video-Tabelle.
+        NEU: Liest Metadaten aus dem Cache von video_preview, wenn dieser aktiv ist.
+        """
         for item in self.video_tree.get_children():
             self.video_tree.delete(item)
 
-        for i, video_path in enumerate(self.video_paths, 1):
-            filename = os.path.basename(video_path)
-            duration = self._get_video_duration(video_path)
-            size = self._get_file_size(video_path)
-            date = self._get_file_date(video_path)
-            timestamp = self._get_file_time(video_path)
+        for i, original_path in enumerate(self.video_paths, 1):
+            filename = os.path.basename(original_path)
+
+            # Standard-Werte
+            duration, size, date, timestamp = "--:--", "-- MB", "--.--.----", "--:--:--"
+
+            if self.app and hasattr(self.app, 'video_preview'):
+                # Prüfen, ob die Vorschau-Sitzung (temp_dir) überhaupt schon läuft
+                preview_session_active = self.app.video_preview.temp_dir is not None
+                # Versuchen, Metadaten aus dem Cache zu holen
+                metadata = self.app.video_preview.get_cached_metadata(original_path)
+
+                if metadata:
+                    # Fall 1: Wir haben Metadaten im Cache. Benutze sie.
+                    duration = metadata.get("duration", "--:--")
+                    size = metadata.get("size", "-- MB")
+                    date = metadata.get("date", "--.--.----")
+                    timestamp = metadata.get("timestamp", "--:--:--")
+
+                elif preview_session_active:
+                    # Fall 2: Vorschau ist aktiv, aber *keine* Metadaten für diesen Clip.
+                    # Das bedeutet, der Clip wird gerade kopiert/erstellt.
+                    filename = f"[LÄDT...] {filename}"
+
+                else:
+                    # Fall 3: Vorschau ist NICHT aktiv (z.B. beim ersten Hinzufügen).
+                    # Hier ist es OK, die langsamen Fallback-Methoden zu nutzen,
+                    # die ffprobe synchron aufrufen.
+                    duration = self._get_video_duration_fallback(original_path)
+                    size = self._get_file_size_fallback(original_path)
+                    date = self._get_file_date_fallback(original_path)
+                    timestamp = self._get_file_time_fallback(original_path)
+
+            else:
+                # Fallback, falls self.app nicht existiert (sollte nicht passieren)
+                duration = self._get_video_duration_fallback(original_path)
+                size = self._get_file_size_fallback(original_path)
+                date = self._get_file_date_fallback(original_path)
+                timestamp = self._get_file_time_fallback(original_path)
 
             self.video_tree.insert("", "end", values=(i, filename, duration, size, date, timestamp))
 
@@ -376,14 +418,17 @@ class DragDropFrame:
 
         for i, photo_path in enumerate(self.photo_paths, 1):
             filename = os.path.basename(photo_path)
-            size = self._get_file_size(photo_path)
-            date = self._get_file_date(photo_path)
-            timestamp = self._get_file_time(photo_path)
+            size = self._get_file_size_fallback(photo_path)  # Fotos verwenden immer Fallback
+            date = self._get_file_date_fallback(photo_path)
+            timestamp = self._get_file_time_fallback(photo_path)
 
             self.photo_tree.insert("", "end", values=(i, filename, size, date, timestamp))
 
-    def _get_video_duration(self, video_path):
-        """Ermittelt die Dauer des Videos"""
+    # --- NEU: Fallback-Methoden für Metadaten (sync ffprobe) ---
+    # (Dies sind die alten Methoden, umbenannt)
+
+    def _get_video_duration_fallback(self, video_path):
+        """Ermittelt die Dauer des Videos (Blockierend)"""
         try:
             result = subprocess.run([
                 'ffprobe', '-v', 'error', '-show_entries',
@@ -398,10 +443,9 @@ class DragDropFrame:
                 return f"{minutes}:{secs:02d}"
         except:
             pass
-
         return "?:??"
 
-    def _get_file_size(self, file_path):
+    def _get_file_size_fallback(self, file_path):
         """Ermittelt die Dateigröße"""
         try:
             size_bytes = os.path.getsize(file_path)
@@ -412,7 +456,7 @@ class DragDropFrame:
         except:
             return "Unbekannt"
 
-    def _get_file_date(self, video_path):
+    def _get_file_date_fallback(self, video_path):
         """Ermittelt das Erstellungsdatum der Datei"""
         try:
             modification_time = os.path.getmtime(video_path)
@@ -420,13 +464,35 @@ class DragDropFrame:
         except:
             return "Unbekannt"
 
-    def _get_file_time(self, video_path):
+    def _get_file_time_fallback(self, video_path):
         """Ermittelt die Erstellungsuhrzeit der Datei"""
         try:
             modification_time = os.path.getmtime(video_path)
             return time.strftime("%H:%M:%S", time.localtime(modification_time))
         except:
             return "Unbekannt"
+
+    # --- ENDE Fallback-Methoden ---
+
+    # --- NEUE METHODEN (von app.py aufgerufen) ---
+    def refresh_table(self):
+        """Erzwingt ein Neuzeichnen der Video-Tabelle mit aktuellen Metadaten."""
+        print("DragDrop: Aktualisiere Tabelle nach Schnitt...")
+        self._update_video_table()
+
+    def insert_video_path_at_index(self, original_path: str, index: int):
+        """Fügt einen neuen (Platzhalter-)Pfad an einem bestimmten Index ein (z.B. nach Split)."""
+        if 0 <= index <= len(self.video_paths):
+            self.video_paths.insert(index, original_path)
+            print(f"DragDrop: Füge geteilten Clip an Index {index} ein.")
+        else:
+            self.video_paths.append(original_path)
+            print(f"DragDrop: Füge geteilten Clip am Ende an (Index {index} ungültig).")
+
+        # Tabelle neu zeichnen (noch ohne Metadaten, die kommen asynchron)
+        self._update_video_table()
+
+    # --- ENDE NEUE METHODEN ---
 
     def move_video_up(self):
         """Bewegt ausgewähltes Video nach oben"""
@@ -459,7 +525,12 @@ class DragDropFrame:
         selection = self.video_tree.selection()
         if selection:
             index = self.video_tree.index(selection[0])
-            self.video_paths.pop(index)
+
+            # NEU: Entferne auch aus dem Cache
+            original_path = self.video_paths.pop(index)
+            if self.app and hasattr(self.app, 'video_preview'):
+                self.app.video_preview.remove_path_from_cache(original_path)
+
             self._update_video_table()
             # Vorschau aktualisieren
             self._update_app_preview()
@@ -475,6 +546,11 @@ class DragDropFrame:
     def clear_videos(self):
         """Entfernt alle Videos"""
         self.video_paths.clear()
+
+        # NEU: Cache leeren
+        if self.app and hasattr(self.app, 'video_preview'):
+            self.app.video_preview.clear_metadata_cache()
+
         self._update_video_table()
         # Vorschau zurücksetzen
         self._update_app_preview([])
@@ -513,13 +589,37 @@ class DragDropFrame:
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
 
+    def open_cut_dialog(self):
+        """Ruft den Schneide-Dialog in der Haupt-App auf."""
+        selection = self.video_tree.selection()
+        if not selection:
+            messagebox.showwarning("Keine Auswahl",
+                                   "Bitte wählen Sie zuerst ein Video aus der Tabelle aus, das Sie schneiden möchten.")
+            return
+
+        if not self.app or not hasattr(self.app, 'request_cut_dialog'):
+            messagebox.showerror("Fehler", "Die Hauptanwendung ist nicht korrekt für das Schneiden konfiguriert.")
+            return
+
+        index = self.video_tree.index(selection[0])
+        original_path = self.video_paths[index]
+
+        # Rufe die Methode in app.py auf
+        self.app.request_cut_dialog(original_path)
+
     def _on_video_double_click(self, event):
         """Öffnet das ausgewählte Video beim Doppelklick"""
         selection = self.video_tree.selection()
         if selection:
             index = self.video_tree.index(selection[0])
             if 0 <= index < len(self.video_paths):
+                # NEU: Versuche, die Kopie zu öffnen, falle zurück auf Original
                 video_path = self.video_paths[index]
+                if self.app and hasattr(self.app, 'video_preview'):
+                    copy_path = self.app.video_preview.get_copy_path(video_path)
+                    if copy_path and os.path.exists(copy_path):
+                        video_path = copy_path
+
                 self._open_file_with_default_app(video_path)
 
     def _on_photo_double_click(self, event):

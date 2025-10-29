@@ -3,6 +3,7 @@ from tkinter import messagebox, ttk
 import threading
 import os
 import queue
+import uuid  # NEU
 from typing import List
 from tkinterdnd2 import TkinterDnD
 
@@ -13,6 +14,7 @@ from .components.progress_indicator import ProgressHandler
 from .components.circular_spinner import CircularSpinner
 from .components.settings_dialog import SettingsDialog
 from .components.video_player import VideoPlayer
+from .components.video_cutter import VideoCutterDialog  # Importiert
 from .components.loading_window import LoadingWindow
 from ..model.kunde import Kunde
 
@@ -36,6 +38,7 @@ class VideoGeneratorApp:
         self.server_status_label = None
         self.server_connected = False
         self.video_player = None
+        self.video_cutter_dialog = None  # NEU: Referenz auf offenen Dialog
         self.APP_VERSION = APP_VERSION
 
         # Für Threading und Ladefenster ---
@@ -49,6 +52,9 @@ class VideoGeneratorApp:
 
         self.setup_gui()
         self.ensure_dependencies()
+
+        # NEU: Schließ-Ereignis abfangen
+        self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
 
     def setup_gui(self):
         self.root.title("Aero Tandem Studio")
@@ -522,16 +528,23 @@ class VideoGeneratorApp:
             self.form_fields.update_form_layout(qr_scan_success, kunde)
 
             # Starten Sie die Aktualisierung der GUI-Vorschau
-            update_preview_thread = self.video_preview.update_preview(video_paths)
+            # update_preview startet einen Thread (_create_combined_preview)
+            self.video_preview.update_preview(video_paths)
 
-            if update_preview_thread and isinstance(update_preview_thread, threading.Thread):
-                def enable_button_when_done():
-                    update_preview_thread.join()
-                    self.root.after(0, self._restore_button_state)
+            # WICHTIG: _create_combined_preview (im Thread) ruft _finalize_processing auf.
+            # Wir müssen den Button dort wiederherstellen, NICHT hier.
+            # _finalize_processing ruft _restore_button_state auf, wenn es fertig ist.
 
-                threading.Thread(target=enable_button_when_done, daemon=True).start()
-            else:
-                self._restore_button_state()
+            # Warten, bis der Thread in update_preview fertig ist, um den Button wiederherzustellen
+            def wait_for_preview_thread():
+                if self.video_preview.processing_thread:
+                    self.video_preview.processing_thread.join()  # Warte auf den Thread (Vorschau-Erstellung)
+
+                # Jetzt im Haupt-Thread den Button wiederherstellen
+                self.root.after(0, self._restore_button_state)
+
+            threading.Thread(target=wait_for_preview_thread, daemon=True).start()
+
 
         except Exception as e:
             print(f"Fehler in _process_analysis_result: {e}")
@@ -725,6 +738,132 @@ class VideoGeneratorApp:
 
         if self.video_processor:
             self.video_processor.cancel_process()
+
+    # --- NEUE METHODEN FÜR DEN SCHNEIDE-DIALOG ---
+
+    def request_cut_dialog(self, original_video_path: str):
+        """Wird von drag_drop.py aufgerufen, um den Schneide-Dialog zu öffnen."""
+        if self.video_cutter_dialog is not None:
+            print("Ein Schneide-Dialog ist bereits geöffnet.")
+            self.video_cutter_dialog.lift()
+            return
+
+        if not self.video_preview:
+            print("Fehler: video_preview ist nicht initialisiert.")
+            return
+
+        # 1. Finde den Pfad zur *Kopie* des Videos
+        copy_path = self.video_preview.get_copy_path(original_video_path)
+
+        if not copy_path or not os.path.exists(copy_path):
+            messagebox.showerror("Fehler",
+                                 f"Konnte die temporäre Videokopie für '{os.path.basename(original_video_path)}' nicht finden.\n"
+                                 "Bitte erstellen Sie die Vorschau neu (z.B. durch Hinzufügen/Entfernen eines Clips).")
+            return
+
+        # 2. Finde den Index des Clips (für späteres Splitten)
+        try:
+            index = self.drag_drop.get_video_paths().index(original_video_path)
+        except ValueError:
+            print(f"Fehler: Konnte Index für {original_video_path} nicht finden.")
+            index = -1  # Fallback
+
+        # 3. Dialog erstellen
+        self.video_cutter_dialog = VideoCutterDialog(
+            self.root,
+            video_path=copy_path,
+            on_complete_callback=lambda result: self.on_cut_complete(original_video_path, index, result)
+        )
+
+        # 4. Callback binden, um Referenz zu löschen, wenn Dialog geschlossen wird
+        self.video_cutter_dialog.bind("<Destroy>", self._on_cutter_dialog_close)
+
+        self.video_cutter_dialog.show()
+
+    def on_cut_complete(self, original_path: str, index: int, result: dict):
+        """
+        Callback vom VideoCutterDialog.
+        NEU: Stößt asynchrone Metadaten-Aktualisierung an.
+        """
+        action = result.get("action")
+        paths_to_refresh = []
+
+        if action == "cut":
+            print(f"App: Clip '{os.path.basename(original_path)}' wurde geschnitten (getrimmt).")
+            paths_to_refresh.append(original_path)
+
+        elif action == "split":
+            new_copy_path = result.get("new_copy_path")
+            print(f"App: Clip '{os.path.basename(original_path)}' wurde geteilt. Neuer Clip: {new_copy_path}")
+
+            # 1. Neuen (Platzhalter) Originalpfad erstellen
+            base, ext = os.path.splitext(original_path)
+            new_original_placeholder = f"{base}_split_{uuid.uuid4().hex[:6]}{ext}"
+
+            # 2. Neuen Pfad in der DragDrop-Liste an der richtigen Stelle einfügen
+            if self.drag_drop:
+                self.drag_drop.insert_video_path_at_index(new_original_placeholder, index + 1)
+
+            # 3. Die neue Kopie in der Vorschau-Map registrieren
+            if self.video_preview:
+                self.video_preview.register_new_copy(new_original_placeholder, new_copy_path)
+
+            paths_to_refresh.append(original_path)
+            paths_to_refresh.append(new_original_placeholder)
+
+        elif action == "cancel":
+            print(f"App: Schneiden von '{os.path.basename(original_path)}' abgebrochen.")
+            # Nichts tun
+            return
+
+        # Starte die asynchrone Aktualisierung der Metadaten für die geänderten Clips
+        if paths_to_refresh and self.video_preview:
+            self.video_preview.refresh_metadata_async(
+                paths_to_refresh,
+                on_complete_callback=self._on_metadata_refreshed
+            )
+
+    def _on_metadata_refreshed(self):
+        """
+        [MAIN-THREAD] Callback, der aufgerufen wird, nachdem die Metadaten
+        im Cache aktualisiert wurden. JETZT ist es sicher, die GUI zu aktualisieren.
+        """
+        print("App: Metadaten-Aktualisierung abgeschlossen. Aktualisiere GUI.")
+
+        # 1. DragDrop-Tabelle aktualisieren (liest jetzt aus dem aktualisierten Cache)
+        if self.drag_drop:
+            self.drag_drop.refresh_table()
+
+        # 2. Video-Vorschau regenerieren (verwendet die *neue* Liste der Originale)
+        if self.video_preview and self.drag_drop:
+            original_paths = self.drag_drop.get_video_paths()
+            self.video_preview.regenerate_preview_after_cut(original_paths)
+
+    def _on_cutter_dialog_close(self, event=None):
+        """Wird aufgerufen, wenn der Cutter-Dialog zerstört wird."""
+        if self.video_cutter_dialog:
+            print("Cutter-Dialog geschlossen, Referenz wird gelöscht.")
+            self.video_cutter_dialog = None
+
+    # --- ENDE NEUE METHODEN ---
+
+    def on_app_close(self):
+        """Aufräumen beim Schließen der App."""
+        print("App wird geschlossen...")
+
+        # 1. Aktiven Schneide-Dialog schließen (falls offen)
+        if self.video_cutter_dialog:
+            try:
+                self.video_cutter_dialog.destroy()
+            except tk.TclError:
+                pass  # Fenster vielleicht schon weg
+
+        # 2. Temporäre Vorschau-Kopien löschen
+        if self.video_preview:
+            self.video_preview._cleanup_temp_copies()  # Zugriff auf private Methode für Cleanup
+
+        # 3. Root-Fenster zerstören
+        self.root.destroy()
 
     def run(self):
         """Startet die Hauptloop der Anwendung"""

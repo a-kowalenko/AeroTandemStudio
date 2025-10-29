@@ -18,7 +18,7 @@ class DragDropFrame:
         self.video_paths = []
         self.photo_paths = []
         self.last_first_video = None  # NEU: Speichert den ersten Clip für Vergleich
-        self.qr_check_enabled = tk.BooleanVar(value=True)  # NEU: Checkbox-Variable für QR-Prüfung
+        self.qr_check_enabled = tk.BooleanVar(value=False)  # NEU: Checkbox-Variable für QR-Prüfung
         self.create_widgets()
 
     def create_widgets(self):

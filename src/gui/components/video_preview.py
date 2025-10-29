@@ -191,10 +191,37 @@ class VideoPreview:
         if needs_reencoding and self.app and hasattr(self.app, 'drag_drop'):
             self.parent.after(0, lambda: self.app.drag_drop.set_cut_button_enabled(False))
 
-        self.video_copies_map.clear()
-        self.metadata_cache.clear()  # Cache bei voller Ne-Erstellung leeren
+        # OPTIMIERUNG: Nicht mehr clear() - behalte existierende Kopien!
+        # Entferne nur Kopien, die nicht mehr in der aktuellen Liste sind
+        current_paths_set = set(original_paths)
+        paths_to_remove = [path for path in list(self.video_copies_map.keys()) if path not in current_paths_set]
+        for path in paths_to_remove:
+            # Lösche Datei und Cache-Eintrag
+            if path in self.video_copies_map:
+                old_copy = self.video_copies_map[path]
+                if os.path.exists(old_copy):
+                    try:
+                        os.remove(old_copy)
+                        print(f"🗑️ Entferne alte Kopie: {os.path.basename(old_copy)}")
+                    except:
+                        pass
+                del self.video_copies_map[path]
+            if path in self.metadata_cache:
+                del self.metadata_cache[path]
+
         temp_copy_paths = []
         total_clips = len(original_paths)
+
+        # Zähle wie viele Videos tatsächlich verarbeitet werden müssen
+        clips_to_process = 0
+        for original_path in original_paths:
+            if original_path not in self.video_copies_map or not os.path.exists(self.video_copies_map.get(original_path, "")):
+                clips_to_process += 1
+
+        if clips_to_process == 0:
+            print(f"✅ Alle {total_clips} Videos bereits im Cache - nichts zu tun!")
+        else:
+            print(f"📦 {clips_to_process} von {total_clips} Videos müssen verarbeitet werden ({total_clips - clips_to_process} bereits im Cache)")
 
         self.parent.after(0, self.progress_handler.pack_progress_bar)
         self.parent.after(0, self.progress_handler.update_progress, 0, total_clips)
@@ -207,13 +234,50 @@ class VideoPreview:
             safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
             copy_path = os.path.join(self.temp_dir, f"{i:03d}_{safe_filename}")
 
+            # OPTIMIERUNG: Prüfe ob bereits eine gültige Kopie existiert
+            if original_path in self.video_copies_map:
+                existing_copy = self.video_copies_map[original_path]
+                if os.path.exists(existing_copy):
+                    # Kopie existiert bereits - überspringen!
+                    print(f"♻️ Verwende bereits existierende Kopie: {os.path.basename(existing_copy)}")
+
+                    # Prüfe ob Pfad umbenannt werden muss (Index hat sich geändert)
+                    if existing_copy != copy_path:
+                        try:
+                            # Benenne um zu neuem Index-Pfad
+                            shutil.move(existing_copy, copy_path)
+                            self.video_copies_map[original_path] = copy_path
+                            print(f"  → Umbenannt zu: {os.path.basename(copy_path)}")
+                        except:
+                            # Falls Umbenennung fehlschlägt, behalte alten Pfad
+                            copy_path = existing_copy
+
+                    temp_copy_paths.append(copy_path)
+                    self.parent.after(0, self.progress_handler.update_progress, i + 1, total_clips)
+                    continue  # Überspringe Verarbeitung
+
+            # WICHTIG: Prüfe ob die Original-Datei existiert
+            # Nach einem Split existieren die Dateien nur noch im Working-Folder!
+            source_path = original_path
+            if not os.path.exists(original_path):
+                # Datei existiert nicht am Original-Ort, suche im Working-Folder
+                if original_path in self.video_copies_map:
+                    working_copy = self.video_copies_map[original_path]
+                    if os.path.exists(working_copy):
+                        source_path = working_copy
+                        print(f"→ Verwende Working-Folder-Kopie: {os.path.basename(working_copy)}")
+                    else:
+                        raise Exception(f"Datei nicht gefunden: {filename} (weder in Upload-Ordner noch Working-Folder)")
+                else:
+                    raise Exception(f"Datei nicht gefunden: {filename}")
+
             if needs_reencoding:
                 # --- Fall B: Neukodierung ---
                 status_msg = f"Kodiere Clip {i + 1}/{total_clips} (1080p@30)..."
                 self.parent.after(0, lambda msg=status_msg: self.status_label.config(text=msg, fg="orange"))
 
                 try:
-                    self._reencode_single_clip(original_path, copy_path)
+                    self._reencode_single_clip(source_path, copy_path)
                 except Exception as e:
                     if self.cancellation_event.is_set():
                         print("Neukodierung abgebrochen.")
@@ -223,12 +287,13 @@ class VideoPreview:
                         raise Exception(f"Fehler bei Neukodierung von {filename}")
 
             else:
-                # --- Fall A: Kopieren ---
+                # --- Fall A: Stream-Copy (ohne Thumbnails) ---
                 status_msg = f"Kopiere Clip {i + 1}/{total_clips}..."
                 self.parent.after(0, lambda msg=status_msg: self.status_label.config(text=msg, fg="blue"))
 
                 try:
-                    shutil.copy2(original_path, copy_path)
+                    # Verwende FFmpeg Stream-Copy um Thumbnails zu entfernen
+                    self._copy_without_thumbnails(source_path, copy_path)
                 except Exception as e:
                     print(f"Fehler beim Kopieren von {filename}: {e}")
                     raise Exception(f"Fehler beim Kopieren von {filename}")
@@ -248,9 +313,117 @@ class VideoPreview:
         self.parent.after(0, self.progress_handler.reset)
         return temp_copy_paths
 
+    def _copy_without_thumbnails(self, input_path, output_path):
+        """
+        Kopiert ein Video ohne Re-Encoding und entfernt dabei MJPEG-Thumbnails.
+
+        MJPEG-Thumbnails (attached_pic) werden oft von Kameras (besonders DJI-Drohnen)
+        hinzugefügt und können beim Concat Probleme verursachen.
+        """
+        # Prüfe ob Thumbnails vorhanden sind
+        has_thumbnail = self._check_for_thumbnail(input_path)
+
+        if has_thumbnail:
+            print(f"  → Entferne MJPEG-Thumbnail aus {os.path.basename(input_path)}")
+
+            # FFmpeg Stream-Copy OHNE attached_pic (Thumbnails)
+            # -map 0 = Alle Streams
+            # -map -0:v:? -map 0:V = Entferne alle Video-Streams, füge nur nicht-Thumbnail-Videos hinzu
+            # Einfacher: -dn entfernt Data-Streams, aber wir brauchen präziser:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", input_path,
+                "-map", "0:v:0",      # Haupt-Video-Stream
+                "-map", "0:a?",       # Audio (optional)
+                "-map", "0:s?",       # Untertitel (optional)
+                "-c", "copy",         # Stream-Copy (kein Re-Encoding)
+                "-disposition:v:0", "default",  # Setze Haupt-Video als Default
+                output_path
+            ]
+        else:
+            # Kein Thumbnail, normale Stream-Copy
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", input_path,
+                "-c", "copy",
+                "-map", "0",
+                output_path
+            ]
+
+        # Führe FFmpeg aus
+        result = subprocess.run(
+            cmd,
+            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            universal_newlines=True,
+            encoding='utf-8',
+            errors='replace',
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+        )
+
+        if result.returncode != 0:
+            # Bei Fehler: Zeige Details und fallback zu shutil.copy2
+            stderr_text = result.stderr if result.stderr else ""
+            print(f"⚠️ FFmpeg Stream-Copy fehlgeschlagen, verwende Datei-Kopie als Fallback")
+            print(f"   Fehler: {stderr_text[:200]}")
+
+            # Fallback: Normale Datei-Kopie
+            shutil.copy2(input_path, output_path)
+
+    def _check_for_thumbnail(self, video_path):
+        """
+        Prüft ob ein Video MJPEG-Thumbnails (attached_pic) enthält.
+
+        Returns:
+            True wenn Thumbnails gefunden wurden, sonst False
+        """
+        try:
+            cmd = [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_streams",
+                video_path
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=SUBPROCESS_CREATE_NO_WINDOW
+            )
+
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                streams = data.get("streams", [])
+
+                # Suche nach attached_pic (MJPEG-Thumbnails)
+                for stream in streams:
+                    if stream.get("codec_type") == "video":
+                        disposition = stream.get("disposition", {})
+                        codec_name = stream.get("codec_name", "")
+
+                        # attached_pic = 1 bedeutet es ist ein Thumbnail
+                        if disposition.get("attached_pic") == 1:
+                            print(f"    Thumbnail gefunden: {codec_name}")
+                            return True
+
+                        # Manche Videos haben MJPEG als zweiten Video-Stream
+                        if codec_name == "mjpeg" and stream.get("width", 0) < 500:
+                            print(f"    MJPEG-Thumbnail gefunden ({stream.get('width')}x{stream.get('height')})")
+                            return True
+
+            return False
+
+        except Exception as e:
+            print(f"    Konnte Thumbnail-Check nicht durchführen: {e}")
+            return False  # Im Zweifelsfall ohne Thumbnail-Entfernung kopieren
+
     def _reencode_single_clip(self, input_path, output_path):
         """
         Neukodiert eine einzelne Videodatei auf 1080p@30fps. (Blockierend)
+        Fehlertolerantes Encoding für korrupte/beschädigte Videos.
+        OPTIMIERT für Geschwindigkeit - Vorschau-Qualität ist ausreichend.
         """
         target_params = {
             'width': 1920, 'height': 1080, 'fps': 30, 'pix_fmt': 'yuv420p',
@@ -259,77 +432,150 @@ class VideoPreview:
         tp = target_params
 
         cmd = [
-            "ffmpeg", "-y", "-i", input_path,
-            "-vf",
-            f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']},format={tp['pix_fmt']}",
-            "-c:v", tp['video_codec'], "-preset", "fast", "-crf", "23",
-            "-c:a", tp['audio_codec'], "-b:a", "128k", "-ar", str(tp['audio_sample_rate']), "-ac", str(tp['audio_channels']),
+            "ffmpeg", "-y",
+            # FEHLERTOLERANZ: Ignoriere Dekodier-Fehler in korrupten Videos
+            "-err_detect", "ignore_err",
+            "-fflags", "+genpts+igndts",
+            "-i", input_path,
+            # OPTIMIERT: Einfachere Filter-Chain (schneller)
+            "-vf", f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']}",
+            "-c:v", tp['video_codec'],
+            # SPEED-OPTIMIERUNG:
+            "-preset", "veryfast",     # veryfast statt fast = ~2x schneller
+            "-crf", "26",              # 26 statt 23 = kleinere Datei, für Vorschau OK
+            "-tune", "fastdecode",     # Optimiert für schnelles Dekodieren
+            "-x264-params", "ref=1:me=dia:subme=1:trellis=0",  # Minimale Qualitätseinstellungen für max. Speed
+            # Audio-Encoding
+            "-c:a", tp['audio_codec'],
+            "-b:a", "96k",             # 96k statt 128k - ausreichend für Vorschau
+            "-ar", str(tp['audio_sample_rate']),
+            "-ac", str(tp['audio_channels']),
+            # Container-Optionen
             "-movflags", "+faststart",
-            "-map", "0:v:0", "-map", "0:a:0?",  # WICHTIG: Video ist pflicht, Audio optional
+            "-max_muxing_queue_size", "1024",
+            "-map", "0:v:0", "-map", "0:a:0?",
             output_path
         ]
 
         # WICHTIG: Capture stderr für Fehlerdiagnose
+        # Auf Windows müssen wir communicate() verwenden statt manuell zu lesen
+        print(f"Starte Re-Encoding: {os.path.basename(input_path)} → 1080p@30fps")
+
         self.ffmpeg_process = subprocess.Popen(
             cmd,
-            stderr=subprocess.PIPE,  # Geändert von DEVNULL
-            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,  # Auch stdout capturen
             universal_newlines=True,
             encoding='utf-8',
             errors='replace',
             creationflags=SUBPROCESS_CREATE_NO_WINDOW
         )
 
-        # Sammle stderr für Fehlerdiagnose
-        stderr_output = []
+        # Warte mit Timeout und hole Output
+        # communicate() liest automatisch und verhindert Pipe-Buffer-Overflow
+        try:
+            # Verwende einen Thread um Abbruch zu ermöglichen
+            import threading
 
-        while self.ffmpeg_process.poll() is None:
-            if self.cancellation_event.is_set():
-                print(f"Abbruch-Signal empfangen. Terminiere FFmpeg für: {input_path}")
-                self.ffmpeg_process.terminate()
-                self.ffmpeg_process.wait()
+            result_holder = {'stdout': None, 'stderr': None, 'done': False}
+
+            def communicate_thread():
+                try:
+                    stdout, stderr = self.ffmpeg_process.communicate(timeout=300)  # 5 Min Timeout
+                    result_holder['stdout'] = stdout
+                    result_holder['stderr'] = stderr
+                    result_holder['done'] = True
+                except subprocess.TimeoutExpired:
+                    print("⚠️ FFmpeg Timeout (>5 Min), terminiere Prozess...")
+                    self.ffmpeg_process.kill()
+                    stdout, stderr = self.ffmpeg_process.communicate()
+                    result_holder['stdout'] = stdout
+                    result_holder['stderr'] = stderr
+                    result_holder['done'] = True
+                except Exception as e:
+                    print(f"❌ Fehler in communicate_thread: {e}")
+                    # Versuche trotzdem stderr zu holen
+                    try:
+                        if self.ffmpeg_process and self.ffmpeg_process.poll() is not None:
+                            # Prozess ist beendet, hole Output
+                            result_holder['stderr'] = self.ffmpeg_process.stderr.read() if self.ffmpeg_process.stderr else ""
+                            result_holder['stdout'] = self.ffmpeg_process.stdout.read() if self.ffmpeg_process.stdout else ""
+                    except:
+                        pass
+                    result_holder['done'] = True
+
+            comm_thread = threading.Thread(target=communicate_thread, daemon=True)
+            comm_thread.start()
+
+            # Warte auf Thread, aber prüfe Abbruch-Signal
+            while not result_holder['done']:
+                if self.cancellation_event.is_set():
+                    print(f"Abbruch-Signal empfangen. Terminiere FFmpeg für: {input_path}")
+                    self.ffmpeg_process.terminate()
+                    time.sleep(0.5)
+                    if self.ffmpeg_process.poll() is None:
+                        self.ffmpeg_process.kill()
+                    comm_thread.join(timeout=2)
+                    self.ffmpeg_process = None
+                    raise Exception("Neukodierung vom Benutzer abgebrochen.")
+                time.sleep(0.1)
+
+            comm_thread.join(timeout=1)
+
+        except Exception as e:
+            if "abgebrochen" in str(e):
+                raise
+            print(f"Fehler beim Warten auf FFmpeg: {e}")
+            if self.ffmpeg_process:
+                self.ffmpeg_process.kill()
                 self.ffmpeg_process = None
-                raise Exception("Neukodierung vom Benutzer abgebrochen.")
+            raise
 
-            # Lese stderr in kleinen Chunks (non-blocking)
-            try:
-                import select
-                if hasattr(select, 'select'):  # Unix
-                    ready = select.select([self.ffmpeg_process.stderr], [], [], 0.1)[0]
-                    if ready:
-                        line = self.ffmpeg_process.stderr.readline()
-                        if line:
-                            stderr_output.append(line)
-            except:
-                pass  # Windows hat kein select für pipes
-
-            time.sleep(0.1)
-
-        # Warte auf Prozess-Ende und hole restlichen stderr
-        stdout, stderr = self.ffmpeg_process.communicate()
-        if stderr:
-            stderr_output.append(stderr)
-
-        returncode = self.ffmpeg_process.returncode
+        returncode = self.ffmpeg_process.returncode if self.ffmpeg_process else -1
         self.ffmpeg_process = None
+
+        # Hole stderr aus dem result_holder
+        stderr_text = result_holder.get('stderr', '') or ''
+
+        # DEBUG: Zeige was wir haben
+        print(f"DEBUG: returncode={returncode}, stderr_length={len(stderr_text) if stderr_text else 0}")
 
         if returncode != 0:
             # Zeige die letzten Zeilen des stderr-Outputs für Debugging
-            stderr_text = ''.join(stderr_output)
-            last_lines = '\n'.join(stderr_text.split('\n')[-20:])  # Letzte 20 Zeilen
-            print(f"\n=== FFmpeg Fehler bei {os.path.basename(input_path)} ===")
-            print(f"Returncode: {returncode}")
-            print(f"Letzter FFmpeg Output:\n{last_lines}")
-            print("=" * 50)
+            if stderr_text and len(stderr_text) > 0:
+                last_lines = '\n'.join(stderr_text.split('\n')[-30:])
+            else:
+                last_lines = "⚠️ Kein stderr Output verfügbar - möglicherweise wurde communicate() nicht erfolgreich ausgeführt"
+
+            print(f"\n{'='*60}")
+            print(f"FFmpeg Fehler bei: {os.path.basename(input_path)}")
+            print(f"{'='*60}")
+            print(f"Returncode: {returncode} (unsigned: {returncode & 0xFFFFFFFF})")
+            print(f"\nLetzter FFmpeg Output:")
+            print(last_lines)
+            print(f"{'='*60}\n")
 
             # Gebe detaillierte Fehlermeldung
             error_msg = f"FFmpeg-Fehler (Code {returncode}) bei der Neukodierung von {input_path}"
-            if "Invalid" in stderr_text or "does not contain" in stderr_text:
-                error_msg += "\nMögliches Problem: Video-/Audio-Stream fehlt oder ist ungültig"
-            elif "Conversion failed" in stderr_text:
-                error_msg += "\nMögliches Problem: Filter-Chain oder Codec-Fehler"
+
+            # Analysiere Fehler
+            if stderr_text:
+                if "Invalid" in stderr_text or "does not contain" in stderr_text:
+                    error_msg += "\n→ Mögliches Problem: Video-/Audio-Stream fehlt oder ist ungültig"
+                elif "Conversion failed" in stderr_text:
+                    error_msg += "\n→ Mögliches Problem: Filter-Chain oder Codec-Fehler"
+                elif "No such filter" in stderr_text:
+                    error_msg += "\n→ Mögliches Problem: FFmpeg-Filter nicht verfügbar"
+                elif "height not divisible" in stderr_text or "width not divisible" in stderr_text:
+                    error_msg += "\n→ Mögliches Problem: Auflösung nicht durch 2 teilbar"
+                elif "Unknown encoder" in stderr_text:
+                    error_msg += "\n→ Mögliches Problem: Codec nicht verfügbar in dieser FFmpeg-Build"
+            else:
+                error_msg += "\n→ Kein FFmpeg-Output verfügbar (Pipe-Problem?)"
 
             raise Exception(error_msg)
+
+        print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
 
     def _create_combined_preview(self, video_paths):
         """

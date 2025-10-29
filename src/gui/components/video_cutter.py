@@ -1,10 +1,12 @@
 ﻿import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import os
 import threading
 import subprocess
 import json
 import time
+import sys
+import shutil
 from typing import Callable, Dict
 
 try:
@@ -42,8 +44,10 @@ class VideoCutterDialog(tk.Toplevel):
     def __init__(self, parent, video_path: str, on_complete_callback: Callable[[Dict], None]):
         if not vlc:
             # Zeigen Sie den Fehler im übergeordneten Fenster an, da der Dialog möglicherweise nicht erstellt werden kann
-            tk.messagebox.showerror("VLC Fehler", "Das VLC-Modul (python-vlc) konnte nicht geladen werden.",
-                                    parent=parent)
+            messagebox.showerror("VLC Fehler", "Das VLC-Modul (python-vlc) konnte nicht geladen werden.", parent=parent)
+            # Verhindern, dass Toplevel initialisiert wird, wenn VLC fehlt
+            # Rufen Sie super().__init__ NICHT auf und geben Sie None oder eine Exception zurück
+            # Hier entscheiden wir uns dafür, einfach zurückzukehren, was die Instanziierung fehlschlagen lässt.
             return
 
         super().__init__(parent)
@@ -55,8 +59,13 @@ class VideoCutterDialog(tk.Toplevel):
         self.geometry("800x600")
 
         # --- Interne Status-Variablen ---
-        self.vlc_instance = vlc.Instance("--no-xlib")
-        self.media_player = self.vlc_instance.media_player_new()
+        try:
+            self.vlc_instance = vlc.Instance("--no-xlib")
+            self.media_player = self.vlc_instance.media_player_new()
+        except Exception as e:
+            messagebox.showerror("VLC Init Fehler", f"VLC konnte nicht initialisiert werden:\n{e}", parent=parent)
+            self.destroy()  # Dialog sofort schließen
+            return
 
         self.total_duration_ms = 0
         self.fps = 30.0  # Standard, wird überschrieben
@@ -78,6 +87,13 @@ class VideoCutterDialog(tk.Toplevel):
         # --- Dialog-Setup ---
         self._create_widgets()
 
+        # NEU: Tastatur-Bindings hinzufügen
+        self.bind('<q>', self._on_key_frame_back)
+        self.bind('<Q>', self._on_key_frame_back) # Für Umschalt/CapsLock
+        self.bind('<e>', self._on_key_frame_fwd)
+        self.bind('<E>', self._on_key_frame_fwd) # Für Umschalt/CapsLock
+        self.bind('<space>', self._on_key_toggle_play_pause)
+
         # Modalen Dialog einrichten
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.transient(parent)
@@ -88,6 +104,11 @@ class VideoCutterDialog(tk.Toplevel):
 
     def show(self):
         """Macht das Fenster sichtbar."""
+        # Überprüfen, ob die Initialisierung fehlgeschlagen ist (VLC nicht geladen)
+        if not hasattr(self, 'vlc_instance') or not self.vlc_instance:
+            print("Dialog kann nicht angezeigt werden, VLC-Initialisierung fehlgeschlagen.")
+            return  # Verhindert das Anzeigen eines leeren/fehlerhaften Fensters
+
         self.lift()
         self.focus_force()
         self.wait_window()
@@ -109,9 +130,23 @@ class VideoCutterDialog(tk.Toplevel):
         if os.name == 'nt':
             self.media_player.set_hwnd(self.video_frame.winfo_id())
         elif sys.platform == "darwin":
-            self.media_player.set_nsobject(self.video_frame.winfo_id())
-        else:
-            self.media_player.set_xwindow(self.video_frame.winfo_id())
+            # Sicherstellen, dass die ID ein Integer ist
+            try:
+                win_id = int(self.video_frame.winfo_id())
+                self.media_player.set_nsobject(win_id)
+            except (ValueError, TypeError, AttributeError) as e:
+                messagebox.showerror("VLC Fehler (macOS)", f"Ungültige Fenster-ID für VLC: {e}", parent=self)
+                self.destroy()
+                return
+        else:  # Linux
+            # Sicherstellen, dass die ID ein Integer ist
+            try:
+                win_id = int(self.video_frame.winfo_id())
+                self.media_player.set_xwindow(win_id)
+            except (ValueError, TypeError, AttributeError) as e:
+                messagebox.showerror("VLC Fehler (Linux)", f"Ungültige Fenster-ID für VLC: {e}", parent=self)
+                self.destroy()
+                return
 
         media = self.vlc_instance.media_new(self.video_path)
         self.media_player.set_media(media)
@@ -119,6 +154,11 @@ class VideoCutterDialog(tk.Toplevel):
         # Events binden
         events = self.media_player.event_manager()
         events.event_attach(vlc.EventType.MediaPlayerEndReached, self._on_end_reached)
+        events.event_attach(vlc.EventType.MediaPlayerTimeChanged, self._on_time_changed)
+        # Player Status Events für Button-Updates
+        events.event_attach(vlc.EventType.MediaPlayerPlaying, lambda e: self.play_pause_btn.config(text="⏸"))
+        events.event_attach(vlc.EventType.MediaPlayerPaused, lambda e: self.play_pause_btn.config(text="▶"))
+        events.event_attach(vlc.EventType.MediaPlayerStopped, lambda e: self.play_pause_btn.config(text="▶"))
 
         # UI initialisieren
         self._on_time_changed(None)  # Zeit-Label initial setzen
@@ -128,11 +168,6 @@ class VideoCutterDialog(tk.Toplevel):
         self.media_player.play()  # Autostart
         self.after(100, self.media_player.pause)  # Aber sofort pausieren
         self.play_pause_btn.config(text="▶")
-
-        # Updater starten, um den ersten Frame zu holen
-        self._start_updater()
-        # Und sofort wieder stoppen, da wir pausiert sind
-        self.after(100, self._stop_updater)
 
     def _get_video_info(self, video_path: str) -> Dict:
         """Liest Dauer und FPS eines Videos mit ffprobe aus."""
@@ -208,10 +243,10 @@ class VideoCutterDialog(tk.Toplevel):
         frame_step_frame = tk.Frame(controls_container)
         frame_step_frame.grid(row=0, column=1, sticky="ns", padx=10)
 
-        self.buttons["frame_back"] = tk.Button(frame_step_frame, text="[ ◀ 1F ]", command=lambda: self._step_frame(-1))
+        self.buttons["frame_back"] = tk.Button(frame_step_frame, text="[ ◀ 1F (Q) ]", command=lambda: self._step_frame(-1))
         self.buttons["frame_back"].pack(side=tk.LEFT, padx=2)
 
-        self.buttons["frame_fwd"] = tk.Button(frame_step_frame, text="[ 1F ▶ ]", command=lambda: self._step_frame(1))
+        self.buttons["frame_fwd"] = tk.Button(frame_step_frame, text="[ (E) 1F ▶ ]", command=lambda: self._step_frame(1))
         self.buttons["frame_fwd"].pack(side=tk.LEFT, padx=2)
 
         # 4c. Spacer
@@ -243,7 +278,8 @@ class VideoCutterDialog(tk.Toplevel):
 
         self.status_label = tk.Label(status_spinner_frame, text="Verarbeite...", font=("Arial", 10, "bold"),
                                      fg="orange")
-        self.status_label.pack(side=tk.LEFT, padx=5)
+        # Status-Label initial ausblenden
+        # self.status_label.pack(side=tk.LEFT, padx=5)
 
         # Rechte Seite (Buttons)
         apply_button_frame = tk.Frame(action_frame)
@@ -258,39 +294,38 @@ class VideoCutterDialog(tk.Toplevel):
 
         self._set_processing(True)  # Starte im deaktivierten Modus, bis Video geladen ist
 
+    # --- Tastatur-Handler (NEU) ---
+
+    def _on_key_frame_back(self, event=None):
+        """Tastatur-Handler für 'Q' (1 Frame zurück)."""
+        # Die Logik (inkl. is_processing Check) ist in _step_frame()
+        self._step_frame(-1)
+
+    def _on_key_frame_fwd(self, event=None):
+        """Tastatur-Handler für 'E' (1 Frame vor)."""
+        self._step_frame(1)
+
+    def _on_key_toggle_play_pause(self, event=None):
+        """Tastatur-Handler für 'Space' (Play/Pause)."""
+        self._toggle_play_pause()
+
+
     # --- UI Update & Event Handler ---
 
-    def _start_updater(self):
-        """Startet die periodische Aktualisierung der UI."""
-        if self._updater_job:
-            self.after_cancel(self._updater_job)
-
-        # Führe es sofort einmal aus
-        self._on_time_changed(None)
-
-        # Setze den nächsten Job
-        self._updater_job = self.after(100, self._start_updater)
-
-    def _stop_updater(self):
-        """Stoppt die periodische Aktualisierung."""
-        if self._updater_job:
-            self.after_cancel(self._updater_job)
-            self._updater_job = None
-
     def _on_time_changed(self, event):
-        """Wird periodisch aufgerufen, um Zeit und Playhead zu aktualisieren."""
+        """Wird vom VLC Event aufgerufen, um Zeit und Playhead zu aktualisieren."""
+        # Verhindere Updates während der Verarbeitung oder beim Ziehen durch den Benutzer
         if self.is_processing or self.is_dragging_playhead:
             return
 
         current_time = self.media_player.get_time()
         if current_time < 0: current_time = 0
 
+        # Aktualisiere Zeit-Label
         self.time_label.config(text=f"{self._format_time(current_time)} / {self._format_time(self.total_duration_ms)}")
 
-        # Nur den Playhead neu zeichnen (effizienter)
+        # Zeichne nur den Playhead neu
         self._draw_playhead(current_time)
-
-        # HINWEIS: Play/Pause-Button-Text wird jetzt in _toggle_play_pause, _step_frame etc. gesetzt
 
     def _format_time(self, ms: int) -> str:
         """Formatiert Millisekunden in MM:SS:mmm."""
@@ -356,7 +391,7 @@ class VideoCutterDialog(tk.Toplevel):
         width = canvas.winfo_width()
         height = canvas.winfo_height()
 
-        if width <= 0:
+        if width <= 0 or not self.winfo_exists():  # Prüfe auch, ob Fenster noch da ist
             return
 
         current_time_ms = max(0, min(current_time_ms, self.total_duration_ms))
@@ -368,17 +403,24 @@ class VideoCutterDialog(tk.Toplevel):
 
     def _on_progress_click(self, event):
         """Springt zur angeklickten Position."""
+        # KORREKTUR: Klicks während Verarbeitung ignorieren
         if self.is_processing: return
         self.is_dragging_playhead = True  # Beginne Drag
         self._seek_from_event(event)
 
     def _on_progress_drag(self, event):
         """Aktualisiert Position während des Ziehens."""
+        # KORREKTUR: Klicks während Verarbeitung ignorieren
+        if self.is_processing: return
         if not self.is_dragging_playhead: return
         self._seek_from_event(event)
 
     def _on_progress_release(self, event):
         """Beendet das Ziehen."""
+        # KORREKTUR: Klicks während Verarbeitung ignorieren
+        if self.is_processing:
+            self.is_dragging_playhead = False  # Sicherstellen, dass Drag beendet wird
+            return
         self.is_dragging_playhead = False
         self._seek_from_event(event)  # Letzte Position setzen
 
@@ -400,31 +442,40 @@ class VideoCutterDialog(tk.Toplevel):
     # --- Button-Aktionen ---
 
     def _toggle_play_pause(self):
-        """Schaltet Play/Pause um UND startet/stoppt den UI-Updater."""
+        """Schaltet Play/Pause um."""
         if self.is_processing: return
         if self.media_player.is_playing():
             self.media_player.pause()
-            self.play_pause_btn.config(text="▶")
-            self._stop_updater()  # KORREKTUR: Updater stoppen
+            # Button-Text wird durch Event-Handler aktualisiert
         else:
-            self.media_player.play()
-            self.play_pause_btn.config(text="⏸")
-            self._start_updater()  # KORREKTUR: Updater starten
+            # Wenn am Ende, springe zum Anfang
+            if self.media_player.get_state() == vlc.State.Ended:
+                self.media_player.set_time(0)
+                # Warte kurz, bis der Player bereit ist, sonst startet er nicht
+                self.after(50, self.media_player.play)
+            else:
+                self.media_player.play()
+            # Button-Text wird durch Event-Handler aktualisiert
 
     def _step_frame(self, direction: int):
         """Springt 1 Frame vor oder zurück UND pausiert die Wiedergabe."""
+        # KORREKTUR: Stellt sicher, dass der Player pausiert ist und bleibt
         if self.is_processing or self.fps == 0: return
 
-        self.media_player.pause()
-        self._stop_updater()  # KORREKTUR: Updater stoppen
-        self.play_pause_btn.config(text="▶")  # KORREKTUR: Button-Text aktualisieren
+        # 1. Player sicher pausieren
+        if self.media_player.is_playing():
+            self.media_player.pause()
 
+        # 2. Zeit berechnen
         step_ms = (1000 / self.fps) * direction
         current_time = self.media_player.get_time()
         new_time = max(0, min(self.total_duration_ms, current_time + step_ms))
 
+        # 3. Zeit setzen (löst _on_time_changed aus für UI-Update)
         self.media_player.set_time(int(new_time))
-        self._on_time_changed(None)  # UI einmalig aktualisieren
+
+        # 4. Sicherstellen, dass Button auf Play steht (da wir pausiert haben)
+        self.play_pause_btn.config(text="▶")
 
     def _set_in(self):
         """Setzt den IN-Punkt (Start) auf die aktuelle Playhead-Position."""
@@ -464,16 +515,18 @@ class VideoCutterDialog(tk.Toplevel):
 
         print("Cutter: Vorgang abgebrochen.")
         self._cleanup()
-        self.on_complete_callback({"action": "cancel"})
-        # Das destroy() wird in app.py's _on_cutter_dialog_close erledigt
+        # WICHTIG: grab_release() vor destroy(), sonst kann Hauptfenster blockieren
+        self.grab_release()
+        self.destroy()  # Dialog selbst schließen
+        self.on_complete_callback({"action": "cancel"})  # App benachrichtigen
 
     def _on_apply(self):
         """Startet den 'Trim'-Vorgang (Überschreiben)."""
         if self.is_processing: return
 
         if self.start_time_ms is None and self.end_time_ms is None:
-            tk.messagebox.showinfo("Keine Änderung",
-                                   "Sie haben keinen IN- or OUT-Punkt gesetzt. Es gibt nichts zu schneiden.")
+            messagebox.showinfo("Keine Änderung",
+                                "Sie haben keinen IN- or OUT-Punkt gesetzt. Es gibt nichts zu schneiden.", parent=self)
             return
 
         # Sicherstellen, dass Start < Ende
@@ -483,9 +536,10 @@ class VideoCutterDialog(tk.Toplevel):
             if end_ms < start_ms:
                 start_ms, end_ms = end_ms, start_ms
 
-        # KORREKTUR: Player stoppen UND Mediendatei freigeben, um WinError 32 zu verhindern
-        self.media_player.stop()
-        self.media_player.set_media(None)
+        # Player stoppen UND Mediendatei freigeben, um WinError 32 zu verhindern
+        if self.media_player.is_playing():
+            self.media_player.stop()
+        self.media_player.set_media(None)  # Wichtig! Gibt Datei frei
 
         self._set_processing(True)
         self.status_label.config(text="Video wird geschnitten (Trim)...")
@@ -502,14 +556,15 @@ class VideoCutterDialog(tk.Toplevel):
 
         split_time_ms = self.media_player.get_time()
 
-        # KORREKTUR: Player stoppen UND Mediendatei freigeben, um WinError 32 zu verhindern
-        self.media_player.stop()
-        self.media_player.set_media(None)
-
         if split_time_ms <= 100 or split_time_ms >= (self.total_duration_ms - 100):  # Toleranz
-            tk.messagebox.showwarning("Ungültiger Split-Punkt",
-                                      "Sie können nicht zu nah am Anfang oder Ende des Clips teilen.")
+            messagebox.showwarning("Ungültiger Split-Punkt",
+                                   "Sie können nicht zu nah am Anfang oder Ende des Clips teilen.", parent=self)
             return
+
+        # Player stoppen UND Mediendatei freigeben, um WinError 32 zu verhindern
+        if self.media_player.is_playing():
+            self.media_player.stop()
+        self.media_player.set_media(None)  # Wichtig! Gibt Datei frei
 
         self._set_processing(True)
         self.status_label.config(text="Video wird geteilt (Split)...")
@@ -533,16 +588,14 @@ class VideoCutterDialog(tk.Toplevel):
             start_sec = start_ms / 1000.0
             duration_sec = (end_ms - start_ms) / 1000.0
 
-            # Verwende 'copy', wenn möglich (viel schneller), aber Re-Encode für Frame-Genauigkeit
-            # HINWEIS: 'copy' kann bei manchen Formaten ungenau sein (Keyframes)
-            # Wir verwenden Re-Encode für Sicherheit, wie in der Logik von video_preview.py
             cmd = [
                 "ffmpeg", "-y",
-                "-ss", str(start_sec),  # Input-Seeking (schnell, aber ungenau)
-                "-i", input_path,
+                "-i", input_path,  # Input zuerst für genaueres Seeking mit -ss
+                "-ss", str(start_sec),  # Startzeit (genauer nach -i)
                 "-t", str(duration_sec),  # Dauer
                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",  # Re-encode
-                "-c:a", "aac", "-b:a", "128k",
+                "-c:a", "aac", "-b:a", "128k",  # Re-encode Audio
+                # "-avoid_negative_ts", "make_zero", # Sicherstellen, dass Zeitstempel bei 0 beginnt
                 "-map", "0:v:0?", "-map", "0:a:0?",  # Nur Video- und Audio-Stream
                 temp_output_path
             ]
@@ -557,33 +610,36 @@ class VideoCutterDialog(tk.Toplevel):
             try:
                 # Kurze Pause, um sicherzustellen, dass FFmpeg die Datei vollständig freigegeben hat
                 time.sleep(0.2)
-                os.remove(input_path)
-                time.sleep(0.2)
-                os.rename(temp_output_path, input_path)
+                # Verwende copy2 + remove für mehr Robustheit unter Windows
+                shutil.copy2(temp_output_path, input_path)
+                time.sleep(0.1)  # Kurze Pause vor dem Löschen
+                os.remove(temp_output_path)
                 print("FFmpeg (Cut) erfolgreich. Original überschrieben.")
             except Exception as e:
-                # Fallback: Wenn das Umbennennen fehlschlägt (selten), versuche zu kopieren
-                try:
-                    print(f"Umbenennen fehlgeschlagen ({e}), versuche Kopiervorgang...")
-                    shutil.copy2(temp_output_path, input_path)
-                    os.remove(temp_output_path)
-                    print("FFmpeg (Cut) erfolgreich (Kopier-Fallback).")
-                except Exception as e2:
-                    raise Exception(f"Fehler beim Überschreiben der Original-Kopie ({e}) UND Kopiervorgang ({e2})")
+                raise Exception(f"Fehler beim Überschreiben der Original-Kopie nach Schnitt: {e}")
 
             # Callback im Haupt-Thread auslösen
             self.after(0, self._handle_processing_complete, {"action": "cut"})
 
         except subprocess.CalledProcessError as e:
-            self._handle_error_in_thread(f"FFmpeg (Cut) fehlgeschlagen:\n{e.stderr}")
+            self._handle_error_in_thread(f"FFmpeg (Cut) fehlgeschlagen (Code {e.returncode}):\n{e.stderr}")
         except Exception as e:
             self._handle_error_in_thread(f"Fehler beim Schneiden: {e}")
+        finally:
+            # Sicherstellen, dass temporäre Datei gelöscht wird, falls vorhanden
+            if os.path.exists(temp_output_path):
+                try:
+                    os.remove(temp_output_path)
+                except Exception as del_e:
+                    print(f"Konnte temp. Schnittdatei nicht löschen: {del_e}")
 
     def _run_split_task(self, split_time_ms: int):
         """
         [THREAD] Führt FFmpeg aus, um die Datei zu teilen.
         Teil 1 überschreibt das Original, Teil 2 wird neu erstellt.
         """
+        temp_part1_path = None  # Definition außerhalb des try-Blocks
+        part2_path = None
         try:
             input_path = self.video_path
             base, ext = os.path.splitext(input_path)
@@ -598,6 +654,7 @@ class VideoCutterDialog(tk.Toplevel):
                 "-t", str(split_sec),
                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
                 "-c:a", "aac", "-b:a", "128k",
+                # "-avoid_negative_ts", "make_zero",
                 "-map", "0:v:0?", "-map", "0:a:0?",
                 temp_part1_path
             ]
@@ -610,10 +667,11 @@ class VideoCutterDialog(tk.Toplevel):
             # --- Befehl für Teil 2 (Split-Punkt bis Ende) ---
             cmd2 = [
                 "ffmpeg", "-y",
-                "-ss", str(split_sec),  # Input-Seeking
-                "-i", input_path,
+                "-i", input_path,  # Input zuerst
+                "-ss", str(split_sec),  # Startzeit nach -i
                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
                 "-c:a", "aac", "-b:a", "128k",
+                # "-avoid_negative_ts", "make_zero",
                 "-map", "0:v:0?", "-map", "0:a:0?",
                 part2_path
             ]
@@ -627,19 +685,13 @@ class VideoCutterDialog(tk.Toplevel):
             try:
                 # Kurze Pause
                 time.sleep(0.2)
-                os.remove(input_path)
-                time.sleep(0.2)
-                os.rename(temp_part1_path, input_path)
+                # Verwende copy2 + remove für Teil 1
+                shutil.copy2(temp_part1_path, input_path)
+                time.sleep(0.1)
+                os.remove(temp_part1_path)
                 print("FFmpeg (Split) erfolgreich. Original (Teil 1) überschrieben.")
             except Exception as e:
-                # Fallback: Kopiervorgang
-                try:
-                    print(f"Umbenennen (Split) fehlgeschlagen ({e}), versuche Kopiervorgang...")
-                    shutil.copy2(temp_part1_path, input_path)
-                    os.remove(temp_part1_path)
-                    print("FFmpeg (Split) erfolgreich (Kopier-Fallback).")
-                except Exception as e2:
-                    raise Exception(f"Fehler beim Überschreiben (Teil 1): {e} UND Kopiervorgang ({e2})")
+                raise Exception(f"Fehler beim Überschreiben (Teil 1) nach Split: {e}")
 
             # Callback im Haupt-Thread auslösen
             result = {"action": "split", "new_copy_path": part2_path}
@@ -647,19 +699,22 @@ class VideoCutterDialog(tk.Toplevel):
 
         except subprocess.CalledProcessError as e:
             # Wenn Teil 2 fehlschlägt, Teil 1 (temp) löschen
-            if os.path.exists(temp_part1_path):
-                try:
-                    os.remove(temp_part1_path)
-                except:
-                    pass
-            self._handle_error_in_thread(f"FFmpeg (Split) fehlgeschlagen:\n{e.stderr}")
+            self._handle_error_in_thread(f"FFmpeg (Split) fehlgeschlagen (Code {e.returncode}):\n{e.stderr}")
         except Exception as e:
-            if os.path.exists(temp_part1_path):
+            self._handle_error_in_thread(f"Fehler beim Teilen: {e}")
+        finally:
+            # Sicherstellen, dass temporäre Dateien gelöscht werden
+            if temp_part1_path and os.path.exists(temp_part1_path):
                 try:
                     os.remove(temp_part1_path)
-                except:
-                    pass
-            self._handle_error_in_thread(f"Fehler beim Teilen: {e}")
+                except Exception as del_e:
+                    print(f"Konnte temp. Teil 1 nicht löschen: {del_e}")
+            # Wenn Teil 2 fehlschlägt, aber existiert, lösche es auch
+            if 'result2' in locals() and result2.returncode != 0 and part2_path and os.path.exists(part2_path):
+                try:
+                    os.remove(part2_path)
+                except Exception as del_e:
+                    print(f"Konnte fehlgeschlagenen Teil 2 nicht löschen: {del_e}")
 
     # --- Thread-Kommunikation & Status ---
 
@@ -668,12 +723,12 @@ class VideoCutterDialog(tk.Toplevel):
         self.is_processing = is_processing
 
         if is_processing:
-            self._stop_updater()
+            # self._stop_updater() # Nicht mehr nötig
             self.spinner.start()
-            self.status_label.pack(side=tk.LEFT, padx=5)
+            self.status_label.pack(side=tk.LEFT, padx=5)  # Status anzeigen
         else:
             self.spinner.stop()
-            self.status_label.pack_forget()
+            self.status_label.pack_forget()  # Status ausblenden
             # Updater wird NICHT automatisch gestartet, nur bei Play
 
         for name, button in self.buttons.items():
@@ -688,50 +743,92 @@ class VideoCutterDialog(tk.Toplevel):
 
     def _handle_error(self, error_msg: str):
         """[MAIN-THREAD] Zeigt Fehler an und setzt UI zurück."""
-        print(error_msg)
-        tk.messagebox.showerror("Verarbeitungsfehler", error_msg, parent=self)
+        print(f"FEHLER: {error_msg}")  # Logge den Fehler
+
+        # UI zurücksetzen
+        self._set_processing(False)
+
+        # Zeige die Fehlermeldung dem Benutzer
+        messagebox.showerror("Verarbeitungsfehler", error_msg, parent=self)
 
         # Versuche, den Player wiederherzustellen, falls das Medium entfernt wurde
         try:
-            self._set_processing(False)
-            media = self.vlc_instance.media_new(self.video_path)
-            self.media_player.set_media(media)
-            self.play_pause_btn.config(text="▶")
+            # Player braucht Zeit, um sich zu erholen, wenn Medium weg war
+            self.after(100, self._reload_media_after_error)
         except Exception as e:
             print(f"Konnte Player nach Fehler nicht wiederherstellen: {e}")
             # Wenn alles fehlschlägt, Dialog schließen
             self._on_cancel()
 
+    def _reload_media_after_error(self):
+        """Lädt das Medium neu, falls es nach einem Fehler entfernt wurde."""
+        try:
+            # Prüfe, ob das Fenster noch existiert
+            if not self.winfo_exists(): return
+
+            # Prüfe, ob der Player noch eine Medieninstanz hat
+            current_media = self.media_player.get_media()
+            if not current_media:
+                print("Lade Medium nach Fehler neu...")
+                media = self.vlc_instance.media_new(self.video_path)
+                self.media_player.set_media(media)
+                self.play_pause_btn.config(text="▶")
+                # Zeit auf 0 setzen
+                self.after(50, lambda: self.media_player.set_time(0))
+                self.after(100, lambda: self._on_time_changed(None))  # UI Update erzwingen
+        except Exception as e:
+            print(f"Fehler beim Neuladen des Mediums: {e}")
+
     def _handle_processing_complete(self, result: dict):
         """[MAIN-THREAD] Wird aufgerufen, wenn Cut/Split erfolgreich war."""
+        print("Verarbeitung erfolgreich abgeschlossen.")
+        # KORREKTUR: Setze UI zurück *bevor* der Callback die App benachrichtigt
+        self._set_processing(False)
+
+        # Räume VLC-Ressourcen auf *bevor* der Dialog zerstört wird
         self._cleanup()
+
+        # WICHTIG: grab_release() vor destroy(), sonst kann Hauptfenster blockieren
+        self.grab_release()
+        self.destroy()  # Dialog selbst schließen
+
+        # App benachrichtigen, dass alles fertig ist
         self.on_complete_callback(result)
-        # Das destroy() wird in app.py's _on_cutter_dialog_close erledigt
 
     def _cleanup(self):
-        """Stoppt den Player und den Updater."""
-        self._stop_updater()
-        if self.media_player:
+        """Stoppt den Player und gibt VLC-Ressourcen frei."""
+        # self._stop_updater() # Nicht mehr nötig
+        if hasattr(self, 'media_player') and self.media_player:
             try:
+                # Events entfernen, um Fehler nach dem Schließen zu vermeiden
+                events = self.media_player.event_manager()
+                events.event_detach(vlc.EventType.MediaPlayerEndReached)
+                events.event_detach(vlc.EventType.MediaPlayerTimeChanged)
+                events.event_detach(vlc.EventType.MediaPlayerPlaying)
+                events.event_detach(vlc.EventType.MediaPlayerPaused)
+                events.event_detach(vlc.EventType.MediaPlayerStopped)
+
                 if self.media_player.is_playing():
                     self.media_player.stop()
                 self.media_player.set_media(None)  # Explizit freigeben
                 self.media_player.release()
+                self.media_player = None  # Referenz entfernen
             except Exception as e:
                 print(f"Fehler beim Freigeben des Media-Players: {e}")
-        if self.vlc_instance:
+        if hasattr(self, 'vlc_instance') and self.vlc_instance:
             try:
                 self.vlc_instance.release()
+                self.vlc_instance = None  # Referenz entfernen
             except Exception as e:
                 print(f"Fehler beim Freigeben der VLC-Instanz: {e}")
 
     def _on_end_reached(self, event):
         """Setzt den Player auf Anfang zurück, wenn das Ende erreicht ist."""
-        self._stop_updater()  # KORREKTUR: Updater stoppen
+        # self._stop_updater() # Nicht mehr nötig
         self.play_pause_btn.config(text="▶")
+        # Setze Zeit auf 0 und stoppe den Player explizit
         self.after(50, lambda: (
-            self.media_player.stop(),  # Stoppt den Player
-            self._draw_playhead(0),  # Setzt Playhead auf 0
+            self.media_player.stop(),  # Wichtig: Stoppen, nicht nur Zeit setzen
+            self._draw_playhead(0),
             self.time_label.config(text=f"{self._format_time(0)} / {self._format_time(self.total_duration_ms)}")
         ))
-

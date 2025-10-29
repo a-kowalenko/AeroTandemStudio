@@ -109,6 +109,12 @@ class VideoPreview:
         Public entry point to update the preview.
         Handles cancellation of an ongoing process before starting a new one.
         """
+        # KORREKTUR: Cleanup muss Player entladen, bevor es hier aufgerufen wird.
+        # Rufen Sie zuerst clear_preview() auf, wenn Sie neu starten.
+        # Hier rufen wir _cleanup_temp_copies auf, was sicher sein sollte, WENN
+        # clear_preview() (das den Player entlädt) zuvor aufgerufen wurde.
+        # Wir rufen _cleanup_temp_copies HIER auf, um sicherzustellen, dass alte
+        # Verzeichnisse weg sind, BEVOR ein neuer Thread startet.
         self._cleanup_temp_copies()
 
         if self.processing_thread and self.processing_thread.is_alive():
@@ -188,7 +194,9 @@ class VideoPreview:
             self._check_for_cancellation()
 
             filename = os.path.basename(original_path)
-            copy_path = os.path.join(self.temp_dir, f"{i:03d}_{filename}")
+            # Ersetze ungültige Zeichen im Dateinamen für den Fall der Fälle
+            safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+            copy_path = os.path.join(self.temp_dir, f"{i:03d}_{safe_filename}")
 
             if needs_reencoding:
                 # --- Fall B: Neukodierung ---
@@ -240,7 +248,8 @@ class VideoPreview:
         cmd = [
             "ffmpeg", "-y", "-i", input_path,
             "-vf",
-            f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease,pad={tp['width']}:{tp['height']}:-1:-1:color=black,fps={tp['fps']},format={tp['pix_fmt']}",
+            f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']},format={tp['pix_fmt']}",
+            # Zentriert
             "-c:v", tp['video_codec'], "-preset", "fast", "-crf", "23",
             "-c:a", tp['audio_codec'], "-b:a", "128k", "-ar", str(tp['audio_sample_rate']), "-ac",
             str(tp['audio_channels']),
@@ -250,6 +259,10 @@ class VideoPreview:
         self.ffmpeg_process = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                                universal_newlines=True, encoding='utf-8', errors='replace',
                                                creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+        # Zeige FFmpeg-Output in der Konsole, wenn Debugging benötigt wird
+        # for line in self.ffmpeg_process.stderr:
+        #    print(f"[FFmpeg]: {line.strip()}")
 
         while self.ffmpeg_process.poll() is None:
             if self.cancellation_event.is_set():
@@ -265,6 +278,9 @@ class VideoPreview:
         self.ffmpeg_process = None
 
         if returncode != 0:
+            # Versuche, den stderr-Output bei einem Fehler zu lesen (kann blockieren, daher mit Vorsicht)
+            # err_output = self.ffmpeg_process.stderr.read()
+            # print(f"FFMPEG Error Output: {err_output}")
             raise Exception(f"FFmpeg-Fehler (Code {returncode}) bei der Neukodierung von {input_path}")
 
     def _create_combined_preview(self, video_paths):
@@ -303,10 +319,11 @@ class VideoPreview:
                     self.parent.after(0, self._update_ui_error, "Vorschau konnte nicht erstellt werden")
 
         except Exception as e:
-            if not self.cancellation_event.is_set():
-                self.parent.after(0, self._update_ui_error, f"Fehler: {str(e)}")
-            else:
+            # Fange die Abbruch-Exception von _check_for_cancellation ab
+            if "abgebrochen" in str(e) or self.cancellation_event.is_set():
                 self.parent.after(0, self._update_ui_cancelled)
+            else:
+                self.parent.after(0, self._update_ui_error, f"Fehler: {str(e)}")
         finally:
             if self.parent.winfo_exists():
                 self.parent.after(0, self._finalize_processing)
@@ -388,6 +405,7 @@ class VideoPreview:
         formats = []
         for video_path in video_paths:
             try:
+                self._check_for_cancellation()  # Prüfe vor jedem blockierenden Aufruf
                 result = subprocess.run(['ffprobe', '-v', 'quiet', '-print_format', 'json',
                                          '-show_format', '-show_streams', video_path],
                                         capture_output=True, text=True, timeout=10,
@@ -405,6 +423,7 @@ class VideoPreview:
                 else:
                     formats.append({'error': 'FFprobe failed'})
             except Exception as e:
+                if "abgebrochen" in str(e): raise  # Abbruch weiterleiten
                 formats.append({'error': str(e)})
         first_format = next((f for f in formats if 'error' not in f), None)
         if not first_format: return {"compatible": False, "details": "No valid video streams found."}
@@ -676,13 +695,19 @@ class VideoPreview:
         self.pending_restart_callback = None
         self.cancel_creation()
 
-        self._cleanup_temp_copies()  # Löscht temp_dir, video_copies_map und metadata_cache
+        # KORREKTUR: Zuerst Player entladen, um WinError 32 zu vermeiden
+        if self.app and hasattr(self.app, 'video_player') and self.app.video_player:
+            self.app.video_player.unload_video()
 
+        # Erst DANACH die kombinierten Dateien löschen
         if self.combined_video_path and os.path.exists(self.combined_video_path):
             try:
                 os.remove(self.combined_video_path)
             except OSError as e:
                 print(f"Could not delete temp preview file: {e}")
+
+        # Und die restlichen Kopien
+        self._cleanup_temp_copies()  # Löscht temp_dir, video_copies_map und metadata_cache
 
         self.combined_video_path = None
         self.last_video_paths = None
@@ -692,9 +717,6 @@ class VideoPreview:
         self.action_button.config(text="⏹ Erstellung abbrechen",
                                   command=self.cancel_creation,
                                   state="disabled")
-
-        if self.app and hasattr(self.app, 'video_player') and self.app.video_player:
-            self.app.video_player.unload_video()
 
     def clear_preview_info(self):
         """Helper to clear all text labels."""

@@ -330,7 +330,9 @@ class VideoProcessor:
         return full_output_path
 
     def _create_video_with_watermark(self, input_video_path, output_path, video_params):
-        """Erstellt eine Video-Version mit Wasserzeichen über dem gesamten Video"""
+        """
+        Erstellt eine Video-Version mit Wasserzeichen über dem gesamten Video.
+        """
 
         # Pfad zum Wasserzeichen-Bild
         wasserzeichen_path = os.path.join(os.path.dirname(self.hintergrund_path), "skydivede_wasserzeichen.png")
@@ -338,20 +340,38 @@ class VideoProcessor:
         if not os.path.exists(wasserzeichen_path):
             raise FileNotFoundError("skydivede_wasserzeichen.png fehlt im assets/ Ordner")
 
-        # Wasserzeichen-Filter: mittig positioniert, volle Breite des Videos
+        # Wasserzeichen-Video in 240p erstellen
+        target_width = 320
+        target_height = 240
+
+        # Wasserzeichen-Filter mit Downscaling + Overlay
         watermark_filter = (
-            f"[1]scale={video_params['width']}:{video_params['height']}:force_original_aspect_ratio=decrease:"
-            f"eval=frame[wm_scaled];"
-            f"[0][wm_scaled]overlay=(W-w)/2:(H-h)/2"
+            f"[0]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p[v];"
+            f"[1]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease:eval=init[wm_scaled];"
+            f"[v][wm_scaled]overlay=(W-w)/2:(H-h)/2"
         )
+
+        # Bestimme Video-Codec basierend auf Input
+        vcodec = video_params.get('vcodec', 'h264')
+        if vcodec in ['hevc', 'h265']:
+            codec_name = 'libx265'
+        else:
+            codec_name = 'libx264'
 
         subprocess.run([
             "ffmpeg", "-y",
             "-i", input_video_path,
             "-i", wasserzeichen_path,
             "-filter_complex", watermark_filter,
-            "-c:a", "copy",
+            # VIDEO-ENCODING OPTIMIERT FÜR GESCHWINDIGKEIT:
+            "-c:v", codec_name,
+            "-preset", "ultrafast",     # Schnellstes Preset (~10x schneller als medium)
+            "-crf", "28",               # Höheres CRF = schneller + kleinere Datei (für Wasserzeichen-Version OK)
+            "-tune", "fastdecode",      # Optimiert für schnelles Abspielen
             "-movflags", "+faststart",
+            # Audio entfernen (kein Sound im Wasserzeichen-Video)
+            "-an",                      # Kein Audio → noch schneller + kleinere Datei
             output_path
         ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 

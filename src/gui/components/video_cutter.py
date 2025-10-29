@@ -782,7 +782,7 @@ class VideoCutterDialog(tk.Toplevel):
         """
         [THREAD] Führt FFmpeg aus, um die Datei zu teilen.
         Teil 1 überschreibt das Original, Teil 2 wird neu erstellt.
-        Behält das Originalformat bei (Codec, Auflösung, FPS, etc.).
+        Strategie: Erst Stream-Copy (schnell, kein Format-Wechsel), dann bei Bedarf Re-Encoding.
         """
         temp_part1_path = None
         part2_path = None
@@ -794,10 +794,12 @@ class VideoCutterDialog(tk.Toplevel):
 
             split_sec = split_time_ms / 1000.0
 
-            # NEU: Video-Info abrufen, um Originalformat zu verwenden
+            # Video-Info abrufen für Re-Encoding-Fallback
             video_info = self._get_video_info(input_path)
 
-            # --- Teil 1: Versuche Stream-Kopie ---
+            # --- TEIL 1: Stream-Copy bevorzugen (Format bleibt gleich) ---
+            print(f"Split Teil 1: Versuche Stream-Copy bis {split_sec}s...")
+
             cmd1 = [
                 "ffmpeg", "-y",
                 "-i", input_path,
@@ -808,26 +810,30 @@ class VideoCutterDialog(tk.Toplevel):
                 temp_part1_path
             ]
 
-            print(f"Starte FFmpeg (Split 1 mit Stream-Kopie): {' '.join(cmd1)}")
+            print(f"Starte FFmpeg (Split Teil 1 - Stream-Copy): {' '.join(cmd1)}")
             result1 = subprocess.run(cmd1, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
-            # Falls Stream-Kopie fehlschlägt, neu kodieren mit Originalparametern
+            # Falls Stream-Copy fehlschlägt, Re-Encoding mit korrekten Codec-Namen
             if result1.returncode != 0:
-                print("Stream-Kopie für Teil 1 fehlgeschlagen, kodiere mit Originalparametern neu...")
+                print("Stream-Copy für Teil 1 fehlgeschlagen, verwende Re-Encoding...")
 
                 cmd1 = [
-                    "ffmpeg", "-y", "-i", input_path,
+                    "ffmpeg", "-y",
+                    "-i", input_path,
                     "-t", str(split_sec),
                 ]
 
-                # Video-Codec und Parameter
-                if video_info['vcodec'] in ['h264', 'hevc']:
-                    cmd1.extend(["-c:v", "lib" + video_info['vcodec']])
-                else:
+                # Video-Codec KORRIGIERT: h264 -> libx264, hevc -> libx265
+                if video_info['vcodec'] == 'h264':
                     cmd1.extend(["-c:v", "libx264"])
+                elif video_info['vcodec'] == 'hevc':
+                    cmd1.extend(["-c:v", "libx265"])
+                else:
+                    cmd1.extend(["-c:v", "libx264"])  # Fallback
 
                 cmd1.extend([
-                    "-preset", "fast", "-crf", "23",
+                    "-crf", "18",  # Sehr hohe Qualität
+                    "-preset", "medium",
                     "-pix_fmt", video_info['pix_fmt'],
                     "-s", f"{video_info['width']}x{video_info['height']}",
                     "-r", str(video_info['fps']),
@@ -840,7 +846,7 @@ class VideoCutterDialog(tk.Toplevel):
                     else:
                         cmd1.extend(["-c:a", "aac"])
                     cmd1.extend([
-                        "-b:a", "128k",
+                        "-b:a", "192k",
                         "-ar", str(video_info['sample_rate']),
                         "-ac", str(video_info['channels']),
                     ])
@@ -853,47 +859,53 @@ class VideoCutterDialog(tk.Toplevel):
                     temp_part1_path
                 ])
 
-                print(f"Starte FFmpeg (Split 1 mit Neukodierung): {' '.join(cmd1)}")
+                print(f"Starte FFmpeg (Split Teil 1 - Re-Encoding): {' '.join(cmd1)}")
                 result1 = subprocess.run(cmd1, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
             if result1.returncode != 0:
                 raise subprocess.CalledProcessError(result1.returncode, cmd1, result1.stdout, result1.stderr)
 
-            # --- Teil 2: Versuche Stream-Kopie ---
+            # --- TEIL 2: Stream-Copy mit -ss VOR -i (startet bei Keyframe) ---
+            print(f"Split Teil 2: Versuche Stream-Copy ab {split_sec}s...")
+
             cmd2 = [
                 "ffmpeg", "-y",
+                "-ss", str(split_sec),  # VOR -i für Input-Seeking (schneller, sucht Keyframe)
                 "-i", input_path,
-                "-ss", str(split_sec),
                 "-c", "copy",
                 "-avoid_negative_ts", "make_zero",
                 "-map", "0:v:0?", "-map", "0:a:0?",
                 part2_path
             ]
 
-            print(f"Starte FFmpeg (Split 2 mit Stream-Kopie): {' '.join(cmd2)}")
+            print(f"Starte FFmpeg (Split Teil 2 - Stream-Copy): {' '.join(cmd2)}")
             result2 = subprocess.run(cmd2, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
-            # Falls Stream-Kopie fehlschlägt, neu kodieren mit Originalparametern
+            # Falls Stream-Copy fehlschlägt, Re-Encoding mit korrekten Codec-Namen
             if result2.returncode != 0:
-                print("Stream-Kopie für Teil 2 fehlgeschlagen, kodiere mit Originalparametern neu...")
+                print("Stream-Copy für Teil 2 fehlgeschlagen, verwende Re-Encoding...")
 
                 cmd2 = [
                     "ffmpeg", "-y",
+                    "-ss", str(split_sec),  # VOR -i für schnelleres Seeking
                     "-i", input_path,
-                    "-ss", str(split_sec),
                 ]
 
-                # Video-Codec und Parameter
-                if video_info['vcodec'] in ['h264', 'hevc']:
-                    cmd2.extend(["-c:v", "lib" + video_info['vcodec']])
-                else:
+                # Video-Codec KORRIGIERT: h264 -> libx264, hevc -> libx265
+                if video_info['vcodec'] == 'h264':
                     cmd2.extend(["-c:v", "libx264"])
+                elif video_info['vcodec'] == 'hevc':
+                    cmd2.extend(["-c:v", "libx265"])
+                else:
+                    cmd2.extend(["-c:v", "libx264"])  # Fallback
 
                 cmd2.extend([
-                    "-preset", "fast", "-crf", "23",
+                    "-crf", "18",  # Sehr hohe Qualität
+                    "-preset", "medium",
                     "-pix_fmt", video_info['pix_fmt'],
                     "-s", f"{video_info['width']}x{video_info['height']}",
                     "-r", str(video_info['fps']),
+                    "-force_key_frames", "expr:gte(t,0)",  # Keyframe am Anfang
                 ])
 
                 # Audio-Parameter
@@ -903,7 +915,7 @@ class VideoCutterDialog(tk.Toplevel):
                     else:
                         cmd2.extend(["-c:a", "aac"])
                     cmd2.extend([
-                        "-b:a", "128k",
+                        "-b:a", "192k",
                         "-ar", str(video_info['sample_rate']),
                         "-ac", str(video_info['channels']),
                     ])
@@ -916,7 +928,7 @@ class VideoCutterDialog(tk.Toplevel):
                     part2_path
                 ])
 
-                print(f"Starte FFmpeg (Split 2 mit Neukodierung): {' '.join(cmd2)}")
+                print(f"Starte FFmpeg (Split Teil 2 - Re-Encoding): {' '.join(cmd2)}")
                 result2 = subprocess.run(cmd2, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
             if result2.returncode != 0:

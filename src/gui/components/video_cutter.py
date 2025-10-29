@@ -360,27 +360,46 @@ class VideoCutterDialog(tk.Toplevel):
         cmd.extend([
             "-crf", "18",  # Sehr hohe Qualität (niedriger = besser)
             "-preset", "medium",
-            "-pix_fmt", video_info['pix_fmt'],
-            "-s", f"{video_info['width']}x{video_info['height']}",
-            "-r", str(video_info['fps']),
+            "-pix_fmt", video_info.get('pix_fmt', 'yuv420p'),
         ])
+
+        # FPS nur wenn vorhanden und gültig
+        if video_info.get('fps') and video_info['fps'] > 0:
+            cmd.extend(["-r", str(video_info['fps'])])
 
         # Keyframe am Anfang erzwingen (wichtig für Segment 1)
         if force_keyframe_at_start:
             cmd.extend(["-force_key_frames", "expr:gte(t,0)"])
 
-        # Audio-Parameter (verlustfrei, wenn möglich)
-        if video_info['acodec']:
-            if video_info['acodec'] in ['aac', 'mp3']:
-                cmd.extend(["-c:a", video_info['acodec']])
-            else:
+        # Audio-Parameter (korrekte Codec-Namen)
+        if video_info.get('acodec'):
+            # Verwende korrekte FFmpeg Encoder-Namen
+            if video_info['acodec'] == 'aac':
                 cmd.extend(["-c:a", "aac"])
+            elif video_info['acodec'] == 'mp3':
+                cmd.extend(["-c:a", "libmp3lame"])  # KORRIGIERT: mp3 -> libmp3lame
+            elif video_info['acodec'] == 'opus':
+                cmd.extend(["-c:a", "libopus"])
+            elif video_info['acodec'] == 'vorbis':
+                cmd.extend(["-c:a", "libvorbis"])
+            else:
+                cmd.extend(["-c:a", "aac"])  # Sicherer Fallback
 
-            cmd.extend([
-                "-b:a", "192k",  # Hohe Audioqualität
-                "-ar", str(video_info['sample_rate']),
-                "-ac", str(video_info['channels']),
-            ])
+            # Audio-Parameter nur wenn gültig
+            if video_info.get('audio_bitrate'):
+                try:
+                    bitrate = int(video_info['audio_bitrate']) // 1000  # Bits zu Kbits
+                    cmd.extend(["-b:a", f"{min(bitrate, 320)}k"])  # Max 320k
+                except:
+                    cmd.extend(["-b:a", "192k"])
+            else:
+                cmd.extend(["-b:a", "192k"])
+
+            if video_info.get('sample_rate'):
+                cmd.extend(["-ar", str(video_info['sample_rate'])])
+
+            if video_info.get('channels'):
+                cmd.extend(["-ac", str(min(int(video_info['channels']), 2))])  # Max Stereo
         else:
             cmd.extend(["-an"])  # Kein Audio
 

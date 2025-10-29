@@ -262,20 +262,26 @@ class VideoPreview:
             "ffmpeg", "-y", "-i", input_path,
             "-vf",
             f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']},format={tp['pix_fmt']}",
-            # Zentriert
             "-c:v", tp['video_codec'], "-preset", "fast", "-crf", "23",
-            "-c:a", tp['audio_codec'], "-b:a", "128k", "-ar", str(tp['audio_sample_rate']), "-ac",
-            str(tp['audio_channels']),
-            "-movflags", "+faststart", output_path
+            "-c:a", tp['audio_codec'], "-b:a", "128k", "-ar", str(tp['audio_sample_rate']), "-ac", str(tp['audio_channels']),
+            "-movflags", "+faststart",
+            "-map", "0:v:0", "-map", "0:a:0?",  # WICHTIG: Video ist pflicht, Audio optional
+            output_path
         ]
 
-        self.ffmpeg_process = subprocess.Popen(cmd, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                               universal_newlines=True, encoding='utf-8', errors='replace',
-                                               creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+        # WICHTIG: Capture stderr für Fehlerdiagnose
+        self.ffmpeg_process = subprocess.Popen(
+            cmd,
+            stderr=subprocess.PIPE,  # Geändert von DEVNULL
+            stdout=subprocess.DEVNULL,
+            universal_newlines=True,
+            encoding='utf-8',
+            errors='replace',
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+        )
 
-        # Zeige FFmpeg-Output in der Konsole, wenn Debugging benötigt wird
-        # for line in self.ffmpeg_process.stderr:
-        #    print(f"[FFmpeg]: {line.strip()}")
+        # Sammle stderr für Fehlerdiagnose
+        stderr_output = []
 
         while self.ffmpeg_process.poll() is None:
             if self.cancellation_event.is_set():
@@ -284,17 +290,46 @@ class VideoPreview:
                 self.ffmpeg_process.wait()
                 self.ffmpeg_process = None
                 raise Exception("Neukodierung vom Benutzer abgebrochen.")
+
+            # Lese stderr in kleinen Chunks (non-blocking)
+            try:
+                import select
+                if hasattr(select, 'select'):  # Unix
+                    ready = select.select([self.ffmpeg_process.stderr], [], [], 0.1)[0]
+                    if ready:
+                        line = self.ffmpeg_process.stderr.readline()
+                        if line:
+                            stderr_output.append(line)
+            except:
+                pass  # Windows hat kein select für pipes
+
             time.sleep(0.1)
 
-        self.ffmpeg_process.wait()
+        # Warte auf Prozess-Ende und hole restlichen stderr
+        stdout, stderr = self.ffmpeg_process.communicate()
+        if stderr:
+            stderr_output.append(stderr)
+
         returncode = self.ffmpeg_process.returncode
         self.ffmpeg_process = None
 
         if returncode != 0:
-            # Versuche, den stderr-Output bei einem Fehler zu lesen (kann blockieren, daher mit Vorsicht)
-            # err_output = self.ffmpeg_process.stderr.read()
-            # print(f"FFMPEG Error Output: {err_output}")
-            raise Exception(f"FFmpeg-Fehler (Code {returncode}) bei der Neukodierung von {input_path}")
+            # Zeige die letzten Zeilen des stderr-Outputs für Debugging
+            stderr_text = ''.join(stderr_output)
+            last_lines = '\n'.join(stderr_text.split('\n')[-20:])  # Letzte 20 Zeilen
+            print(f"\n=== FFmpeg Fehler bei {os.path.basename(input_path)} ===")
+            print(f"Returncode: {returncode}")
+            print(f"Letzter FFmpeg Output:\n{last_lines}")
+            print("=" * 50)
+
+            # Gebe detaillierte Fehlermeldung
+            error_msg = f"FFmpeg-Fehler (Code {returncode}) bei der Neukodierung von {input_path}"
+            if "Invalid" in stderr_text or "does not contain" in stderr_text:
+                error_msg += "\nMögliches Problem: Video-/Audio-Stream fehlt oder ist ungültig"
+            elif "Conversion failed" in stderr_text:
+                error_msg += "\nMögliches Problem: Filter-Chain oder Codec-Fehler"
+
+            raise Exception(error_msg)
 
     def _create_combined_preview(self, video_paths):
         """
@@ -305,6 +340,10 @@ class VideoPreview:
             if self.cancellation_event.is_set():
                 self.parent.after(0, self._update_ui_cancelled)
                 return
+
+            # Initialisiere Variablen
+            needs_reencoding = False
+            temp_copy_paths = []
 
             # NEU: Prüfe, ob wir bereits Kopien für alle Videos haben
             all_videos_cached = all(original_path in self.video_copies_map for original_path in video_paths)
@@ -319,24 +358,29 @@ class VideoPreview:
                 if all(os.path.exists(copy_path) for copy_path in temp_copy_paths):
                     self.parent.after(0, lambda: self.encoding_label.config(
                         text="Encoding: Verwende existierende Kopien"))
+                    print(f"Alle {len(temp_copy_paths)} Kopien existieren noch.")
                 else:
                     # Mindestens eine Kopie fehlt, muss neu erstellt werden
                     print("Einige Kopien fehlen, erstelle Videos neu...")
                     all_videos_cached = False
+                    temp_copy_paths = []  # Zurücksetzen
 
             if not all_videos_cached:
                 # Neue oder geänderte Video-Liste, Format prüfen und ggf. neu kodieren
+                print(f"Prüfe Format von {len(video_paths)} Videos...")
                 format_info = self._check_video_formats(video_paths)
                 needs_reencoding = not format_info["compatible"]
                 self.parent.after(0, self._update_encoding_info, format_info)
 
                 # Diese Methode füllt jetzt auch self.metadata_cache
+                print(f"Erstelle Video-Kopien (Re-Encoding: {needs_reencoding})...")
                 temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding)
 
             if self.cancellation_event.is_set():
                 self.parent.after(0, self._update_ui_cancelled)
                 return
 
+            print(f"Starte Kombinierung von {len(temp_copy_paths)} Videos...")
             self.parent.after(0, lambda: self.status_label.config(
                 text="Kombiniere Videos (schnell)...", fg="blue"))
 
@@ -347,9 +391,11 @@ class VideoPreview:
                 return
 
             if self.combined_video_path and os.path.exists(self.combined_video_path):
+                print(f"✅ Vorschau erfolgreich erstellt: {self.combined_video_path}")
                 self.parent.after(0, self._update_ui_success, temp_copy_paths, needs_reencoding)
             else:
                 if not self.cancellation_event.is_set():
+                    print("❌ Vorschau konnte nicht erstellt werden")
                     self.parent.after(0, self._update_ui_error, "Vorschau konnte nicht erstellt werden")
 
         except Exception as e:
@@ -357,6 +403,9 @@ class VideoPreview:
             if "abgebrochen" in str(e) or self.cancellation_event.is_set():
                 self.parent.after(0, self._update_ui_cancelled)
             else:
+                print(f"❌ Fehler in _create_combined_preview: {e}")
+                import traceback
+                traceback.print_exc()
                 self.parent.after(0, self._update_ui_error, f"Fehler: {str(e)}")
         finally:
             if self.parent.winfo_exists():
@@ -390,12 +439,17 @@ class VideoPreview:
         try:
             with open(concat_list_path, "w", encoding="utf-8") as f:
                 for video_path in video_paths:
-                    f.write(f"file '{os.path.abspath(video_path)}'\n")
+                    # Escape Pfad für FFmpeg concat (besonders wichtig für Windows-Pfade)
+                    escaped_path = os.path.abspath(video_path).replace('\\', '/')
+                    f.write(f"file '{escaped_path}'\n")
         except Exception as e:
             print(f"Fehler beim Schreiben der concat-Liste: {e}")
             return None
 
-        if self.cancellation_event.is_set(): return None
+        if self.cancellation_event.is_set():
+            return None
+
+        print(f"Kombiniere {len(video_paths)} Videos mit FFmpeg concat...")
 
         self.ffmpeg_process = subprocess.Popen([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path,
@@ -403,6 +457,9 @@ class VideoPreview:
         ], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
             universal_newlines=True, encoding='utf-8', errors='replace',
             creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+        # WICHTIG: Lese stderr um Pipe-Buffer-Overflow zu verhindern (verhindert Hängen!)
+        stderr_lines = []
 
         while self.ffmpeg_process.poll() is None:
             if self.cancellation_event.is_set():
@@ -415,22 +472,47 @@ class VideoPreview:
                 except OSError:
                     pass
                 return None
-            time.sleep(0.1)
 
-        self.ffmpeg_process.wait()
+            # Lese stderr um Buffer nicht volllaufen zu lassen
+            try:
+                line = self.ffmpeg_process.stderr.readline()
+                if line:
+                    stderr_lines.append(line)
+                    # Zeige Fortschritt (optional)
+                    if 'time=' in line.lower():
+                        # Extrahiere Zeit für Fortschrittsanzeige
+                        pass
+            except:
+                pass
+
+            time.sleep(0.05)  # Kürzeres Intervall für bessere Responsiveness
+
+        # Hole restlichen stderr-Output
+        try:
+            remaining_stderr = self.ffmpeg_process.stderr.read()
+            if remaining_stderr:
+                stderr_lines.append(remaining_stderr)
+        except:
+            pass
+
         returncode = self.ffmpeg_process.returncode
         self.ffmpeg_process = None
 
         try:
             os.remove(concat_list_path)
         except OSError as e:
-            print(f"Error removing temp file: {e}")
+            print(f"Fehler beim Löschen der temp. Datei: {e}")
 
         if returncode == 0:
+            print(f"✅ Kombiniertes Video erstellt: {output_path}")
             return output_path
         else:
             if not self.cancellation_event.is_set():
-                print(f"Fast combine failed (Code {returncode}).")
+                # Zeige FFmpeg-Fehler
+                stderr_text = ''.join(stderr_lines)
+                last_lines = '\n'.join(stderr_text.split('\n')[-15:])
+                print(f"❌ Fast combine fehlgeschlagen (Code {returncode}).")
+                print(f"FFmpeg Output:\n{last_lines}")
             return None
 
     def _check_video_formats(self, video_paths):

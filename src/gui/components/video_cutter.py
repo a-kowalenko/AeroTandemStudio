@@ -199,18 +199,22 @@ class VideoCutterDialog(tk.Toplevel):
         """Liest Dauer und FPS eines Videos mit ffprobe aus."""
         cmd = [
             "ffprobe", "-v", "quiet", "-print_format", "json",
-            "-show_streams", video_path
+            "-show_streams", "-show_format", video_path
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True,
                                 creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-        streams = json.loads(result.stdout)["streams"]
+        data = json.loads(result.stdout)
+        streams = data.get("streams", [])
+        format_info = data.get("format", {})
+
         video_stream = next((s for s in streams if s['codec_type'] == 'video'), None)
+        audio_stream = next((s for s in streams if s['codec_type'] == 'audio'), None)
 
         if not video_stream:
             raise ValueError("Kein Video-Stream gefunden.")
 
         # Dauer
-        duration_s_str = video_stream.get('duration', '0')
+        duration_s_str = video_stream.get('duration') or format_info.get('duration', '0')
         duration_ms = int(float(duration_s_str) * 1000)
 
         # FPS
@@ -221,7 +225,34 @@ class VideoCutterDialog(tk.Toplevel):
         except:
             fps = 30.0
 
-        return {"duration_ms": duration_ms, "fps": fps}
+        # NEU: Detaillierte Video-Parameter erfassen
+        video_info = {
+            "duration_ms": duration_ms,
+            "fps": fps,
+            "width": video_stream.get('width', 1920),
+            "height": video_stream.get('height', 1080),
+            "vcodec": video_stream.get('codec_name', 'h264'),
+            "pix_fmt": video_stream.get('pix_fmt', 'yuv420p'),
+            "video_bitrate": video_stream.get('bit_rate'),
+        }
+
+        # Audio-Parameter (falls vorhanden)
+        if audio_stream:
+            video_info.update({
+                "acodec": audio_stream.get('codec_name', 'aac'),
+                "audio_bitrate": audio_stream.get('bit_rate'),
+                "sample_rate": audio_stream.get('sample_rate', '48000'),
+                "channels": audio_stream.get('channels', 2),
+            })
+        else:
+            video_info.update({
+                "acodec": None,
+                "audio_bitrate": None,
+                "sample_rate": None,
+                "channels": None,
+            })
+
+        return video_info
 
     def _create_widgets(self):
         """Erstellt die UI-Elemente des Dialogs."""
@@ -635,6 +666,7 @@ class VideoCutterDialog(tk.Toplevel):
     def _run_cut_task(self, start_ms: int, end_ms: int):
         """
         [THREAD] Führt FFmpeg aus, um die Datei zu trimmen und zu überschreiben.
+        Behält das Originalformat bei (Codec, Auflösung, FPS, etc.).
         """
         try:
             input_path = self.video_path
@@ -643,20 +675,78 @@ class VideoCutterDialog(tk.Toplevel):
             start_sec = start_ms / 1000.0
             duration_sec = (end_ms - start_ms) / 1000.0
 
+            # NEU: Video-Info abrufen, um Originalformat zu verwenden
+            video_info = self._get_video_info(input_path)
+
+            # Versuche Stream-Kopie (schnell, verlustfrei)
+            # Nur wenn keyframe-genau geschnitten werden kann
             cmd = [
                 "ffmpeg", "-y",
-                "-i", input_path,  # Input zuerst für genaueres Seeking mit -ss
-                "-ss", str(start_sec),  # Startzeit (genauer nach -i)
-                "-t", str(duration_sec),  # Dauer
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",  # Re-encode
-                "-c:a", "aac", "-b:a", "128k",  # Re-encode Audio
-                # "-avoid_negative_ts", "make_zero", # Sicherstellen, dass Zeitstempel bei 0 beginnt
-                "-map", "0:v:0?", "-map", "0:a:0?",  # Nur Video- und Audio-Stream
+                "-ss", str(start_sec),
+                "-i", input_path,
+                "-t", str(duration_sec),
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-map", "0:v:0?", "-map", "0:a:0?",
                 temp_output_path
             ]
 
-            print(f"Starte FFmpeg (Cut): {' '.join(cmd)}")
+            print(f"Starte FFmpeg (Cut mit Stream-Kopie): {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+            # Falls Stream-Kopie fehlschlägt, neu kodieren mit Originalparametern
+            if result.returncode != 0:
+                print("Stream-Kopie fehlgeschlagen, kodiere mit Originalparametern neu...")
+
+                # Baue FFmpeg-Befehl mit Originalparametern
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-i", input_path,
+                    "-ss", str(start_sec),
+                    "-t", str(duration_sec),
+                ]
+
+                # Video-Codec und Parameter
+                if video_info['vcodec'] in ['h264', 'hevc']:
+                    cmd.extend(["-c:v", "lib" + video_info['vcodec']])
+                else:
+                    cmd.extend(["-c:v", "libx264"])  # Fallback
+
+                cmd.extend([
+                    "-preset", "fast",
+                    "-crf", "23",
+                    "-pix_fmt", video_info['pix_fmt'],
+                ])
+
+                # Originalauflösung und FPS beibehalten
+                cmd.extend([
+                    "-s", f"{video_info['width']}x{video_info['height']}",
+                    "-r", str(video_info['fps']),
+                ])
+
+                # Audio-Codec und Parameter (falls vorhanden)
+                if video_info['acodec']:
+                    if video_info['acodec'] in ['aac', 'mp3']:
+                        cmd.extend(["-c:a", video_info['acodec']])
+                    else:
+                        cmd.extend(["-c:a", "aac"])  # Fallback
+
+                    cmd.extend([
+                        "-b:a", "128k",
+                        "-ar", str(video_info['sample_rate']),
+                        "-ac", str(video_info['channels']),
+                    ])
+                else:
+                    cmd.extend(["-an"])  # Kein Audio
+
+                cmd.extend([
+                    "-movflags", "+faststart",
+                    "-map", "0:v:0?", "-map", "0:a:0?",
+                    temp_output_path
+                ])
+
+                print(f"Starte FFmpeg (Cut mit Neukodierung): {' '.join(cmd)}")
+                result = subprocess.run(cmd, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
             if result.returncode != 0:
                 raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
@@ -692,55 +782,149 @@ class VideoCutterDialog(tk.Toplevel):
         """
         [THREAD] Führt FFmpeg aus, um die Datei zu teilen.
         Teil 1 überschreibt das Original, Teil 2 wird neu erstellt.
+        Behält das Originalformat bei (Codec, Auflösung, FPS, etc.).
         """
-        temp_part1_path = None  # Definition außerhalb des try-Blocks
+        temp_part1_path = None
         part2_path = None
         try:
             input_path = self.video_path
             base, ext = os.path.splitext(input_path)
             temp_part1_path = f"{base}.__temp_part1__{ext}"
-            part2_path = f"{base}__part2__{ext}"  # Finaler Pfad für Teil 2
+            part2_path = f"{base}__part2__{ext}"
 
             split_sec = split_time_ms / 1000.0
 
-            # --- Befehl für Teil 1 (Anfang bis Split-Punkt) ---
+            # NEU: Video-Info abrufen, um Originalformat zu verwenden
+            video_info = self._get_video_info(input_path)
+
+            # --- Teil 1: Versuche Stream-Kopie ---
             cmd1 = [
-                "ffmpeg", "-y", "-i", input_path,
+                "ffmpeg", "-y",
+                "-i", input_path,
                 "-t", str(split_sec),
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k",
-                # "-avoid_negative_ts", "make_zero",
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
                 "-map", "0:v:0?", "-map", "0:a:0?",
                 temp_part1_path
             ]
 
-            print(f"Starte FFmpeg (Split 1): {' '.join(cmd1)}")
+            print(f"Starte FFmpeg (Split 1 mit Stream-Kopie): {' '.join(cmd1)}")
             result1 = subprocess.run(cmd1, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+            # Falls Stream-Kopie fehlschlägt, neu kodieren mit Originalparametern
+            if result1.returncode != 0:
+                print("Stream-Kopie für Teil 1 fehlgeschlagen, kodiere mit Originalparametern neu...")
+
+                cmd1 = [
+                    "ffmpeg", "-y", "-i", input_path,
+                    "-t", str(split_sec),
+                ]
+
+                # Video-Codec und Parameter
+                if video_info['vcodec'] in ['h264', 'hevc']:
+                    cmd1.extend(["-c:v", "lib" + video_info['vcodec']])
+                else:
+                    cmd1.extend(["-c:v", "libx264"])
+
+                cmd1.extend([
+                    "-preset", "fast", "-crf", "23",
+                    "-pix_fmt", video_info['pix_fmt'],
+                    "-s", f"{video_info['width']}x{video_info['height']}",
+                    "-r", str(video_info['fps']),
+                ])
+
+                # Audio-Parameter
+                if video_info['acodec']:
+                    if video_info['acodec'] in ['aac', 'mp3']:
+                        cmd1.extend(["-c:a", video_info['acodec']])
+                    else:
+                        cmd1.extend(["-c:a", "aac"])
+                    cmd1.extend([
+                        "-b:a", "128k",
+                        "-ar", str(video_info['sample_rate']),
+                        "-ac", str(video_info['channels']),
+                    ])
+                else:
+                    cmd1.extend(["-an"])
+
+                cmd1.extend([
+                    "-movflags", "+faststart",
+                    "-map", "0:v:0?", "-map", "0:a:0?",
+                    temp_part1_path
+                ])
+
+                print(f"Starte FFmpeg (Split 1 mit Neukodierung): {' '.join(cmd1)}")
+                result1 = subprocess.run(cmd1, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
             if result1.returncode != 0:
                 raise subprocess.CalledProcessError(result1.returncode, cmd1, result1.stdout, result1.stderr)
 
-            # --- Befehl für Teil 2 (Split-Punkt bis Ende) ---
+            # --- Teil 2: Versuche Stream-Kopie ---
             cmd2 = [
                 "ffmpeg", "-y",
-                "-i", input_path,  # Input zuerst
-                "-ss", str(split_sec),  # Startzeit nach -i
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k",
-                # "-avoid_negative_ts", "make_zero",
+                "-i", input_path,
+                "-ss", str(split_sec),
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
                 "-map", "0:v:0?", "-map", "0:a:0?",
                 part2_path
             ]
 
-            print(f"Starte FFmpeg (Split 2): {' '.join(cmd2)}")
+            print(f"Starte FFmpeg (Split 2 mit Stream-Kopie): {' '.join(cmd2)}")
             result2 = subprocess.run(cmd2, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+            # Falls Stream-Kopie fehlschlägt, neu kodieren mit Originalparametern
+            if result2.returncode != 0:
+                print("Stream-Kopie für Teil 2 fehlgeschlagen, kodiere mit Originalparametern neu...")
+
+                cmd2 = [
+                    "ffmpeg", "-y",
+                    "-i", input_path,
+                    "-ss", str(split_sec),
+                ]
+
+                # Video-Codec und Parameter
+                if video_info['vcodec'] in ['h264', 'hevc']:
+                    cmd2.extend(["-c:v", "lib" + video_info['vcodec']])
+                else:
+                    cmd2.extend(["-c:v", "libx264"])
+
+                cmd2.extend([
+                    "-preset", "fast", "-crf", "23",
+                    "-pix_fmt", video_info['pix_fmt'],
+                    "-s", f"{video_info['width']}x{video_info['height']}",
+                    "-r", str(video_info['fps']),
+                ])
+
+                # Audio-Parameter
+                if video_info['acodec']:
+                    if video_info['acodec'] in ['aac', 'mp3']:
+                        cmd2.extend(["-c:a", video_info['acodec']])
+                    else:
+                        cmd2.extend(["-c:a", "aac"])
+                    cmd2.extend([
+                        "-b:a", "128k",
+                        "-ar", str(video_info['sample_rate']),
+                        "-ac", str(video_info['channels']),
+                    ])
+                else:
+                    cmd2.extend(["-an"])
+
+                cmd2.extend([
+                    "-movflags", "+faststart",
+                    "-map", "0:v:0?", "-map", "0:a:0?",
+                    part2_path
+                ])
+
+                print(f"Starte FFmpeg (Split 2 mit Neukodierung): {' '.join(cmd2)}")
+                result2 = subprocess.run(cmd2, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
             if result2.returncode != 0:
                 raise subprocess.CalledProcessError(result2.returncode, cmd2, result2.stdout, result2.stderr)
 
             # Beide erfolgreich? Original überschreiben
             try:
-                # Kurze Pause
                 time.sleep(0.2)
-                # Verwende copy2 + remove für Teil 1
                 shutil.copy2(temp_part1_path, input_path)
                 time.sleep(0.1)
                 os.remove(temp_part1_path)
@@ -753,7 +937,6 @@ class VideoCutterDialog(tk.Toplevel):
             self.after(0, self._handle_processing_complete, result)
 
         except subprocess.CalledProcessError as e:
-            # Wenn Teil 2 fehlschlägt, Teil 1 (temp) löschen
             self._handle_error_in_thread(f"FFmpeg (Split) fehlgeschlagen (Code {e.returncode}):\n{e.stderr}")
         except Exception as e:
             self._handle_error_in_thread(f"Fehler beim Teilen: {e}")

@@ -39,6 +39,12 @@ class FormFields:
         self.outside_foto_bezahlt_var = tk.BooleanVar()
         self.outside_video_bezahlt_var = tk.BooleanVar()
 
+        # NEU: Callbacks hinzufügen, um Bezahlt-Checkboxen automatisch abzuwählen
+        self.handcam_foto_var.trace_add('write', lambda *args: self._on_product_changed('handcam_foto'))
+        self.handcam_video_var.trace_add('write', lambda *args: self._on_product_changed('handcam_video'))
+        self.outside_foto_var.trace_add('write', lambda *args: self._on_product_changed('outside_foto'))
+        self.outside_video_var.trace_add('write', lambda *args: self._on_product_changed('outside_video'))
+
         # --- Widget-Platzhalter ---
         self.entry_load = None
         self.entry_kunde_id = None
@@ -668,3 +674,21 @@ class FormFields:
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
 
+    # NEU: Hilfsmethode für Trace-Callbacks
+    def _on_product_changed(self, product_name):
+        """
+        Trace-Callback, der die entsprechende Bezahlt-Checkbox
+        deaktiviert, wenn das Produkt abgewählt wird.
+        """
+        try:
+            if product_name == 'handcam_foto' and not self.handcam_foto_var.get():
+                self.handcam_foto_bezahlt_var.set(False)
+            elif product_name == 'handcam_video' and not self.handcam_video_var.get():
+                self.handcam_video_bezahlt_var.set(False)
+            elif product_name == 'outside_foto' and not self.outside_foto_var.get():
+                self.outside_foto_bezahlt_var.set(False)
+            elif product_name == 'outside_video' and not self.outside_video_var.get():
+                self.outside_video_bezahlt_var.set(False)
+        except tk.TclError:
+            # Widget existiert möglicherweise nicht mehr
+            print("Fehler beim Zurücksetzen der Bezahlt-Checkbox.")

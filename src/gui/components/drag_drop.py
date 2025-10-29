@@ -22,20 +22,24 @@ class DragDropFrame:
         self.create_widgets()
 
     def create_widgets(self):
-        # Haupt-Label
-        self.drop_label = tk.Label(self.frame,
-                                   text="Videos (.mp4) und Fotos (.jpg, .png) hierher ziehen",
-                                   font=("Arial", 12))
-        self.drop_label.pack(pady=10)
+        # Oberer Frame für Label und Checkbox in einer Reihe
+        top_frame = tk.Frame(self.frame)
+        top_frame.pack(pady=10, fill="x")
 
-        # NEU: Checkbox für QR-Code-Prüfung
+        # Checkbox für QR-Code-Prüfung (rechts)
         self.qr_check_checkbox = tk.Checkbutton(
-            self.frame,
+            top_frame,
             text="Auf QR-Code im ersten Clip prüfen",
             variable=self.qr_check_enabled,
             font=("Arial", 10)
         )
-        self.qr_check_checkbox.pack(pady=5)
+        self.qr_check_checkbox.pack(side=tk.RIGHT)
+
+        # Haupt-Label (links)
+        self.drop_label = tk.Label(top_frame,
+                                   text="Videos (.mp4) und Fotos (.jpg, .png) hierher ziehen",
+                                   font=("Arial", 12))
+        self.drop_label.pack(side=tk.LEFT)
 
         # Notebook (Tabs) erstellen
         self.notebook = ttk.Notebook(self.frame)
@@ -685,4 +689,3 @@ class DragDropFrame:
         self.handle_drop(event)
         # Wechsle zum Foto-Tab nach dem Drop
         self.notebook.select(1)
-

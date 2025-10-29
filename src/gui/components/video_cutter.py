@@ -968,8 +968,9 @@ class VideoCutterDialog(tk.Toplevel):
 
     def _run_split_task(self, split_time_ms: int):
         """
-        [THREAD] Führt präzisen Split aus mit Stream-Copy (verlustfrei).
+        [THREAD] Führt präzisen Split aus mit Smart-Cut (re-encodiert nur an Split-Punkt).
         Teil 1 überschreibt das Original, Teil 2 wird neu erstellt.
+        Verhindert Freeze-Frames durch gezieltes Re-Encoding an den Übergängen.
         """
         temp_part1_path = None
         part2_path = None
@@ -981,51 +982,182 @@ class VideoCutterDialog(tk.Toplevel):
 
             split_sec = split_time_ms / 1000.0
 
-            print(f"\n=== PRECISE SPLIT START ===")
+            # Video-Info für Re-Encoding
+            video_info = self._get_video_info(input_path)
+
+            print(f"\n=== SMART SPLIT START (Anti-Freeze) ===")
             print(f"Split-Position: {split_sec:.3f}s")
 
-            # --- TEIL 1: Vom Anfang bis Split (Output-Seeking für Präzision) ---
-            self.after(0, lambda: self.status_label.config(text="Erstelle Teil 1..."))
-            print(f"\nTeil 1: 0s - {split_sec:.3f}s")
+            # Finde Keyframes um Split-Position
+            self.after(0, lambda: self.status_label.config(text="Analysiere Keyframes..."))
+            keyframe_before = self._find_keyframe_before(input_path, split_sec)
+            keyframe_after = self._find_keyframe_after(input_path, split_sec)
 
-            cmd1 = [
-                "ffmpeg", "-y",
-                "-i", input_path,
-                "-t", str(split_sec),  # Dauer = Split-Position
-                "-c", "copy",
-                "-avoid_negative_ts", "make_zero",
-                "-map", "0:v:0?", "-map", "0:a:0?",
-                temp_part1_path
-            ]
+            print(f"Keyframe vor Split: {keyframe_before:.3f}s")
+            print(f"Keyframe nach Split: {keyframe_after:.3f}s")
 
-            print(f"FFmpeg Teil 1: {' '.join(cmd1)}")
-            result1 = subprocess.run(cmd1, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+            # Prüfe ob Split auf Keyframe liegt
+            split_on_keyframe = abs(split_sec - keyframe_before) < 0.01 or abs(split_sec - keyframe_after) < 0.01
 
-            if result1.returncode != 0:
-                raise subprocess.CalledProcessError(result1.returncode, cmd1, result1.stdout, result1.stderr)
+            if split_on_keyframe:
+                print("✅ Split liegt auf Keyframe - nutze Stream-Copy (perfekt)")
+                # --- TEIL 1: Stream-Copy bis Split ---
+                self.after(0, lambda: self.status_label.config(text="Erstelle Teil 1 (Stream-Copy)..."))
+                cmd1 = [
+                    "ffmpeg", "-y",
+                    "-i", input_path,
+                    "-t", str(split_sec),
+                    "-c", "copy",
+                    "-avoid_negative_ts", "make_zero",
+                    "-map", "0:v:0?", "-map", "0:a:0?",
+                    temp_part1_path
+                ]
+                print(f"FFmpeg Teil 1: {' '.join(cmd1)}")
+                result1 = subprocess.run(cmd1, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                if result1.returncode != 0:
+                    raise subprocess.CalledProcessError(result1.returncode, cmd1, result1.stdout, result1.stderr)
+
+                # --- TEIL 2: Stream-Copy ab Split ---
+                self.after(0, lambda: self.status_label.config(text="Erstelle Teil 2 (Stream-Copy)..."))
+                cmd2 = [
+                    "ffmpeg", "-y",
+                    "-i", input_path,
+                    "-ss", str(split_sec),
+                    "-c", "copy",
+                    "-avoid_negative_ts", "make_zero",
+                    "-map", "0:v:0?", "-map", "0:a:0?",
+                    part2_path
+                ]
+                print(f"FFmpeg Teil 2: {' '.join(cmd2)}")
+                result2 = subprocess.run(cmd2, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                if result2.returncode != 0:
+                    raise subprocess.CalledProcessError(result2.returncode, cmd2, result2.stdout, result2.stderr)
+            else:
+                print("⚠️ Split liegt NICHT auf Keyframe - nutze Smart-Cut (re-encode an Übergängen)")
+
+                # --- TEIL 1: Smart-Cut (Stream-Copy + Re-encode Ende) ---
+                self.after(0, lambda: self.status_label.config(text="Erstelle Teil 1 (Smart-Cut)..."))
+
+                if keyframe_before < split_sec - 0.1:  # Mehr als 100ms vor Split
+                    # Teile in Segmente: Stream-Copy + Re-encode
+                    seg1_path = f"{input_path}.__part1_seg1__.mp4"
+                    seg2_path = f"{input_path}.__part1_seg2__.mp4"
+                    concat_list = f"{input_path}.__part1_concat__.txt"
+
+                    try:
+                        # Segment 1: Stream-Copy bis Keyframe vor Split
+                        cmd1a = [
+                            "ffmpeg", "-y",
+                            "-i", input_path,
+                            "-t", str(keyframe_before),
+                            "-c", "copy",
+                            "-avoid_negative_ts", "make_zero",
+                            "-map", "0:v:0?", "-map", "0:a:0?",
+                            seg1_path
+                        ]
+                        result = subprocess.run(cmd1a, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                        if result.returncode != 0:
+                            raise subprocess.CalledProcessError(result.returncode, cmd1a, result.stdout, result.stderr)
+
+                        # Segment 2: Re-encode von Keyframe vor Split bis Split
+                        seg2_duration = split_sec - keyframe_before
+                        cmd1b = self._build_encode_cmd(input_path, video_info, seg2_path,
+                                                       ss=keyframe_before, duration=seg2_duration,
+                                                       force_keyframe_at_start=False)
+                        result = subprocess.run(cmd1b, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                        if result.returncode != 0:
+                            raise subprocess.CalledProcessError(result.returncode, cmd1b, result.stdout, result.stderr)
+
+                        # Concat
+                        with open(concat_list, 'w', encoding='utf-8') as f:
+                            f.write(f"file '{seg1_path.replace(chr(92), '/')}'\n")
+                            f.write(f"file '{seg2_path.replace(chr(92), '/')}'\n")
+
+                        cmd1_concat = [
+                            "ffmpeg", "-y",
+                            "-f", "concat", "-safe", "0",
+                            "-i", concat_list,
+                            "-c", "copy",
+                            temp_part1_path
+                        ]
+                        result = subprocess.run(cmd1_concat, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                        if result.returncode != 0:
+                            raise subprocess.CalledProcessError(result.returncode, cmd1_concat, result.stdout, result.stderr)
+                    finally:
+                        for f in [seg1_path, seg2_path, concat_list]:
+                            if os.path.exists(f):
+                                try: os.remove(f)
+                                except: pass
+                else:
+                    # Zu nah am Anfang, re-encode das ganze Teil 1
+                    cmd1 = self._build_encode_cmd(input_path, video_info, temp_part1_path,
+                                                  ss=0, duration=split_sec, force_keyframe_at_start=True)
+                    result = subprocess.run(cmd1, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                    if result.returncode != 0:
+                        raise subprocess.CalledProcessError(result.returncode, cmd1, result.stdout, result.stderr)
+
+                # --- TEIL 2: Smart-Cut (Re-encode Anfang + Stream-Copy Rest) ---
+                self.after(0, lambda: self.status_label.config(text="Erstelle Teil 2 (Smart-Cut)..."))
+
+                if keyframe_after > split_sec + 0.1:  # Mehr als 100ms nach Split
+                    # Teile in Segmente: Re-encode + Stream-Copy
+                    seg1_path = f"{input_path}.__part2_seg1__.mp4"
+                    seg2_path = f"{input_path}.__part2_seg2__.mp4"
+                    concat_list = f"{input_path}.__part2_concat__.txt"
+
+                    try:
+                        # Segment 1: Re-encode von Split bis Keyframe nach Split
+                        seg1_duration = keyframe_after - split_sec
+                        cmd2a = self._build_encode_cmd(input_path, video_info, seg1_path,
+                                                       ss=split_sec, duration=seg1_duration,
+                                                       force_keyframe_at_start=True)
+                        result = subprocess.run(cmd2a, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                        if result.returncode != 0:
+                            raise subprocess.CalledProcessError(result.returncode, cmd2a, result.stdout, result.stderr)
+
+                        # Segment 2: Stream-Copy ab Keyframe nach Split
+                        cmd2b = [
+                            "ffmpeg", "-y",
+                            "-i", input_path,
+                            "-ss", str(keyframe_after),
+                            "-c", "copy",
+                            "-avoid_negative_ts", "make_zero",
+                            "-map", "0:v:0?", "-map", "0:a:0?",
+                            seg2_path
+                        ]
+                        result = subprocess.run(cmd2b, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                        if result.returncode != 0:
+                            raise subprocess.CalledProcessError(result.returncode, cmd2b, result.stdout, result.stderr)
+
+                        # Concat
+                        with open(concat_list, 'w', encoding='utf-8') as f:
+                            f.write(f"file '{seg1_path.replace(chr(92), '/')}'\n")
+                            f.write(f"file '{seg2_path.replace(chr(92), '/')}'\n")
+
+                        cmd2_concat = [
+                            "ffmpeg", "-y",
+                            "-f", "concat", "-safe", "0",
+                            "-i", concat_list,
+                            "-c", "copy",
+                            part2_path
+                        ]
+                        result = subprocess.run(cmd2_concat, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                        if result.returncode != 0:
+                            raise subprocess.CalledProcessError(result.returncode, cmd2_concat, result.stdout, result.stderr)
+                    finally:
+                        for f in [seg1_path, seg2_path, concat_list]:
+                            if os.path.exists(f):
+                                try: os.remove(f)
+                                except: pass
+                else:
+                    # Rest des Videos ist klein, re-encode alles
+                    cmd2 = self._build_encode_cmd(input_path, video_info, part2_path,
+                                                  ss=split_sec, duration=999999, force_keyframe_at_start=True)
+                    result = subprocess.run(cmd2, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                    if result.returncode != 0:
+                        raise subprocess.CalledProcessError(result.returncode, cmd2, result.stdout, result.stderr)
 
             print("✅ Teil 1 erfolgreich")
-
-            # --- TEIL 2: Von Split bis Ende ---
-            self.after(0, lambda: self.status_label.config(text="Erstelle Teil 2..."))
-            print(f"\nTeil 2: {split_sec:.3f}s - Ende")
-
-            cmd2 = [
-                "ffmpeg", "-y",
-                "-i", input_path,
-                "-ss", str(split_sec),  # Output-Seeking (präzise)
-                "-c", "copy",
-                "-avoid_negative_ts", "make_zero",
-                "-map", "0:v:0?", "-map", "0:a:0?",
-                part2_path
-            ]
-
-            print(f"FFmpeg Teil 2: {' '.join(cmd2)}")
-            result2 = subprocess.run(cmd2, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-
-            if result2.returncode != 0:
-                raise subprocess.CalledProcessError(result2.returncode, cmd2, result2.stdout, result2.stderr)
-
             print("✅ Teil 2 erfolgreich")
 
             # Original mit Teil 1 überschreiben

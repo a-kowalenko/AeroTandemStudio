@@ -31,6 +31,7 @@ class DragDropFrame:
             top_frame,
             text="Auf QR-Code im ersten Clip prüfen",
             variable=self.qr_check_enabled,
+            command=self._on_qr_checkbox_toggled,  # Führe QR-Prüfung aus beim Anklicken
             font=("Arial", 10)
         )
         self.qr_check_checkbox.pack(side=tk.RIGHT)
@@ -385,6 +386,20 @@ class DragDropFrame:
         if hasattr(self.app, 'update_video_preview'):
             # NEU: Übergebe Information, ob QR-Prüfung nötig ist
             self.app.update_video_preview(paths, run_qr_check=run_qr_check)
+
+    def _on_qr_checkbox_toggled(self):
+        """
+        Wird aufgerufen, wenn die QR-Code-Checkbox angeklickt wird.
+        Führt die QR-Prüfung sofort aus, wenn die Checkbox aktiviert wird.
+        """
+        # Nur wenn Checkbox jetzt aktiviert ist UND Videos vorhanden sind
+        if self.qr_check_enabled.get() and self.video_paths:
+            print("QR-Code-Prüfung wurde aktiviert - führe Prüfung durch...")
+            # Trigger Vorschau-Update mit erzwungener QR-Prüfung
+            if hasattr(self.app, 'update_video_preview'):
+                self.app.update_video_preview(self.video_paths.copy(), run_qr_check=True)
+        elif not self.qr_check_enabled.get():
+            print("QR-Code-Prüfung wurde deaktiviert")
 
     def _update_video_table(self):
         """

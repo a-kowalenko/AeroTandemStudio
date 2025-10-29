@@ -32,6 +32,7 @@ class VideoPreview:
         self.temp_dir = None
         self.video_copies_map: Dict[str, str] = {}  # Map: original_path -> copy_path
         self.metadata_cache: Dict[str, Dict] = {}  # Map: original_path -> {duration, size, ...}
+        self.videos_were_reencoded = False  # Flag: Wurden Videos bereits auf Default-Format (1080p@30) kodiert?
         # ---
 
         self.create_widgets()
@@ -178,6 +179,7 @@ class VideoPreview:
         self.temp_dir = None
         self.video_copies_map.clear()
         self.metadata_cache.clear()  # NEU
+        self.videos_were_reencoded = False  # Flag zurücksetzen
 
     def _prepare_video_copies(self, original_paths, needs_reencoding):
         """
@@ -191,37 +193,57 @@ class VideoPreview:
         if needs_reencoding and self.app and hasattr(self.app, 'drag_drop'):
             self.parent.after(0, lambda: self.app.drag_drop.set_cut_button_enabled(False))
 
-        # OPTIMIERUNG: Nicht mehr clear() - behalte existierende Kopien!
-        # Entferne nur Kopien, die nicht mehr in der aktuellen Liste sind
-        current_paths_set = set(original_paths)
-        paths_to_remove = [path for path in list(self.video_copies_map.keys()) if path not in current_paths_set]
-        for path in paths_to_remove:
-            # Lösche Datei und Cache-Eintrag
-            if path in self.video_copies_map:
-                old_copy = self.video_copies_map[path]
-                if os.path.exists(old_copy):
-                    try:
-                        os.remove(old_copy)
-                        print(f"🗑️ Entferne alte Kopie: {os.path.basename(old_copy)}")
-                    except:
-                        pass
-                del self.video_copies_map[path]
-            if path in self.metadata_cache:
-                del self.metadata_cache[path]
+        # OPTIMIERUNG: Behalte existierende Kopien NUR wenn KEIN Re-Encoding nötig
+        if needs_reencoding:
+            # Bei Re-Encoding müssen ALLE Videos neu kodiert werden
+            # Entferne ALLE alten Kopien (könnten unterschiedliche Formate haben)
+            print("⚠️ Re-Encoding aktiviert → Cache wird geleert, ALLE Videos werden neu kodiert")
+            if self.video_copies_map:
+                for path, copy_path in list(self.video_copies_map.items()):
+                    if os.path.exists(copy_path):
+                        try:
+                            os.remove(copy_path)
+                        except:
+                            pass
+            self.video_copies_map.clear()
+            self.metadata_cache.clear()
+        else:
+            # Bei Stream-Copy: Behalte existierende Kopien, entferne nur nicht mehr benötigte
+            current_paths_set = set(original_paths)
+            paths_to_remove = [path for path in list(self.video_copies_map.keys()) if path not in current_paths_set]
+            for path in paths_to_remove:
+                # Lösche Datei und Cache-Eintrag
+                if path in self.video_copies_map:
+                    old_copy = self.video_copies_map[path]
+                    if os.path.exists(old_copy):
+                        try:
+                            os.remove(old_copy)
+                            print(f"🗑️ Entferne alte Kopie: {os.path.basename(old_copy)}")
+                        except:
+                            pass
+                    del self.video_copies_map[path]
+                if path in self.metadata_cache:
+                    del self.metadata_cache[path]
 
         temp_copy_paths = []
         total_clips = len(original_paths)
 
         # Zähle wie viele Videos tatsächlich verarbeitet werden müssen
-        clips_to_process = 0
-        for original_path in original_paths:
-            if original_path not in self.video_copies_map or not os.path.exists(self.video_copies_map.get(original_path, "")):
-                clips_to_process += 1
-
-        if clips_to_process == 0:
-            print(f"✅ Alle {total_clips} Videos bereits im Cache - nichts zu tun!")
+        if needs_reencoding:
+            # Bei Re-Encoding müssen ALLE Videos verarbeitet werden
+            clips_to_process = total_clips
+            print(f"📦 ALLE {total_clips} Videos müssen neu kodiert werden (Format-Unterschiede)")
         else:
-            print(f"📦 {clips_to_process} von {total_clips} Videos müssen verarbeitet werden ({total_clips - clips_to_process} bereits im Cache)")
+            # Bei Stream-Copy: Nur neue Videos
+            clips_to_process = 0
+            for original_path in original_paths:
+                if original_path not in self.video_copies_map or not os.path.exists(self.video_copies_map.get(original_path, "")):
+                    clips_to_process += 1
+
+            if clips_to_process == 0:
+                print(f"✅ Alle {total_clips} Videos bereits im Cache - nichts zu tun!")
+            else:
+                print(f"📦 {clips_to_process} von {total_clips} Videos müssen verarbeitet werden ({total_clips - clips_to_process} bereits im Cache)")
 
         self.parent.after(0, self.progress_handler.pack_progress_bar)
         self.parent.after(0, self.progress_handler.update_progress, 0, total_clips)
@@ -234,8 +256,8 @@ class VideoPreview:
             safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
             copy_path = os.path.join(self.temp_dir, f"{i:03d}_{safe_filename}")
 
-            # OPTIMIERUNG: Prüfe ob bereits eine gültige Kopie existiert
-            if original_path in self.video_copies_map:
+            # OPTIMIERUNG: Prüfe ob bereits eine gültige Kopie existiert (NUR bei Stream-Copy!)
+            if not needs_reencoding and original_path in self.video_copies_map:
                 existing_copy = self.video_copies_map[original_path]
                 if os.path.exists(existing_copy):
                     # Kopie existiert bereits - überspringen!
@@ -587,40 +609,121 @@ class VideoPreview:
                 self.parent.after(0, self._update_ui_cancelled)
                 return
 
+            # Deaktiviere Erstellen-Button während Kombinierung
+            self.parent.after(0, lambda: self.app._set_button_waiting())
+
             # Initialisiere Variablen
             needs_reencoding = False
             temp_copy_paths = []
 
-            # NEU: Prüfe, ob wir bereits Kopien für alle Videos haben
+            # Prüfe ob bereits Kopien existieren
             all_videos_cached = all(original_path in self.video_copies_map for original_path in video_paths)
 
             if all_videos_cached and self.temp_dir and os.path.exists(self.temp_dir):
-                # Alle Videos sind bereits kopiert/kodiert, verwende existierende Kopien
-                print("Verwende bereits existierende Video-Kopien (keine Neu-Kodierung nötig).")
-                temp_copy_paths = [self.video_copies_map[original_path] for original_path in video_paths]
-                needs_reencoding = False  # Bereits kodiert
+                # FALL 1: Alle Videos bereits gecacht (z.B. beim Verschieben)
+                cached_copy_paths = [self.video_copies_map[original_path] for original_path in video_paths]
 
-                # Prüfe, ob alle Kopien noch existieren
-                if all(os.path.exists(copy_path) for copy_path in temp_copy_paths):
+                # Prüfe ob alle Kopien noch existieren
+                if all(os.path.exists(copy_path) for copy_path in cached_copy_paths):
+                    print(f"✅ Alle {len(cached_copy_paths)} Videos bereits im Cache")
+                    temp_copy_paths = cached_copy_paths
+                    needs_reencoding = False
                     self.parent.after(0, lambda: self.encoding_label.config(
                         text="Encoding: Verwende existierende Kopien"))
-                    print(f"Alle {len(temp_copy_paths)} Kopien existieren noch.")
                 else:
-                    # Mindestens eine Kopie fehlt, muss neu erstellt werden
-                    print("Einige Kopien fehlen, erstelle Videos neu...")
+                    # Mindestens eine Kopie fehlt
+                    print("⚠️ Einige Kopien fehlen, erstelle Videos neu...")
                     all_videos_cached = False
-                    temp_copy_paths = []  # Zurücksetzen
+                    temp_copy_paths = []
 
             if not all_videos_cached:
-                # Neue oder geänderte Video-Liste, Format prüfen und ggf. neu kodieren
-                print(f"Prüfe Format von {len(video_paths)} Videos...")
-                format_info = self._check_video_formats(video_paths)
-                needs_reencoding = not format_info["compatible"]
-                self.parent.after(0, self._update_encoding_info, format_info)
+                # FALL 2: Nicht alle Videos gecacht (neue Videos hinzugefügt)
 
-                # Diese Methode füllt jetzt auch self.metadata_cache
-                print(f"Erstelle Video-Kopien (Re-Encoding: {needs_reencoding})...")
-                temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding)
+                # Finde neue Videos (nicht im Cache)
+                new_videos = [p for p in video_paths if p not in self.video_copies_map]
+                cached_videos = [p for p in video_paths if p in self.video_copies_map]
+
+                print(f"📊 Neue Videos: {len(new_videos)}, Gecachte: {len(cached_videos)}")
+
+                if len(new_videos) > 0 and len(cached_videos) > 0:
+                    # FALL 2a: Mix aus neuen und gecachten Videos
+                    if self.videos_were_reencoded:
+                        # Gecachte Videos wurden bereits neu kodiert (sind 1080p@30)
+                        # → Nur neue Videos müssen auf 1080p@30 kodiert werden
+                        print("✅ Gecachte Videos bereits standardisiert (1080p@30)")
+                        print(f"→ Kodiere nur die {len(new_videos)} neuen Video(s) auf 1080p@30")
+
+                        # Verwende existierende Kopien
+                        temp_copy_paths = [self.video_copies_map[p] for p in cached_videos]
+
+                        # Kodiere nur neue Videos
+                        needs_reencoding = True
+                        new_encoded_paths = self._prepare_video_copies(new_videos, needs_reencoding=True)
+                        temp_copy_paths.extend(new_encoded_paths)
+
+                        # Sortiere nach Original-Reihenfolge
+                        temp_copy_paths = [self.video_copies_map[p] for p in video_paths]
+                    else:
+                        # Gecachte Videos wurden nur kopiert (Stream-Copy)
+                        # → Prüfe ob neue Videos kompatibel sind
+                        print(f"Prüfe ob neue(s) Video(s) kompatibel mit gecachten...")
+
+                        # Prüfe Format: ein gecachtes + alle neuen
+                        test_videos = [cached_videos[0]] + new_videos
+                        format_info = self._check_video_formats(test_videos)
+
+                        if format_info["compatible"]:
+                            # Neue Videos sind kompatibel → Stream-Copy
+                            print("✅ Neue Videos kompatibel → Stream-Copy")
+                            needs_reencoding = False
+                            new_copied_paths = self._prepare_video_copies(new_videos, needs_reencoding=False)
+                            temp_copy_paths = [self.video_copies_map[p] for p in video_paths]
+                            self.parent.after(0, self._update_encoding_info, format_info)
+                        else:
+                            # Neue Videos nicht kompatibel → ALLE neu kodieren
+                            print(f"⚠️ Format-Unterschiede: {format_info['details']}")
+                            print("→ ALLE Videos werden auf 1080p@30 standardisiert")
+                            needs_reencoding = True
+
+                            # Cache leeren
+                            if self.video_copies_map:
+                                print("🗑️ Lösche alte Kopien...")
+                                for path, copy_path in list(self.video_copies_map.items()):
+                                    if os.path.exists(copy_path):
+                                        try:
+                                            os.remove(copy_path)
+                                        except:
+                                            pass
+                                self.video_copies_map.clear()
+                                self.metadata_cache.clear()
+
+                            self.parent.after(0, self._update_encoding_info, format_info)
+                            temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding=True)
+                            self.videos_were_reencoded = True  # Markiere als neu kodiert
+
+                elif len(new_videos) == len(video_paths):
+                    # FALL 2b: Alle Videos sind neu (erste Beladung)
+                    print(f"Prüfe Format von {len(video_paths)} neuen Videos...")
+                    format_info = self._check_video_formats(video_paths)
+
+                    if format_info["compatible"]:
+                        # Alle gleich → Stream-Copy
+                        print("✅ Alle Videos kompatibel → Stream-Copy")
+                        needs_reencoding = False
+                        self.videos_were_reencoded = False
+                    else:
+                        # Unterschiede → ALLE neu kodieren
+                        print(f"⚠️ Format-Unterschiede: {format_info['details']}")
+                        print("→ ALLE Videos werden auf 1080p@30 standardisiert")
+                        needs_reencoding = True
+                        self.videos_were_reencoded = True
+
+                    self.parent.after(0, self._update_encoding_info, format_info)
+                    temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding=needs_reencoding)
+                else:
+                    # FALL 2c: Nur gecachte Videos (sollte nicht vorkommen, wäre FALL 1)
+                    temp_copy_paths = [self.video_copies_map[p] for p in video_paths]
+                    needs_reencoding = False
 
             if self.cancellation_event.is_set():
                 self.parent.after(0, self._update_ui_cancelled)

@@ -3,8 +3,9 @@
 Unicode true
 
 !define APP_NAME "Aero Tandem Studio"
-!define APP_VERSION "0.0.6.1337"
-!define APP_EXE "${APP_NAME}.exe"
+!define /file APP_VERSION "VERSION.txt"
+!define BUILD_DIR "dist\\${APP_NAME} v${APP_VERSION}"
+!define APP_EXE "${APP_NAME} v${APP_VERSION}.exe"
 !define APP_PUBLISHER "Andreas Kowalenko"
 !define APP_WEBSITE "kowalenko.io"
 !define VLC_SETUP_EXE "dependency_installer\vlc-3.0.21-win64.exe"
@@ -356,10 +357,10 @@ FunctionEnd
 Section "${APP_NAME} (Erforderlich)" SectionApp
     SectionIn RO
     SetDetailsPrint both
-    DetailPrint "Installiere ${APP_NAME}..."
+    DetailPrint "Installiere ${APP_NAME} ${APP_VERSION}..."
 
     SetOutPath "$INSTDIR"
-    File /r "dist\${APP_NAME}\*.*"
+    File /r "${BUILD_DIR}\\*.*"
 
     ; Registry für App Paths
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\App Paths\${APP_EXE}" "" "$INSTDIR\${APP_EXE}"

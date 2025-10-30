@@ -190,8 +190,9 @@ class SettingsDialog:
         """Startet die Update-Prüfung"""
         try:
             # Verwende die gleiche Funktion wie beim App-Start, aber mit Benachrichtigung
+            # force_check=True zeigt auch ignorierte Versionen an
             from src.installer.updater import initialize_updater
-            initialize_updater(self.dialog, self.APP_VERSION, show_no_update_message=True)
+            initialize_updater(self.dialog, self.APP_VERSION, show_no_update_message=True, force_check=True)
         except Exception as e:
             messagebox.showerror("Fehler", f"Update-Prüfung konnte nicht gestartet werden:\n{str(e)}",
                                  parent=self.dialog)

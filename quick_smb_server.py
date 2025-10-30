@@ -219,7 +219,7 @@ def option_3_upload_test():
     try:
         shutil.rmtree(test_dir)
         print("🗑️  Test-Verzeichnis bereinigt")
-    except:
+    except Exception:
         pass
 
     print("\n" + "-" * 70)
@@ -237,7 +237,7 @@ def option_4_start_local_server():
     try:
         import ctypes
         is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except:
+    except Exception:
         is_admin = False
 
     if not is_admin:

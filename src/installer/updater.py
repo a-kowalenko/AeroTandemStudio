@@ -6,7 +6,6 @@ import tempfile
 import threading
 import queue
 import re
-import webbrowser
 from packaging import version
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -98,7 +97,6 @@ def render_markdown_to_text_widget(text_widget, markdown_text):
 
 def _insert_formatted_text(text_widget, text):
     """Fügt Text mit Inline-Formatierung ein (**bold**, *italic*, `code`, [link](url), @mention)"""
-    import webbrowser
 
     remaining = text
 

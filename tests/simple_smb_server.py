@@ -33,7 +33,7 @@ class WindowsSMBShare:
         try:
             import ctypes
             return ctypes.windll.shell32.IsUserAnAdmin() != 0
-        except:
+        except Exception:
             return False
 
     def start(self, retry=True):
@@ -79,7 +79,7 @@ class WindowsSMBShare:
                 # Freigabe wurde erstellt, jetzt Berechtigungen setzen
                 print(f"✅ Freigabe erstellt, setze Berechtigungen...")
 
-                username = os.environ.get('USERNAME', 'andreas.kowalenko@hotmail.com')
+                username = os.environ.get('USERNAME', 'DefaultUser')
                 computername = os.environ.get('COMPUTERNAME', 'localhost')
 
                 # OPTIMIERTE REIHENFOLGE: Zuerst die zuverlässigsten Methoden!
@@ -203,7 +203,7 @@ class WindowsSMBShare:
             import time
             time.sleep(0.5)
             return result.returncode == 0
-        except:
+        except Exception:
             return False
 
     def stop(self):
@@ -285,8 +285,8 @@ class SimpleSMBMock:
             try:
                 shutil.rmtree(self.share_path)
                 print(f"🗑️  Mock-Verzeichnis gelöscht")
-            except:
-                pass
+            except Exception as e:
+                print(f"Fehler beim Löschen des Mock-Verzeichnisses: {e}")
 
     def __enter__(self):
         self.start()

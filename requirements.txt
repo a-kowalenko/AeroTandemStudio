@@ -1,4 +1,4 @@
-﻿# GUI Framework
+﻿﻿# GUI Framework
 tkinterdnd2
 tkcalendar
 
@@ -22,4 +22,13 @@ urllib3
 
 # Version Management
 packaging
+
+# Testing (Development)
+pytest
+pytest-mock
+
+# SMB Server (Development/Testing)
+# impacket - hat Build-Probleme auf Windows, verwenden Sie stattdessen:
+# - tests/simple_smb_server.py (Windows net share)
+# - tests/smb_mock.py (Mock für Unit-Tests)
 

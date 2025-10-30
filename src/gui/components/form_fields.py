@@ -470,9 +470,84 @@ class FormFields:
         tk.Label(self.frame, text="Ort:", font=("Arial", 11)).grid(row=row, column=2, padx=(10, 5), pady=5, sticky="w")
         # Ort-Variable aus Settings laden
         self.ort_var.set(self.config.get_settings().get("ort", "Calden"))
+
+        # Frame für Dropdown mit Pfeil
+        ort_frame = tk.Frame(self.frame, bg="white", relief=tk.RAISED, borderwidth=1)
+        ort_frame.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
+        ort_frame.grid_columnconfigure(0, weight=1)
+
+        # Label das wie ein Button aussieht mit Pfeil
+        ort_display = tk.Label(
+            ort_frame,
+            textvariable=self.ort_var,
+            font=("Arial", 10),
+            bg="white",
+            fg="black",
+            anchor="w",
+            padx=8,
+            pady=4,
+            cursor="hand2"
+        )
+        ort_display.grid(row=0, column=0, sticky="ew")
+
+        # Pfeil-Label (rechts)
+        ort_arrow = tk.Label(
+            ort_frame,
+            text="▼",
+            font=("Arial", 8),
+            bg="white",
+            fg="black",
+            padx=5,
+            cursor="hand2"
+        )
+        ort_arrow.grid(row=0, column=1)
+
+        # Verstecktes OptionMenu (für Funktionalität)
         dropdown_ort = tk.OptionMenu(self.frame, self.ort_var, "Calden", "Gera")
-        dropdown_ort.config(font=("Arial", 10), width=10)  # Etwas Styling
-        dropdown_ort.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
+
+        # Style für das Dropdown-Menü
+        dropdown_ort["menu"].config(
+            font=("Arial", 10),
+            bg="white",
+            fg="black",
+            activebackground="#2196F3",
+            activeforeground="white",
+            relief=tk.FLAT,
+            borderwidth=0
+        )
+
+        # Click-Handler für Frame und Labels
+        def show_ort_menu(event):
+            dropdown_ort.event_generate("<Button-1>")
+            # Positioniere das Menü unter dem Frame
+            x = ort_frame.winfo_rootx()
+            y = ort_frame.winfo_rooty() + ort_frame.winfo_height()
+            try:
+                dropdown_ort["menu"].tk_popup(x, y)
+            finally:
+                dropdown_ort["menu"].grab_release()
+
+        ort_frame.bind("<Button-1>", show_ort_menu)
+        ort_display.bind("<Button-1>", show_ort_menu)
+        ort_arrow.bind("<Button-1>", show_ort_menu)
+
+        # Hover-Effekte
+        def on_enter(e):
+            ort_frame.config(bg="#E3F2FD")
+            ort_display.config(bg="#E3F2FD")
+            ort_arrow.config(bg="#E3F2FD")
+
+        def on_leave(e):
+            ort_frame.config(bg="white")
+            ort_display.config(bg="white")
+            ort_arrow.config(bg="white")
+
+        ort_frame.bind("<Enter>", on_enter)
+        ort_frame.bind("<Leave>", on_leave)
+        ort_display.bind("<Enter>", on_enter)
+        ort_display.bind("<Leave>", on_leave)
+        ort_arrow.bind("<Enter>", on_enter)
+        ort_arrow.bind("<Leave>", on_leave)
         return row + 1
 
     # --- Hilfs- und Datenmethoden ---

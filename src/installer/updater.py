@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import threading
 import queue
+import re
 from packaging import version
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -21,6 +22,166 @@ GITHUB_API_URL = "https://api.github.com/repos/a-kowalenko/AeroTandemStudio/rele
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 SETTINGS_FILE = os.path.join(PROJECT_ROOT, "updater_settings.json")
 DOWNLOAD_NAME = "setup_update.exe"
+
+
+def render_markdown_to_text_widget(text_widget, markdown_text):
+    """Rendert Markdown-Text in ein Tkinter Text Widget mit Formatierung
+
+    Unterstützt:
+    - **Bold**
+    - *Italic*
+    - # Überschriften (H1-H4)
+    - ## Unterüberschriften
+    - - Aufzählungen
+    - 1. Nummerierte Listen
+    - `Code`
+    - [Link Text](URL) - Anklickbare Links
+    - @username - Anklickbare @-Tags (GitHub Profile, unterstützt Bindestriche)
+    """
+    # Konfiguriere Text-Tags für Formatierung
+    text_widget.tag_configure("h1", font=("Arial", 14, "bold"), spacing3=10)
+    text_widget.tag_configure("h2", font=("Arial", 12, "bold"), spacing3=8)
+    text_widget.tag_configure("h3", font=("Arial", 10, "bold"), spacing3=6)
+    text_widget.tag_configure("h4", font=("Arial", 9, "bold"), spacing3=4)
+    text_widget.tag_configure("bold", font=("Arial", 9, "bold"))
+    text_widget.tag_configure("italic", font=("Arial", 9, "italic"))
+    text_widget.tag_configure("code", font=("Courier", 9), background="#f0f0f0")
+    text_widget.tag_configure("bullet", lmargin1=20, lmargin2=35)
+    text_widget.tag_configure("link", foreground="#0066CC", underline=True)
+    text_widget.tag_configure("link_hover", foreground="#0099FF", underline=True)
+    text_widget.tag_configure("mention", foreground="#6A4C93", font=("Arial", 9, "bold"))
+    text_widget.tag_configure("mention_hover", foreground="#9370DB", font=("Arial", 9, "bold"))
+
+    # Setze Cursor für Links
+    text_widget.tag_bind("link", "<Enter>", lambda e: text_widget.config(cursor="hand2"))
+    text_widget.tag_bind("link", "<Leave>", lambda e: text_widget.config(cursor=""))
+    text_widget.tag_bind("mention", "<Enter>", lambda e: text_widget.config(cursor="hand2"))
+    text_widget.tag_bind("mention", "<Leave>", lambda e: text_widget.config(cursor=""))
+
+    lines = markdown_text.split('\n')
+
+    for line in lines:
+        # H1 Überschrift (# )
+        if line.startswith('# ') and not line.startswith('## '):
+            text_widget.insert(tk.END, line[2:] + '\n', "h1")
+        # H2 Überschrift (## )
+        elif line.startswith('## ') and not line.startswith('### '):
+            text_widget.insert(tk.END, line[3:] + '\n', "h2")
+        # H3 Überschrift (### )
+        elif line.startswith('### ') and not line.startswith('#### '):
+            text_widget.insert(tk.END, line[4:] + '\n', "h3")
+        # H4 Überschrift (#### )
+        elif line.startswith('#### '):
+            text_widget.insert(tk.END, line[5:] + '\n', "h4")
+        # Bullet Point (- oder *)
+        elif line.strip().startswith('- ') or line.strip().startswith('* '):
+            # Entferne führende Leerzeichen, füge Bullet hinzu
+            content = line.strip()[2:]
+            text_widget.insert(tk.END, "  • ", "bullet")
+            _insert_formatted_text(text_widget, content)
+            text_widget.insert(tk.END, '\n', "bullet")
+        # Nummerierte Liste (1. 2. etc.)
+        elif re.match(r'^\d+\.\s', line.strip()):
+            # Extrahiere Nummer und Inhalt
+            match = re.match(r'^(\d+)\.\s(.+)', line.strip())
+            if match:
+                number, content = match.groups()
+                text_widget.insert(tk.END, f"  {number}. ", "bullet")
+                _insert_formatted_text(text_widget, content)
+                text_widget.insert(tk.END, '\n', "bullet")
+        else:
+            # Normale Zeile mit Inline-Formatierung
+            _insert_formatted_text(text_widget, line)
+            text_widget.insert(tk.END, '\n')
+
+
+def _insert_formatted_text(text_widget, text):
+    """Fügt Text mit Inline-Formatierung ein (**bold**, *italic*, `code`, [link](url), @mention)"""
+
+    remaining = text
+
+    while remaining:
+        # Suche nach nächstem Format-Marker
+        bold_match = re.search(r'\*\*(.+?)\*\*', remaining)
+        italic_match = re.search(r'\*(.+?)\*', remaining)
+        code_match = re.search(r'`(.+?)`', remaining)
+        link_match = re.search(r'\[(.+?)\]\((.+?)\)', remaining)  # [text](url)
+        mention_match = re.search(r'@([\w\-\.]+)', remaining)  # @username (mit Bindestrich und Punkt)
+
+        # ...existing code...
+
+        # Finde welcher Match zuerst kommt
+        matches = []
+        if bold_match:
+            matches.append(('bold', bold_match.start(), bold_match))
+        if italic_match:
+            matches.append(('italic', italic_match.start(), italic_match))
+        if code_match:
+            matches.append(('code', code_match.start(), code_match))
+        if link_match:
+            matches.append(('link', link_match.start(), link_match))
+        if mention_match:
+            matches.append(('mention', mention_match.start(), mention_match))
+
+        if not matches:
+            # Kein Formatting mehr, füge Rest ein
+            text_widget.insert(tk.END, remaining)
+            break
+
+        # Sortiere nach Position
+        matches.sort(key=lambda x: x[1])
+        format_type, pos, match = matches[0]
+
+        # Füge Text vor dem Match ein
+        text_widget.insert(tk.END, remaining[:match.start()])
+
+        # Füge formatierten Text ein
+        if format_type == 'link':
+            # Link: [text](url)
+            link_text = match.group(1)
+            link_url = match.group(2)
+
+            # Erstelle eindeutigen Tag für diesen Link
+            tag_name = f"link_{id(match)}"
+            text_widget.tag_configure(tag_name, foreground="#0066CC", underline=True)
+
+            # Füge Link-Text mit Tag ein
+            start_index = text_widget.index(tk.INSERT)
+            text_widget.insert(tk.END, link_text, (tag_name, "link"))
+
+            # Binde Click-Event an diesen spezifischen Link
+            text_widget.tag_bind(tag_name, "<Button-1>",
+                                lambda e, url=link_url: webbrowser.open(url))
+            text_widget.tag_bind(tag_name, "<Enter>",
+                                lambda e: text_widget.config(cursor="hand2"))
+            text_widget.tag_bind(tag_name, "<Leave>",
+                                lambda e: text_widget.config(cursor=""))
+
+        elif format_type == 'mention':
+            # @username -> GitHub Profile Link
+            username = match.group(1)
+            github_url = f"https://github.com/{username}"
+
+            # Erstelle eindeutigen Tag für diesen Mention
+            tag_name = f"mention_{id(match)}"
+            text_widget.tag_configure(tag_name, foreground="#6A4C93", font=("Arial", 9, "bold"))
+
+            # Füge @username mit Tag ein
+            text_widget.insert(tk.END, f"@{username}", (tag_name, "mention"))
+
+            # Binde Click-Event an diesen spezifischen Mention
+            text_widget.tag_bind(tag_name, "<Button-1>",
+                                lambda e, url=github_url: webbrowser.open(url))
+            text_widget.tag_bind(tag_name, "<Enter>",
+                                lambda e: text_widget.config(cursor="hand2"))
+            text_widget.tag_bind(tag_name, "<Leave>",
+                                lambda e: text_widget.config(cursor=""))
+        else:
+            # Bold, Italic, Code - wie vorher
+            text_widget.insert(tk.END, match.group(1), format_type)
+
+        # Setze remaining auf Text nach dem Match
+        remaining = remaining[match.end():]
 
 
 def load_settings():
@@ -44,8 +205,15 @@ def save_settings(settings):
         print(f"Einstellungen konnten nicht gespeichert werden: {e}")
 
 
-def check_for_updates_thread(root_gui, app_version, show_no_update_message=False):
-    """Hintergrund-Thread für Update-Prüfung über GitHub API"""
+def check_for_updates_thread(root_gui, app_version, show_no_update_message=False, force_check=False):
+    """Hintergrund-Thread für Update-Prüfung über GitHub API
+
+    Args:
+        root_gui: Tkinter Root-Widget
+        app_version: Aktuelle App-Version
+        show_no_update_message: Zeige Nachricht wenn keine Updates
+        force_check: Bei True werden ignorierte Versionen trotzdem angezeigt (für manuelle Suche)
+    """
     try:
         response = requests.get(GITHUB_API_URL, timeout=10)
         response.raise_for_status()
@@ -59,8 +227,9 @@ def check_for_updates_thread(root_gui, app_version, show_no_update_message=False
         settings = load_settings()
         ignored_version = settings.get("ignore_version", "")
 
-        # Prüfe ob Update verfügbar und nicht ignoriert
-        if latest_version > current_version and latest_version_str != ignored_version:
+        # Prüfe ob Update verfügbar (bei force_check ignoriere die Ignorierung)
+        is_ignored = latest_version_str == ignored_version and not force_check
+        if latest_version > current_version and not is_ignored:
             release_notes = data.get("body", "Keine Details verfügbar.")  # Korrektur: 'body' statt 'release_notes'
 
             # Suche nach .exe Installer in den Release-Assets
@@ -228,28 +397,88 @@ class AskUpdateDialog(tk.Toplevel):
         self.result = None
         self.version_to_ignore = version
 
-        # Info-Text
-        text = (
-            f"Eine neue Version ({version}) ist verfügbar.\n"
-            f"Ihre Version: {app_version}\n\n"
-            f"Änderungen:\n{release_notes}"
-        )
+        # Setze Mindestgröße für Dialog
+        self.minsize(500, 400)
 
-        tk.Label(self, text=text, justify=tk.LEFT, anchor="w").pack(padx=10, pady=10)
+        # Versions-Info Text (oben)
+        info_text = (
+            f"Eine neue Version ({version}) ist verfügbar.\n"
+            f"Ihre installierte Version: {app_version}"
+        )
+        info_label = tk.Label(self, text=info_text, justify=tk.LEFT, anchor="w", font=("Arial", 10))
+        info_label.pack(padx=15, pady=(15, 10), anchor="w")
+
+        # Änderungen Label
+        changes_label = tk.Label(self, text="Änderungen:", justify=tk.LEFT, anchor="w", font=("Arial", 10, "bold"))
+        changes_label.pack(padx=15, pady=(10, 5), anchor="w")
+
+        # Scrollbares Textfeld für Release Notes
+        text_frame = tk.Frame(self)
+        text_frame.pack(padx=15, pady=(0, 10), fill=tk.BOTH, expand=True)
+
+        # Scrollbar
+        scrollbar = tk.Scrollbar(text_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Text Widget (scrollbar)
+        self.release_notes_text = tk.Text(
+            text_frame,
+            wrap=tk.WORD,
+            yscrollcommand=scrollbar.set,
+            height=10,
+            width=60,
+            relief=tk.SUNKEN,
+            borderwidth=2,
+            font=("Arial", 9),
+            state=tk.NORMAL
+        )
+        self.release_notes_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.release_notes_text.yview)
+
+        # Release Notes mit Markdown-Rendering einfügen
+        if release_notes:
+            render_markdown_to_text_widget(self.release_notes_text, release_notes)
+        else:
+            self.release_notes_text.insert(tk.END, "Keine Details verfügbar.")
+
+        self.release_notes_text.config(state=tk.DISABLED)  # Read-only
 
         # Ignorieren-Checkbox
         self.ignore_var = tk.BooleanVar()
-        tk.Checkbutton(self, text="Diese Version nicht mehr anzeigen",
-                       variable=self.ignore_var).pack(pady=5)
+        checkbox = tk.Checkbutton(
+            self,
+            text="Diese Version nicht mehr anzeigen",
+            variable=self.ignore_var,
+            font=("Arial", 9)
+        )
+        checkbox.pack(padx=15, pady=(5, 10), anchor="w")
 
-        # Buttons
+        # Buttons (unten)
         btn_frame = tk.Frame(self)
-        btn_frame.pack(pady=10)
+        btn_frame.pack(pady=(0, 15), padx=15, fill=tk.X)
 
-        tk.Button(btn_frame, text="Jetzt aktualisieren",
-                  command=self.on_yes).pack(side=tk.LEFT, padx=10)
-        tk.Button(btn_frame, text="Später",
-                  command=self.on_no).pack(side=tk.LEFT, padx=10)
+        # Später Button (links)
+        later_btn = tk.Button(
+            btn_frame,
+            text="Später",
+            command=self.on_no,
+            width=15,
+            font=("Arial", 9)
+        )
+        later_btn.pack(side=tk.LEFT)
+
+        # Jetzt aktualisieren Button (rechts)
+        update_btn = tk.Button(
+            btn_frame,
+            text="Jetzt aktualisieren",
+            command=self.on_yes,
+            width=20,
+            font=("Arial", 9, "bold"),
+            bg="#4CAF50",
+            fg="white",
+            activebackground="#45a049"
+        )
+        update_btn.pack(side=tk.RIGHT)
 
         self.protocol("WM_DELETE_WINDOW", self.on_no)
         _center_dialog(self)
@@ -381,11 +610,18 @@ class UpdateProgressDialog(tk.Toplevel):
         self.after(100, self.check_queue)
 
 
-def initialize_updater(root_gui, app_version, show_no_update_message=False):
-    """Startet Update-Prüfung im Hintergrund - Haupt-Einstiegspunkt"""
+def initialize_updater(root_gui, app_version, show_no_update_message=False, force_check=False):
+    """Startet Update-Prüfung im Hintergrund - Haupt-Einstiegspunkt
+
+    Args:
+        root_gui: Tkinter Root-Widget
+        app_version: Aktuelle App-Version (z.B. "0.1.0.7")
+        show_no_update_message: Zeige Nachricht wenn keine Updates verfügbar
+        force_check: Bei True werden ignorierte Versionen trotzdem angezeigt (für manuelle Suche)
+    """
     update_thread = threading.Thread(
         target=check_for_updates_thread,
-        args=(root_gui, app_version, show_no_update_message),
+        args=(root_gui, app_version, show_no_update_message, force_check),
         daemon=True
     )
     update_thread.start()

@@ -14,12 +14,13 @@ from src.utils.constants import HINTERGRUND_PATH
 
 
 class VideoProcessor:
-    def __init__(self, progress_callback=None, status_callback=None):
+    def __init__(self, progress_callback=None, status_callback=None, config_manager=None):
         self.hintergrund_path = HINTERGRUND_PATH
         self.progress_callback = progress_callback
         self.status_callback = status_callback
         self.cancel_event = threading.Event()
         self.logger = CancellableProgressBarLogger(self.cancel_event)
+        self.config_manager = config_manager  # Config Manager speichern
 
     def create_video_with_intro_only(self, payload):
         """Erstellt ein Verzeichnis, verarbeitet optional Videos und kopiert Fotos."""
@@ -653,8 +654,11 @@ class VideoProcessor:
             # Hinzufügen einer Prüfung vor dem langen Upload-Prozess
             self._check_for_cancellation()
 
-            # Übergebe das Verzeichnis direkt an die Upload-Funktion
-            success, message, server_path = upload_to_server_simple(local_directory_path)
+            # Übergebe das Verzeichnis und config_manager an die Upload-Funktion
+            success, message, server_path = upload_to_server_simple(
+                local_directory_path,
+                self.config_manager
+            )
 
             if success:
                 print(f"Server Upload erfolgreich: {server_path}")

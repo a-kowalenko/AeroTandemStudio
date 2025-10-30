@@ -3,7 +3,8 @@
 Unicode true
 
 !define APP_NAME "Aero Tandem Studio"
-!define APP_VERSION "0.0.6.1337"
+!define /file APP_VERSION "VERSION.txt"
+!define BUILD_DIR "dist\\${APP_NAME} v${APP_VERSION}"
 !define APP_EXE "${APP_NAME}.exe"
 !define APP_PUBLISHER "Andreas Kowalenko"
 !define APP_WEBSITE "kowalenko.io"
@@ -56,8 +57,9 @@ VIAddVersionKey "CompanyName" "${APP_PUBLISHER}"
 ; --- Abschluss-Seite (Mit "App starten"-Checkbox) ---
 !define MUI_FINISHPAGE_TITLE "Installation von ${APP_NAME} abgeschlossen"
 !define MUI_FINISHPAGE_TEXT "Das Setup hat ${APP_NAME} erfolgreich auf Ihrem Computer installiert."
-!define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
+!define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_TEXT "${APP_NAME} jetzt starten"
+!define MUI_FINISHPAGE_RUN_FUNCTION "LaunchAppAsUser"
 !insertmacro MUI_PAGE_FINISH
 
 ; --- Deinstaller-Seiten ---
@@ -356,10 +358,33 @@ FunctionEnd
 Section "${APP_NAME} (Erforderlich)" SectionApp
     SectionIn RO
     SetDetailsPrint both
-    DetailPrint "Installiere ${APP_NAME}..."
+    DetailPrint "Installiere ${APP_NAME} ${APP_VERSION}..."
+
+    ; --- NEU: Bereinige alte versionierte EXE-Dateien ---
+    DetailPrint "Bereinige alte EXE-Dateien..."
+
+    ; Lösche alle EXEs mit Versionsmuster "Aero Tandem Studio v*.exe"
+    FindFirst $5 $6 "$INSTDIR\${APP_NAME} v*.exe"
+    loop_delete_old_exe:
+        StrCmp $6 "" done_delete_old_exe  ; Keine weiteren Dateien gefunden
+
+        ; Prüfe ob es nicht die aktuelle (neue) EXE ist
+        StrCmp $6 "${APP_EXE}" skip_this_file
+
+        ; Lösche die alte versionierte EXE
+        DetailPrint "Lösche alte EXE: $6"
+        Delete "$INSTDIR\$6"
+
+        skip_this_file:
+            FindNext $5 $6
+            Goto loop_delete_old_exe
+
+    done_delete_old_exe:
+        FindClose $5
+    ; --- ENDE Bereinigung ---
 
     SetOutPath "$INSTDIR"
-    File /r "dist\${APP_NAME}\*.*"
+    File /r "${BUILD_DIR}\\*.*"
 
     ; Registry für App Paths
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\App Paths\${APP_EXE}" "" "$INSTDIR\${APP_EXE}"
@@ -373,12 +398,13 @@ Section "${APP_NAME} (Erforderlich)" SectionApp
 
     DetailPrint "${APP_NAME} wurde installiert."
 
-    ; --- NEU: App nach Silent-Update neu starten ---
+    ; --- NEU: App nach Silent-Update neu starten (ohne Admin-Rechte) ---
     ; Prüft, ob der Installer im Silent-Modus (/S) aufgerufen wurde.
     IfSilent 0 not_silent ; Springe zu not_silent, WENN NICHT silent
     ; Wir sind im Silent-Mode, also App neu starten
-    ; Wir verwenden die Variable ${APP_EXE}, die oben definiert wurde.
-    Exec '"$INSTDIR\${APP_EXE}"'
+    ; Verwende 'explorer.exe' um die App im normalen Benutzerkontext zu starten
+    DetailPrint "Starte ${APP_NAME} neu (ohne Admin-Rechte)..."
+    Exec '"$WINDIR\explorer.exe" "$INSTDIR\${APP_EXE}"'
     not_silent:
     ; --- ENDE NEU ---
 
@@ -422,8 +448,19 @@ Section "Uninstall"
     SetDetailsPrint both
     DetailPrint "Beende ${APP_NAME}..."
 
-    nsExec::ExecToStack 'taskkill /F /IM "${APP_EXE}"'
+    ; Sanftes Beenden
+    nsExec::Exec 'taskkill /IM "${APP_EXE}" 2>nul'
     Sleep 2000
+
+    ; Force Kill falls noch läuft
+    nsExec::Exec 'taskkill /F /IM "${APP_EXE}" 2>nul'
+
+    ; Hintergrundprozesse beenden
+    DetailPrint "Beende Hintergrundprozesse..."
+    nsExec::Exec 'taskkill /F /IM "python.exe" /FI "WINDOWTITLE eq ${APP_NAME}*" 2>nul'
+    nsExec::Exec 'taskkill /F /IM "ffmpeg.exe" 2>nul'
+    nsExec::Exec 'taskkill /F /IM "ffprobe.exe" 2>nul'
+    Sleep 3000
 
     DetailPrint "Entferne Dateien..."
     RMDir /r "$INSTDIR"
@@ -467,12 +504,72 @@ Function .onInit
             /SD IDYES IDYES kill_app IDNO cancel_install
 
         kill_app:
-            nsExec::Exec 'taskkill /F /IM "${APP_EXE}"'
+            DetailPrint "Beende ${APP_NAME}..."
+
+            ; 1. Versuche sanftes Beenden
+            nsExec::Exec 'taskkill /IM "${APP_EXE}"'
             Sleep 2000
-            Goto continue_install
+
+            ; 2. Prüfe ob noch läuft
+            nsExec::ExecToStack 'cmd /C tasklist /FI "IMAGENAME eq ${APP_EXE}" | findstr /I /C:"${APP_EXE}"'
+            Pop $0
+            Pop $2
+
+            ; Wenn noch läuft, force kill
+            StrCmp $2 "" process_killed force_kill
+
+            force_kill:
+                DetailPrint "Erzwinge Beendigung..."
+                nsExec::Exec 'taskkill /F /IM "${APP_EXE}"'
+                Sleep 3000
+
+            process_killed:
+                ; 3. Beende auch mögliche Python/FFmpeg-Subprozesse
+                DetailPrint "Bereinige Hintergrundprozesse..."
+                nsExec::Exec 'taskkill /F /IM "python.exe" /FI "WINDOWTITLE eq ${APP_NAME}*" 2>nul'
+                nsExec::Exec 'taskkill /F /IM "ffmpeg.exe" 2>nul'
+                nsExec::Exec 'taskkill /F /IM "ffprobe.exe" 2>nul'
+                Sleep 2000
+
+                ; 4. Warte bis DLLs freigegeben sind (max. 10 Sekunden)
+                DetailPrint "Warte auf Freigabe der Dateien..."
+                StrCpy $3 0
+
+                wait_for_unlock:
+                    ; Prüfe ob _internal Ordner zugreifbar ist
+                    ClearErrors
+                    FileOpen $4 "$INSTDIR\_internal\test.tmp" w
+                    IfErrors still_locked unlocked
+
+                    still_locked:
+                        IntOp $3 $3 + 1
+                        IntCmp $3 10 timeout timeout wait_more
+
+                        wait_more:
+                            Sleep 1000
+                            Goto wait_for_unlock
+
+                    unlocked:
+                        FileClose $4
+                        Delete "$INSTDIR\_internal\test.tmp"
+                        DetailPrint "Dateien freigegeben."
+                        Goto continue_install
+
+                    timeout:
+                        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION \
+                            "Einige Dateien sind noch in Verwendung.$\r$\n$\r$\nBitte schließen Sie alle ${APP_NAME}-Fenster und klicken Sie 'Wiederholen'.$\r$\n$\r$\nFalls das Problem weiterhin besteht, starten Sie Ihren Computer neu." \
+                            /SD IDCANCEL IDRETRY kill_app IDCANCEL cancel_install
 
         cancel_install:
             Abort
 
     continue_install:
 FunctionEnd
+
+; --- Funktion zum Starten der App ohne Admin-Rechte ---
+Function LaunchAppAsUser
+    ; Verwende 'explorer.exe' um die App im normalen Benutzerkontext zu starten
+    ; Dies verhindert, dass Admin-Rechte vererbt werden und Drag & Drop blockiert wird
+    Exec '"$WINDIR\explorer.exe" "$INSTDIR\${APP_EXE}"'
+FunctionEnd
+

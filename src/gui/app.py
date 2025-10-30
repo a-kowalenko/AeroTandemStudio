@@ -2,6 +2,9 @@
 from tkinter import messagebox, ttk
 import threading
 import os
+import queue
+import uuid  # NEU
+from typing import List
 from tkinterdnd2 import TkinterDnD
 
 from .components.form_fields import FormFields
@@ -11,6 +14,10 @@ from .components.progress_indicator import ProgressHandler
 from .components.circular_spinner import CircularSpinner
 from .components.settings_dialog import SettingsDialog
 from .components.video_player import VideoPlayer
+from .components.video_cutter import VideoCutterDialog  # Importiert
+from .components.loading_window import LoadingWindow
+from ..model.kunde import Kunde
+
 from ..video.processor import VideoProcessor
 from ..utils.config import ConfigManager
 from ..utils.validation import validate_form_data
@@ -31,11 +38,23 @@ class VideoGeneratorApp:
         self.server_status_label = None
         self.server_connected = False
         self.video_player = None
+        self.video_cutter_dialog = None  # NEU: Referenz auf offenen Dialog
         self.APP_VERSION = APP_VERSION
+
+        # Für Threading und Ladefenster ---
+        self.analysis_queue = None
+        self.loading_window = None
+
+        # Speichern der Button-Originalzustände
+        self.old_button_text = ""
+        self.old_button_bg = ""
+        self.old_button_cursor = ""
 
         self.setup_gui()
         self.ensure_dependencies()
 
+        # NEU: Schließ-Ereignis abfangen
+        self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
 
     def setup_gui(self):
         self.root.title("Aero Tandem Studio")
@@ -58,7 +77,7 @@ class VideoGeneratorApp:
         self.right_frame.pack(side="right", fill="y", padx=(20, 0))
 
         # Linke Spalte: Formular und Drag & Drop
-        self.form_fields = FormFields(self.left_frame, self.config)
+        self.form_fields = FormFields(self.left_frame, self.config, self)
         self.drag_drop = DragDropFrame(self.left_frame, self)
 
         # Rechte Spalte: Vorschau, Checkbox und Button
@@ -333,41 +352,215 @@ class VideoGeneratorApp:
         t = threading.Thread(target=installer_thread, daemon=True)
         t.start()
 
-    def update_video_preview(self, video_paths):
-        """Aktualisiert die Video-Vorschau (wird von DragDrop aufgerufen)"""
-        # Erstelle Waiting-State für den Button (Text, Farbe, Cursor)
-        old_text = self.erstellen_button.cget("text")
-        old_bg = self.erstellen_button.cget("bg")
+    def _save_button_state(self):
+        """Speichert den aktuellen Zustand des Buttons."""
+        self.old_button_text = self.erstellen_button.cget("text")
+        self.old_button_bg = self.erstellen_button.cget("bg")
         try:
-            old_cursor = self.erstellen_button.cget("cursor")
-        except Exception:
-            old_cursor = ""
+            self.old_button_cursor = self.erstellen_button.cget("cursor")
+        except tk.TclError:
+            self.old_button_cursor = ""  # Standard-Cursor
 
+    def _set_button_waiting(self):
+        """Setzt den Button in den Wartezustand."""
         self.erstellen_button.config(text="Bitte warten...", bg="#9E9E9E", state="disabled", cursor="watch")
 
-        update_preview_thread = self.video_preview.update_preview(video_paths)
+    def _restore_button_state(self):
+        """Stellt den ursprünglichen Zustand des Buttons wieder her."""
+        # Nur wiederherstellen, wenn der Button nicht im "Abbrechen"-Modus ist
+        current_text = self.erstellen_button.cget("text")
+        if current_text == "Bitte warten..." or current_text == "Erstellen":
+            if self.old_button_text and self.old_button_text != "Abbrechen":  # Nur wiederherstellen, wenn ein gültiger Zustand gespeichert wurde
+                self.erstellen_button.config(text=self.old_button_text,
+                                             bg=self.old_button_bg,
+                                             state="normal",
+                                             cursor=self.old_button_cursor)
+            else:
+                # Fallback, falls kein Zustand gespeichert wurde oder "Abbrechen" gespeichert war
+                self.erstellen_button.config(text="Erstellen",
+                                             bg="#4CAF50",
+                                             state="normal",
+                                             cursor="")
+        # Wenn der Button "Abbrechen" anzeigt, ändere nichts
 
-        # Aktiviere Erstellen-Button wieder, wenn die Vorschau fertig ist
-        def enable_button_when_done():
-            print("Enabling button")
+    def update_video_preview(self, video_paths: List[str], run_qr_check: bool = True):
+        """
+        Aktualisiert die Video-Vorschau. Startet die QR-Analyse in einem
+        separaten Thread oder setzt das Formular zurück, wenn keine Videos vorhanden sind.
+        NEU: run_qr_check steuert, ob die QR-Analyse durchgeführt werden soll.
+        """
+        if not video_paths:
+            # --- NEU: Anforderung des Users umsetzen ---
+            # Wenn alle Videos gelöscht wurden, setze das Formular
+            # auf den manuellen Modus zurück.
+            print("Keine Videos gefunden, setze Formular auf manuell zurück.")
+            self.form_fields.update_form_layout(qr_success=False, kunde=None)
 
-            def restore():
-                try:
-                    self.erstellen_button.config(text=old_text, bg=old_bg, state="normal", cursor=old_cursor)
-                except Exception:
-                    # Fallback, falls cursor o.ä. nicht gesetzt werden kann
-                    self.erstellen_button.config(text=old_text, bg=old_bg, state="normal")
+            # Auch Vorschau und Player leeren
+            try:
+                if self.video_preview:
+                    self.video_preview.clear_preview()
+            except AttributeError:
+                print("Hinweis: video_preview hat keine 'clear_preview' Methode.")
+            except Exception as e:
+                print(f"Fehler beim Leeren der Vorschau: {e}")
 
-            # None Check
-            if update_preview_thread is None:
-                restore()
-                return
+            try:
+                if self.video_player:
+                    self.video_player.unload_video()
+            except AttributeError:
+                print("Hinweis: video_player hat keine 'unload_video' Methode.")
+            except Exception as e:
+                print(f"Fehler beim Entladen des Players: {e}")
 
-            update_preview_thread.join()
+            self._restore_button_state()  # Button auch zurücksetzen
+            return
+            # --- ENDE NEU ---
 
-            self.root.after(0, restore)
+        # NEU: QR-Prüfung nur starten, wenn run_qr_check True ist
+        if run_qr_check:
+            # 1. Button-Zustand speichern und auf "Warten" setzen
+            self.run_qr_analysis(video_paths)
+        else:
+            # Keine QR-Prüfung, nur Vorschau aktualisieren
+            print("QR-Prüfung übersprungen - erster Clip hat sich nicht geändert.")
+            if self.video_preview:
+                self.video_preview.update_preview(video_paths)
 
-        threading.Thread(target=enable_button_when_done, daemon=True).start()
+    def run_qr_analysis(self, video_paths: list[str]):
+        self._save_button_state()
+        self._set_button_waiting()
+
+        # 2. Ladefenster anzeigen (verwendet jetzt die importierte Klasse)
+        self.loading_window = LoadingWindow(self.root, text="Analysiere QR-Code im Video...")
+
+        # 3. Eine Queue erstellen, um das Ergebnis vom Thread zu empfangen
+        self.analysis_queue = queue.Queue()
+
+        # 4. Den Analyse-Thread starten
+        analysis_thread = threading.Thread(
+            target=self._run_analysis_thread,
+            args=(video_paths[0], self.analysis_queue),
+            daemon=True
+        )
+        analysis_thread.start()
+
+        # 5. Eine "Polling"-Funktion starten, die auf das Ergebnis wartet
+        self.root.after(100, self._check_analysis_result, video_paths)
+
+    def _run_analysis_thread(self, video_path: str, result_queue: queue.Queue):
+        """
+        Diese Funktion läuft im separaten Thread.
+        Sie führt die blockierende Analyse aus und legt das Ergebnis in die Queue.
+        """
+        try:
+            from src.video.qr_analyser import analysiere_ersten_clip
+
+            kunde, qr_scan_success = analysiere_ersten_clip(video_path)
+            result_queue.put(("success", (kunde, qr_scan_success)))
+
+        except Exception as e:
+            print(f"Fehler im Analyse-Thread: {e}")
+            result_queue.put(("error", e))
+
+    def _check_analysis_result(self, video_paths: List[str]):
+        """
+        Überprüft alle 100ms, ob ein Ergebnis in der Queue liegt.
+        Diese Funktion läuft im Haupt-Thread und kann die GUI sicher aktualisieren.
+        """
+        try:
+            # Versuchen, ein Ergebnis zu holen, ohne zu blockieren
+            status, result = self.analysis_queue.get_nowait()
+
+            # --- Ergebnis ist da ---
+
+            # 1. Ladefenster schließen
+            if self.loading_window:
+                self.loading_window.destroy()
+                self.loading_window = None
+
+            # 2. Ergebnis verarbeiten
+            if status == "success":
+                kunde, qr_scan_success = result
+                self._process_analysis_result(kunde, qr_scan_success, video_paths)
+            elif status == "error":
+                messagebox.showerror("Analyse-Fehler",
+                                     f"Ein unerwarteter Fehler bei der Videoanalyse ist aufgetreten:\n{result}")
+                self._restore_button_state()
+                self.form_fields.update_form_layout(False, None)
+
+
+        except queue.Empty:
+            # Wenn die Queue leer ist, erneut in 100ms prüfen
+            self.root.after(100, self._check_analysis_result, video_paths)
+
+        except Exception as e:
+            # Allgemeiner Fehler beim Abrufen
+            if self.loading_window:
+                self.loading_window.destroy()
+                self.loading_window = None
+            messagebox.showerror("Fehler", f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}")
+            self._restore_button_state()
+            self.form_fields.update_form_layout(False, None)
+
+    def _process_analysis_result(self, kunde, qr_scan_success, video_paths):
+        """
+        Verarbeitet das erfolgreiche Analyseergebnis (im Haupt-Thread).
+        """
+        try:
+            if qr_scan_success and kunde:
+                print(f"QR-Code gescannt: Kunde ID {kunde.kunde_id}, Email: {kunde.email}, Telefon: {kunde.telefon}, "
+                      f"Handcam Foto: {kunde.handcam_foto}, Handcam Video: {kunde.handcam_video}, "
+                      f"Outside Foto: {kunde.outside_foto}, Outside Video: {kunde.outside_video}")
+
+                info_text = (
+                    f"Kunde erkannt:\n\n"
+                    f"ID: {kunde.kunde_id}\n"
+                    f"Name: {kunde.vorname} {kunde.nachname}\n"
+                    f"Email: {kunde.email}\n"
+                    f"Telefon: {kunde.telefon}\n"
+                    f"Handcam Foto: {'Ja' if kunde.handcam_foto else 'Nein'}\n"
+                    f"Handcam Video: {'Ja' if kunde.handcam_video else 'Nein'}\n"
+                    f"Outside Foto: {'Ja' if kunde.outside_foto else 'Nein'}\n"
+                    f"Outside Video: {'Ja' if kunde.outside_video else 'Nein'}\n"
+                    f"Möchten Sie fortfahren?"
+                )
+                # Dialog entfernt - QR-Code wurde gefunden und wird automatisch verarbeitet
+                print(f"QR-Code erfolgreich gescannt: {kunde.vorname} {kunde.nachname}")
+
+            elif qr_scan_success and not kunde:
+                messagebox.showwarning("Ungültiger QR-Code", "Ein QR-Code wurde erkannt, aber die Daten sind ungültig.")
+
+            else:
+                # Dialog entfernt - Wechsel zu manueller Eingabe erfolgt automatisch
+                print("Kein QR-Code im ersten Video gefunden. Wechsle zu manueller Eingabe.")
+
+            # Formular-Layout aktualisieren
+            self.form_fields.update_form_layout(qr_scan_success, kunde)
+
+            # Starten Sie die Aktualisierung der GUI-Vorschau
+            # update_preview startet einen Thread (_create_combined_preview)
+            # self.video_preview.update_preview(video_paths)
+
+            # WICHTIG: _create_combined_preview (im Thread) ruft _finalize_processing auf.
+            # Wir müssen den Button dort wiederherstellen, NICHT hier.
+            # _finalize_processing ruft _restore_button_state auf, wenn es fertig ist.
+
+            # Warten, bis der Thread in update_preview fertig ist, um den Button wiederherzustellen
+            def wait_for_preview_thread():
+                if self.video_preview.processing_thread:
+                    self.video_preview.processing_thread.join()  # Warte auf den Thread (Vorschau-Erstellung)
+
+                # Jetzt im Haupt-Thread den Button wiederherstellen
+                self.root.after(0, self._restore_button_state)
+
+            threading.Thread(target=wait_for_preview_thread, daemon=True).start()
+
+
+        except Exception as e:
+            print(f"Fehler in _process_analysis_result: {e}")
+            self._restore_button_state()
+            self.form_fields.update_form_layout(False, None)
 
     def erstelle_video(self):
         """Bereitet die Videoerstellung mit Intro vor"""
@@ -388,33 +581,88 @@ class VideoGeneratorApp:
 
         # Verwende das kombinierte Video aus der Vorschau
         combined_video_path = self.video_preview.get_combined_video_path()
-        if not combined_video_path or not os.path.exists(combined_video_path):
-            messagebox.showwarning("Fehler",
-                                   "Bitte erstellen Sie zuerst eine Vorschau durch Drag & Drop von Videos oder klicken Sie auf 'Erneut versuchen'.")
-            return
-
         # Foto-Pfade holen
         photo_paths = self.drag_drop.get_photo_paths()
 
-        # Validierung
-        errors = validate_form_data(form_data, [combined_video_path])
+        # Physische Anwesenheit von Dateien prüfen
+        has_video = combined_video_path and os.path.exists(combined_video_path)
+        has_photos = photo_paths and len(photo_paths) > 0
+
+        # Ausgewählte Produkte aus form_data holen
+        video_produkt_gewaehlt = form_data.get("handcam_video", False) or form_data.get("outside_video", False)
+        foto_produkt_gewaehlt = form_data.get("handcam_foto", False) or form_data.get("outside_foto", False)
+
+        # Prüfen ob Video gewählt aber nicht bezahlt ist
+        video_gewaehlt_aber_nicht_bezahlt = (
+                (form_data.get("handcam_video", False) and not form_data.get("ist_bezahlt_handcam_video", False)) or
+                (form_data.get("outside_video", False) and not form_data.get("ist_bezahlt_outside_video", False))
+        )
+
+        # 1. Prüfen, ob überhaupt ein Produkt ausgewählt ist.
+        if not video_produkt_gewaehlt and not foto_produkt_gewaehlt:
+            messagebox.showwarning("Fehler",
+                                   "Bitte wählen Sie mindestens ein Produkt aus\n"
+                                   "(Handcam Foto/Video oder Outside Foto/Video).")
+            return
+
+        # 2. Prüfen auf Diskrepanz: Produkt ausgewählt, aber keine Datei da
+        error_messages = []
+        if video_produkt_gewaehlt and not has_video:
+            error_messages.append("Sie haben ein Video-Produkt ausgewählt, aber keine Videos hinzugefügt.")
+
+        if foto_produkt_gewaehlt and not has_photos:
+            error_messages.append("Sie haben ein Foto-Produkt ausgewählt, aber keine Fotos hinzugefügt.")
+
+        # Zeige Fehler, wenn Produkt ausgewählt, aber Datei fehlt
+        if error_messages:
+            messagebox.showwarning("Fehlende Dateien", "\n\n".join(error_messages))
+            return
+
+        # Parse Kundendaten aus der Formular-Eingabe
+        kunde_id_val = form_data.get("kunde_id")
+        kunde = Kunde(
+            kunde_id=int(kunde_id_val) if kunde_id_val and kunde_id_val.isdigit() else 0,
+            vorname=str(form_data["vorname"]),
+            nachname=str(form_data["nachname"]),
+            email=str(form_data["email"]),
+            telefon=str(form_data["telefon"]),
+            handcam_foto=bool(form_data["handcam_foto"]),
+            handcam_video=bool(form_data["handcam_video"]),
+            outside_foto=bool(form_data["outside_foto"]),
+            outside_video=bool(form_data["outside_video"]),
+            ist_bezahlt_handcam_foto=bool(form_data["ist_bezahlt_handcam_foto"]),
+            ist_bezahlt_handcam_video=bool(form_data["ist_bezahlt_handcam_video"]),
+            ist_bezahlt_outside_foto=bool(form_data["ist_bezahlt_outside_foto"]),
+            ist_bezahlt_outside_video=bool(form_data["ist_bezahlt_outside_video"])
+        )
+
+        # Validierung der Formulardaten (Textfelder)
+        errors = validate_form_data(form_data, (video_produkt_gewaehlt or foto_produkt_gewaehlt))
         if errors:
             messagebox.showwarning("Fehlende Eingabe", "\n".join(errors))
             return
 
         # Einstellungen speichern
         settings_data = self.form_fields.get_settings_data()
-        settings_data["upload_to_server"] = form_data["upload_to_server"]  # Hinzufügen
+        settings_data["upload_to_server"] = form_data["upload_to_server"]
         self.config.save_settings(settings_data)
 
         # GUI für Verarbeitung vorbereiten
-        video_count = len(self.drag_drop.get_video_paths())
+        video_count = len(self.drag_drop.get_video_paths()) if has_video else 0
         photo_count = len(photo_paths)
-        status_text = f"Status: Verarbeite {video_count} Video(s)"
-        if photo_count > 0:
-            status_text += f" und kopiere {photo_count} Foto(s)"
 
-        # Server-Upload Info hinzufügen
+        status_parts = []
+        if video_produkt_gewaehlt:
+            if video_gewaehlt_aber_nicht_bezahlt:
+                status_parts.append(f"Erstelle {video_count} Video(s) mit Wasserzeichen (nicht bezahlt)")
+            else:
+                status_parts.append(f"Verarbeite {video_count} Video(s)")
+
+        if foto_produkt_gewaehlt:
+            status_parts.append(f"Kopiere {photo_count} Foto(s)")
+
+        status_text = "Status: " + " und ".join(status_parts)
+
         if form_data["upload_to_server"]:
             status_text += " - Lade auf Server hoch"
 
@@ -429,10 +677,22 @@ class VideoGeneratorApp:
             status_callback=self._handle_status_update
         )
 
-        # Videoerstellung im Thread starten
+        payload = {
+            "form_data": form_data,
+            "combined_video_path": combined_video_path if has_video else None,
+            "video_clip_paths": self.drag_drop.get_video_paths() if has_video else [],  # NEU: Einzelne Clips
+            "kunde": kunde,
+            "photo_paths": photo_paths,
+            "settings": self.config.get_settings(),
+            "create_watermark_version": video_gewaehlt_aber_nicht_bezahlt,
+            "watermark_clip_index": self.drag_drop.get_watermark_clip_index()  # NEU: Index des ausgewählten Clips
+        }
+
+        print('kunde in erstelle_video:', kunde)
+
         video_thread = threading.Thread(
             target=self.video_processor.create_video_with_intro_only,
-            args=(form_data, combined_video_path, photo_paths)
+            args=(payload,)
         )
         video_thread.start()
 
@@ -456,14 +716,56 @@ class VideoGeneratorApp:
 
         self.root.after(0, self._switch_to_create_mode)
 
+    def on_files_added(self, has_videos, has_photos):
+        """Wird von DragDropFrame aufgerufen, um FormFields zu aktualisieren."""
+        if self.form_fields:
+            self.form_fields.auto_check_products(has_videos, has_photos)
+
+    def update_watermark_column_visibility(self):
+        """Aktualisiert die Sichtbarkeit der Wasserzeichen-Spalte basierend auf Kunde-Status"""
+        form_data = self.form_fields.get_form_data()
+
+        # Prüfe, ob Video gewählt aber nicht bezahlt ist
+        video_gewaehlt_aber_nicht_bezahlt = (
+                (form_data.get("handcam_video", False) and not form_data.get("ist_bezahlt_handcam_video", False)) or
+                (form_data.get("outside_video", False) and not form_data.get("ist_bezahlt_outside_video", False))
+        )
+
+        # Debug-Ausgabe
+        print(f"🔍 Wasserzeichen-Spalte Update:")
+        print(f"   Handcam Video: {form_data.get('handcam_video', False)}, Bezahlt: {form_data.get('ist_bezahlt_handcam_video', False)}")
+        print(f"   Outside Video: {form_data.get('outside_video', False)}, Bezahlt: {form_data.get('ist_bezahlt_outside_video', False)}")
+        print(f"   → Spalte sichtbar: {video_gewaehlt_aber_nicht_bezahlt}")
+
+        # Zeige Spalte wenn Video ausgewählt aber nicht bezahlt ist
+        self.drag_drop.set_watermark_column_visible(video_gewaehlt_aber_nicht_bezahlt)
+
+        # Wenn Spalte nicht mehr sichtbar, lösche Auswahl
+        if not video_gewaehlt_aber_nicht_bezahlt:
+            self.drag_drop.clear_watermark_selection()
+
+
     def _switch_to_cancel_mode(self):
         """Wechselt den Button zum Abbrechen-Modus"""
+        # Initial: Button deaktivieren während der Kodierung
         self.erstellen_button.config(
-            text="Abbrechen",
-            command=self.abbrechen_prozess,
-            bg="#D32F2F",
-            state="normal"
+            text="Kodierung läuft...",
+            bg="#808080",
+            state="disabled"
         )
+
+        # Nach kurzer Verzögerung: Button als "Abbrechen" aktivieren
+        def enable_cancel_button():
+            self.erstellen_button.config(
+                text="Abbrechen",
+                command=self.abbrechen_prozess,
+                bg="#D32F2F",
+                state="normal"
+            )
+
+        # Aktiviere den Abbrechen-Button nach 500ms
+        self.root.after(500, enable_cancel_button)
+
         self.progress_handler.progress_bar.pack(side="right", padx=(0, 5), pady=5)
         self.progress_handler.eta_label.pack(side="right", pady=5)
 
@@ -487,14 +789,139 @@ class VideoGeneratorApp:
         if self.video_processor:
             self.video_processor.cancel_process()
 
+    # --- NEUE METHODEN FÜR DEN SCHNEIDE-DIALOG ---
+
+    def request_cut_dialog(self, original_video_path: str):
+        """Wird von drag_drop.py aufgerufen, um den Schneide-Dialog zu öffnen."""
+        if self.video_cutter_dialog is not None:
+            print("Ein Schneide-Dialog ist bereits geöffnet.")
+            self.video_cutter_dialog.lift()
+            return
+
+        if not self.video_preview:
+            print("Fehler: video_preview ist nicht initialisiert.")
+            return
+
+        # 1. Finde den Pfad zur *Kopie* des Videos
+        copy_path = self.video_preview.get_copy_path(original_video_path)
+
+        if not copy_path or not os.path.exists(copy_path):
+            messagebox.showerror("Fehler",
+                                 f"Konnte die temporäre Videokopie für '{os.path.basename(original_video_path)}' nicht finden.\n"
+                                 "Bitte erstellen Sie die Vorschau neu (z.B. durch Hinzufügen/Entfernen eines Clips).")
+            return
+
+        # 2. Finde den Index des Clips (für späteres Splitten)
+        try:
+            index = self.drag_drop.get_video_paths().index(original_video_path)
+        except ValueError:
+            print(f"Fehler: Konnte Index für {original_video_path} nicht finden.")
+            index = -1  # Fallback
+
+        # 3. Dialog erstellen
+        self.video_cutter_dialog = VideoCutterDialog(
+            self.root,
+            video_path=copy_path,
+            on_complete_callback=lambda result: self.on_cut_complete(original_video_path, index, result)
+        )
+
+        # 4. Callback binden, um Referenz zu löschen, wenn Dialog geschlossen wird
+        self.video_cutter_dialog.bind("<Destroy>", self._on_cutter_dialog_close)
+
+        self.video_cutter_dialog.show()
+
+    def on_cut_complete(self, original_path: str, index: int, result: dict):
+        """
+        Callback vom VideoCutterDialog.
+        NEU: Stößt asynchrone Metadaten-Aktualisierung an.
+        """
+        action = result.get("action")
+        paths_to_refresh = []
+
+        if action == "cut":
+            print(f"App: Clip '{os.path.basename(original_path)}' wurde geschnitten (getrimmt).")
+            paths_to_refresh.append(original_path)
+
+        elif action == "split":
+            new_copy_path = result.get("new_copy_path")
+            print(f"App: Clip '{os.path.basename(original_path)}' wurde geteilt. Neuer Clip: {new_copy_path}")
+
+            # 1. Neuen (Platzhalter) Originalpfad erstellen
+            base, ext = os.path.splitext(original_path)
+            new_original_placeholder = f"{base}_split_{uuid.uuid4().hex[:6]}{ext}"
+
+            # 2. Neuen Pfad in der DragDrop-Liste an der richtigen Stelle einfügen
+            if self.drag_drop:
+                self.drag_drop.insert_video_path_at_index(new_original_placeholder, index + 1)
+
+            # 3. Die neue Kopie in der Vorschau-Map registrieren
+            if self.video_preview:
+                self.video_preview.register_new_copy(new_original_placeholder, new_copy_path)
+
+            paths_to_refresh.append(original_path)
+            paths_to_refresh.append(new_original_placeholder)
+
+        elif action == "cancel":
+            print(f"App: Schneiden von '{os.path.basename(original_path)}' abgebrochen.")
+            # Nichts tun
+            return
+
+        # Starte die asynchrone Aktualisierung der Metadaten für die geänderten Clips
+        if paths_to_refresh and self.video_preview:
+            self.video_preview.refresh_metadata_async(
+                paths_to_refresh,
+                on_complete_callback=self._on_metadata_refreshed
+            )
+
+    def _on_metadata_refreshed(self):
+        """
+        [MAIN-THREAD] Callback, der aufgerufen wird, nachdem die Metadaten
+        im Cache aktualisiert wurden. JETZT ist es sicher, die GUI zu aktualisieren.
+        """
+        print("App: Metadaten-Aktualisierung abgeschlossen. Aktualisiere GUI.")
+
+        # 1. DragDrop-Tabelle aktualisieren (liest jetzt aus dem aktualisierten Cache)
+        if self.drag_drop:
+            self.drag_drop.refresh_table()
+
+        # 2. Video-Vorschau regenerieren (verwendet die *neue* Liste der Originale)
+        if self.video_preview and self.drag_drop:
+            original_paths = self.drag_drop.get_video_paths()
+            self.video_preview.regenerate_preview_after_cut(original_paths)
+
+    def _on_cutter_dialog_close(self, event=None):
+        """Wird aufgerufen, wenn der Cutter-Dialog zerstört wird."""
+        if self.video_cutter_dialog:
+            print("Cutter-Dialog geschlossen, Referenz wird gelöscht.")
+            self.video_cutter_dialog = None
+
+    # --- ENDE NEUE METHODEN ---
+
+    def on_app_close(self):
+        """Aufräumen beim Schließen der App."""
+        print("App wird geschlossen...")
+
+        # 1. Aktiven Schneide-Dialog schließen (falls offen)
+        if self.video_cutter_dialog:
+            try:
+                self.video_cutter_dialog.destroy()
+            except tk.TclError:
+                pass  # Fenster vielleicht schon weg
+
+        # 2. Temporäre Vorschau-Kopien löschen
+        if self.video_preview:
+            self.video_preview._cleanup_temp_copies()  # Zugriff auf private Methode für Cleanup
+
+        # 3. Root-Fenster zerstören
+        self.root.destroy()
+
     def run(self):
         """Startet die Hauptloop der Anwendung"""
 
         try:
             initialize_updater(self.root, self.APP_VERSION)
         except Exception as e:
-            # Ein Fehler im Updater sollte den Start der App nicht verhindern
             print(f"Fehler beim Initialisieren des Updaters: {e}")
-        # <<< ENDE NEU 3/3 >>>
 
         self.root.mainloop()
+

@@ -1,4 +1,7 @@
-﻿def validate_form_data(form_data, video_paths):
+﻿import os
+
+
+def validate_form_data(form_data, video_paths):
     """Validiert die Formulardaten und gibt Fehlermeldungen zurück"""
     errors = []
 
@@ -6,16 +9,12 @@
         ("load", "Load Nr"),
         ("gast", "Gast"),
         ("tandemmaster", "Tandemmaster"),
-        ("datum", "Datum"),
-        ("speicherort", "Speicherort")
+        ("datum", "Datum")
     ]
 
     for field_key, field_name in required_fields:
         if not form_data.get(field_key, "").strip():
             errors.append(f"{field_name} ist erforderlich")
-
-    if not video_paths:
-        errors.append("Bitte ziehen Sie mindestens eine Video-Datei in das Feld")
 
     if form_data.get("outside_video") and not form_data.get("videospringer", "").strip():
         errors.append("Videospringer ist erforderlich bei Outside Video")

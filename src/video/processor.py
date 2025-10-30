@@ -4,6 +4,7 @@ import threading
 import os
 import tempfile
 import subprocess
+from dataclasses import asdict, is_dataclass
 from datetime import date
 
 from .logger import CancellableProgressBarLogger, CancellationError
@@ -18,24 +19,21 @@ class VideoProcessor:
         self.progress_callback = progress_callback
         self.status_callback = status_callback
         self.cancel_event = threading.Event()
-        # Hinweis: Der Logger wird hier instanziiert, aber seine Callback-Funktion wird
-        # in diesem Setup nicht direkt von FFmpeg aufgerufen. Der Abbruch
-        # wird durch manuelle Checks im Code gesteuert.
         self.logger = CancellableProgressBarLogger(self.cancel_event)
 
-    def create_video_with_intro_only(self, form_data, combined_video_path, photo_paths=None):
-        """Erstellt nur noch das Intro und hängt es vor das kombinierte Video"""
+    def create_video_with_intro_only(self, payload):
+        """Erstellt ein Verzeichnis, verarbeitet optional Videos und kopiert Fotos."""
         thread = threading.Thread(
             target=self._video_creation_with_intro_only_task,
-            args=(form_data, combined_video_path, photo_paths)
+            args=(payload,)
         )
         thread.start()
         return thread
 
-    def _video_creation_with_intro_only_task(self, form_data, combined_video_path, photo_paths=None):
-        """Hauptlogik für das Hinzufügen des Intros zum kombinierten Video"""
+    def _video_creation_with_intro_only_task(self, payload):
+        """Hauptlogik für die Verzeichniserstellung, Videoverarbeitung und Fotokopieren."""
         try:
-            self._execute_video_creation_with_intro_only(form_data, combined_video_path, photo_paths)
+            self._execute_video_creation_with_intro_only(payload)
         except CancellationError:
             self._handle_cancellation()
         except Exception as e:
@@ -48,147 +46,348 @@ class VideoProcessor:
         if self.cancel_event.is_set():
             raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
 
-    def _execute_video_creation_with_intro_only(self, form_data, combined_video_path, photo_paths=None):
-        """Fügt nur das Intro zum bereits kombinierten Video hinzu, ohne Neukodierung des Hauptvideos."""
+    def _execute_video_creation_with_intro_only(self, payload):
+        """
+        Erstellt ein Verzeichnis.
+        Wenn ein Video vorhanden ist, wird es verarbeitet (Intro hinzugefügt) und im Unterordner (Handcam_Video/Outside_Video) gespeichert.
+        ZUSÄTZLICH: Wenn create_watermark_version True ist, wird eine zweite Version mit Wasserzeichen erstellt.
+        """
+
+        form_data = payload["form_data"]
+        combined_video_path = payload["combined_video_path"]  # Kann None sein
+        video_clip_paths = payload.get("video_clip_paths", [])  # NEU: Einzelne Clips
+        photo_paths = payload.get("photo_paths", [])
+        kunde = payload.get("kunde")
+        settings = payload.get("settings")
+        # NEU: Flag für Wasserzeichen-Version
+        create_watermark_version = payload.get("create_watermark_version", False)
+        # NEU: Index des für Wasserzeichen ausgewählten Clips
+        watermark_clip_index = payload.get("watermark_clip_index", None)
+
+        print("kunde Objekt:", kunde)
         gast = form_data["gast"]
         tandemmaster = form_data["tandemmaster"]
         videospringer = form_data["videospringer"]
         datum = form_data["datum"]
-        dauer = form_data["dauer"]
+        dauer = settings.get("dauer", "8")
         ort = form_data["ort"]
-        speicherort = form_data["speicherort"]
-        outside_video = form_data["outside_video"]
+        speicherort = settings.get("speicherort", "")
+        outside_video_mode = form_data["video_mode"] == "outside"
         upload_to_server = form_data["upload_to_server"]
 
-        full_output_path = ""
+        base_output_dir = ""
+        full_video_output_path = None  # Pfad zum *finalen Video*, falls eines erstellt wird
+        watermark_video_output_path = None  # NEU: Pfad zur Wasserzeichen-Version
         temp_files = []
 
+        # Gesamt-Fortschrittsschritte anpassen für mögliche zweite Video-Erstellung
+        TOTAL_STEPS = 12 if create_watermark_version else 11
+
         try:
-            # Schritt 1: Detaillierte Videoinformationen des kombinierten Videos lesen
+            # Schritt 1: Output-Basisverzeichnis generieren
             self._check_for_cancellation()
-            self._update_progress(1)
-            self._update_status("Ermittle detaillierte Videoinformationen...")
-            video_params = self._get_video_info(combined_video_path)
-
-            # Schritt 2: Textinhalte vorbereiten
-            self._check_for_cancellation()
-            self._update_progress(2)
-            self._update_status("Bereite Text-Overlays vor...")
-            drawtext_filter = self._prepare_text_overlay(
-                gast, tandemmaster, videospringer, datum, ort,
-                video_params['height'], outside_video
-            )
-
-
-            hintergrund_path = self.hintergrund_path
-            if not os.path.exists(hintergrund_path):
-                raise FileNotFoundError("hintergrund.png fehlt im assets/ Ordner")
-
-            # Schritt 3: Kompatiblen Intro-Clip mit stiller Audiospur in einem Schritt erstellen
-            self._check_for_cancellation()
-            self._update_progress(3)
-            self._update_status("Erstelle exakt kompatiblen Intro-Clip...")
-            temp_intro_with_audio_path = os.path.join(tempfile.gettempdir(), "intro_with_silent_audio.mp4")
-            temp_files.append(temp_intro_with_audio_path)
-            self._create_intro_with_silent_audio(
-                temp_intro_with_audio_path, dauer, video_params, drawtext_filter
-            )
-
-            # NEUER ANSATZ: Robuste Verkettung über MPEG-TS Zwischenformat
-            # Schritt 4: Videos in .ts-Format umwandeln für stabilere Verkettung
-            self._check_for_cancellation()
-            self._update_progress(4)
-            self._update_status("Normalisiere Videos für robustes Zusammenfügen...")
-
-            # Bitstream-Filter basierend auf dem Codec auswählen
-            bsf = "hevc_mp4toannexb" if video_params['vcodec'] == 'hevc' else "h264_mp4toannexb"
-
-            # Schritt 5: Intro nach .ts konvertieren
-            self._check_for_cancellation()
-            self._update_progress(5)
-            self._update_status("Konvertiere Intro in Zwischenformat...")
-            temp_intro_ts_path = os.path.join(tempfile.gettempdir(), "intro.ts")
-            temp_files.append(temp_intro_ts_path)
-            subprocess.run([
-                "ffmpeg", "-y", "-i", temp_intro_with_audio_path,
-                "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
-                temp_intro_ts_path
-            ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-
-            # Schritt 6: Hauptvideo nach .ts konvertieren
-            self._check_for_cancellation()
-            self._update_progress(6)
-            self._update_status("Konvertiere Hauptvideo in Zwischenformat...")
-            temp_combined_ts_path = os.path.join(tempfile.gettempdir(), "combined.ts")
-            temp_files.append(temp_combined_ts_path)
-            subprocess.run([
-                "ffmpeg", "-y", "-i", combined_video_path,
-                "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
-                temp_combined_ts_path
-            ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-
-            # Schritt 7: Output-Pfad generieren
-            self._check_for_cancellation()
-            self._update_progress(7)
-            self._update_status("Generiere Ausgabe-Pfad...")
-            full_output_path = self._generate_output_path(
+            self._update_progress(1, TOTAL_STEPS)
+            self._update_status("Generiere Ausgabe-Verzeichnis...")
+            base_output_dir, base_filename = self._generate_base_output_dir(
                 form_data['load'], gast, tandemmaster, videospringer,
-                datum, speicherort, outside_video
+                datum, speicherort, outside_video_mode
             )
 
-            # Schritt 8: .ts-Dateien zusammenfügen
-            self._check_for_cancellation()
-            self._update_progress(8)
-            self._update_status("Füge Videos final zusammen...")
-            concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
-            subprocess.run([
-                "ffmpeg", "-y",
-                "-i", concat_input,
-                "-c", "copy",
-                "-bsf:a", "aac_adtstoasc",  # Wichtig für korrekte Audio-Header in MP4
-                "-movflags", "+faststart",
-                full_output_path
-            ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+            # --- VIDEO VERARBEITUNG (Schritte 2-8) ---
+            if combined_video_path and os.path.exists(combined_video_path):
+                # Schritt 2: Detaillierte Videoinformationen des kombinierten Videos lesen
+                self._check_for_cancellation()
+                self._update_progress(2, TOTAL_STEPS)
+                self._update_status("Ermittle detaillierte Videoinformationen...")
+                video_params = self._get_video_info(combined_video_path)
 
-            # Schritt 9: Fotos in Output-Verzeichnis kopieren
+                # Schritt 3: Textinhalte vorbereiten
+                self._check_for_cancellation()
+                self._update_progress(3, TOTAL_STEPS)
+                self._update_status("Bereite Text-Overlays vor...")
+                drawtext_filter = self._prepare_text_overlay(
+                    gast, tandemmaster, videospringer, datum, ort,
+                    video_params['height'], outside_video_mode
+                )
+
+                hintergrund_path = self.hintergrund_path
+                if not os.path.exists(hintergrund_path):
+                    raise FileNotFoundError("hintergrund.png fehlt im assets/ Ordner")
+
+                # Schritt 4: Kompatiblen Intro-Clip erstellen
+                self._check_for_cancellation()
+                self._update_progress(4, TOTAL_STEPS)
+                self._update_status("Erstelle exakt kompatiblen Intro-Clip...")
+                temp_intro_with_audio_path = os.path.join(tempfile.gettempdir(), "intro_with_silent_audio.mp4")
+                temp_files.append(temp_intro_with_audio_path)
+                self._create_intro_with_silent_audio(
+                    temp_intro_with_audio_path, dauer, video_params, drawtext_filter
+                )
+
+                # Schritt 5: Videos in .ts-Format umwandeln (Intro)
+                self._check_for_cancellation()
+                self._update_progress(5, TOTAL_STEPS)
+                self._update_status("Normalisiere Intro für robustes Zusammenfügen...")
+                bsf = "hevc_mp4toannexb" if video_params['vcodec'] == 'hevc' else "h264_mp4toannexb"
+                temp_intro_ts_path = os.path.join(tempfile.gettempdir(), "intro.ts")
+                temp_files.append(temp_intro_ts_path)
+                subprocess.run([
+                    "ffmpeg", "-y", "-i", temp_intro_with_audio_path,
+                    "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
+                    temp_intro_ts_path
+                ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+                # Schritt 6: Hauptvideo nach .ts konvertieren
+                self._check_for_cancellation()
+                self._update_progress(6, TOTAL_STEPS)
+                self._update_status("Normalisiere Hauptvideo für robustes Zusammenfügen...")
+                temp_combined_ts_path = os.path.join(tempfile.gettempdir(), "combined.ts")
+                temp_files.append(temp_combined_ts_path)
+                subprocess.run([
+                    "ffmpeg", "-y", "-i", combined_video_path,
+                    "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
+                    temp_combined_ts_path
+                ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+                # Schritt 6a: Längsten Clip finden und mit Wasserzeichen versehen (falls gewünscht)
+                temp_longest_clip_with_watermark_path = None
+                longest_clip_path = None
+                if create_watermark_version:
+                    self._check_for_cancellation()
+                    self._update_progress(7, TOTAL_STEPS)
+                    self._update_status("Suche Clip für Wasserzeichen und füge Wasserzeichen hinzu...")
+
+                    # NEU: Verwende ausgewählten Clip, wenn vorhanden; sonst finde längsten Clip
+                    if watermark_clip_index is not None and 0 <= watermark_clip_index < len(video_clip_paths):
+                        longest_clip_path = video_clip_paths[watermark_clip_index]
+                        print(f"Verwende Clip an Index {watermark_clip_index} für Wasserzeichen: {longest_clip_path}")
+                    else:
+                        longest_clip_path = self._find_longest_clip(video_clip_paths)
+                        print(f"Verwende längsten Clip für Wasserzeichen: {longest_clip_path}")
+
+                    if longest_clip_path and os.path.exists(longest_clip_path):
+                        # Temporäre Datei für längsten Clip mit Wasserzeichen
+                        temp_longest_clip_with_watermark_path = os.path.join(tempfile.gettempdir(),
+                                                                         "longest_clip_with_watermark.mp4")
+                        temp_files.append(temp_longest_clip_with_watermark_path)
+
+                        # Wasserzeichen nur auf den längsten Clip anwenden
+                        self._create_video_with_watermark(
+                            longest_clip_path,  # Längster Clip
+                            temp_longest_clip_with_watermark_path,  # Ausgabe mit Wasserzeichen
+                            video_params
+                        )
+                else:
+                    self._update_progress(7, TOTAL_STEPS)
+
+                # Schritt 7: Finalen Video-Output-Pfad generieren (inkl. Unterordner)
+                self._check_for_cancellation()
+                self._update_progress(8, TOTAL_STEPS)
+                self._update_status("Generiere Video-Ausgabe-Pfad...")
+
+                # NEU: Prüfen ob normale Video-Version erstellt werden soll
+                if kunde and (kunde.handcam_video or kunde.outside_video):
+                    full_video_output_path = self._generate_video_output_path(
+                        base_output_dir, base_filename, kunde
+                    )
+                else:
+                    full_video_output_path = None
+                    self._update_status("Überspringe normale Video-Erstellung (kein Produkt gewählt)...")
+
+                # Schritt 8: .ts-Dateien zusammenfügen (nur wenn normale Version gewünscht)
+                if full_video_output_path:
+                    self._check_for_cancellation()
+                    self._update_progress(9, TOTAL_STEPS)
+                    self._update_status("Füge Videos final zusammen...")
+                    concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
+                    subprocess.run([
+                        "ffmpeg", "-y",
+                        "-i", concat_input,
+                        "-c", "copy",
+                        "-bsf:a", "aac_adtstoasc",
+                        "-movflags", "+faststart",
+                        full_video_output_path
+                    ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                else:
+                    self._update_progress(9, TOTAL_STEPS)
+                    self._update_status("Überspringe normale Video-Erstellung...")
+
+                # Schritt 8a: Wasserzeichen-Version erstellen (falls gewünscht) - NUR längster Clip ohne Intro
+                if create_watermark_version and temp_longest_clip_with_watermark_path:
+                    self._check_for_cancellation()
+                    self._update_progress(10, TOTAL_STEPS)
+                    self._update_status("Erstelle Video mit Wasserzeichen (nur längster Clip)...")
+
+                    watermark_video_output_path = self._generate_watermark_video_path(
+                        base_output_dir, base_filename
+                    )
+
+                    # Kopiere den längsten Clip mit Wasserzeichen direkt (KEIN Intro!)
+                    shutil.copy2(temp_longest_clip_with_watermark_path, watermark_video_output_path)
+                else:
+                    self._update_progress(10, TOTAL_STEPS)
+
+            else:
+                # Schritte 2-8 überspringen, wenn kein Video vorhanden ist
+                self._update_status("Kein Video zur Verarbeitung ausgewählt. Überspringe...")
+                for i in range(2, 11 if create_watermark_version else 10):  # Schritte 2 bis 10/9
+                    self._update_progress(i, TOTAL_STEPS)
+                full_video_output_path = None  # Sicherstellen, dass es None ist
+
+            # --- FOTO VERARBEITUNG (Schritt 11) ---
             self._check_for_cancellation()
-            self._update_progress(9)
+            step_photo = 11 if create_watermark_version else 10
+            self._update_progress(step_photo, TOTAL_STEPS)
+            photo_copy_message = ""
             if photo_paths:
                 self._update_status("Kopiere Fotos...")
-                self._copy_photos_to_output_directory(photo_paths, full_output_path)
+                copied_count = self._copy_photos_to_output_directory(photo_paths, base_output_dir, kunde)
+                photo_copy_message = f"{copied_count} Foto(s) wurden in die entsprechenden Ordner kopiert."
+            else:
+                self._update_status("Keine Fotos zum Kopieren ausgewählt.")
 
-            # Schritt 10: Auf Server uploaden falls gewünscht
+            # --- SERVER UPLOAD (Schritt 12) ---
             self._check_for_cancellation()
-            self._update_progress(10)
+            step_server = 12 if create_watermark_version else 11
+            self._update_progress(step_server, TOTAL_STEPS)
             server_message = ""
             if upload_to_server:
-                self._update_status("Lade Video auf Server hoch...")
-                success, message, server_path = self._upload_to_server(full_output_path)
+                self._update_status("Lade Verzeichnis auf Server hoch...")
+                # Wir laden das gesamte Basis-Verzeichnis hoch
+                success, message, server_path = self._upload_to_server(base_output_dir)
                 server_message = f"\nServer: {message}" if message else ""
 
-            # Fertig
-            self._update_progress(11)
-            self._show_success_message(full_output_path, server_message)
+            # --- ABSCHLUSS (letzter Schritt) ---
+            final_step = 13 if create_watermark_version else 12
+            self._update_progress(final_step, TOTAL_STEPS)
 
             # Speichere MARKER Datei im Ausgabeordner
-            marker_path = os.path.join(os.path.dirname(full_output_path), "_fertig.txt")
+            marker_path = os.path.join(base_output_dir, "_fertig.txt")
             with open(marker_path, 'w') as marker_file:
-                marker_file.write("Videoerstellung abgeschlossen.\n")
+                try:
+                    if kunde is not None and is_dataclass(kunde):
+                        marker_file.write(json.dumps(asdict(kunde), ensure_ascii=False))
+                    else:
+                        marker_file.write(json.dumps({}, ensure_ascii=False))
+                except TypeError as json_err:
+                    print(f"Fehler beim Serialisieren der 'kunde'-Daten: {json_err}")
+
+            # Fertig-Meldung erstellen
+            success_messages = []
+            if full_video_output_path:
+                success_messages.append(f"Das finale Video wurde unter '{full_video_output_path}' gespeichert.")
+            if watermark_video_output_path:
+                success_messages.append(
+                    f"Die Wasserzeichen-Version wurde unter '{watermark_video_output_path}' gespeichert.")
+            if photo_copy_message:
+                success_messages.append(photo_copy_message)
+
+            if not success_messages:
+                # Fallback, wenn nur ein leeres Verzeichnis erstellt wurde (sollte durch app.py verhindert werden)
+                success_messages.append(f"Ausgabe-Verzeichnis '{base_output_dir}' wurde erstellt.")
+
+            if server_message:
+                success_messages.append(server_message)
+
+            self._show_success_message("\n".join(success_messages))
 
         except subprocess.CalledProcessError as e:
-            # Prüfen, ob der Fehler durch einen Abbruch verursacht wurde
             if self.cancel_event.is_set():
                 raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
             error_details = f"FFmpeg Error:\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}"
             print(error_details)
             raise Exception(f"Fehler bei der Videoverarbeitung. Details siehe Konsole.")
+        except PermissionError as e:
+            # Spezifische Behandlung von Zugriffsfehlern
+            raise PermissionError(f"Fehler bei der Erstellung: {str(e)}")
+        except OSError as e:
+            # Spezifische Behandlung von OS-Fehlern
+            raise OSError(f"Fehler bei der Erstellung: {str(e)}")
         except Exception as e:
+            # Bei Fehler die (möglicherweise unvollständigen) Videos löschen
             if not isinstance(e, CancellationError):
-                if full_output_path and os.path.exists(full_output_path):
-                    os.remove(full_output_path)
+                if full_video_output_path and os.path.exists(full_video_output_path):
+                    try:
+                        os.remove(full_video_output_path)
+                    except Exception as del_e:
+                        print(f"Konnte unvollständiges Video nicht löschen: {del_e}")
+                if watermark_video_output_path and os.path.exists(watermark_video_output_path):
+                    try:
+                        os.remove(watermark_video_output_path)
+                    except Exception as del_e:
+                        print(f"Konnte unvollständiges Wasserzeichen-Video nicht löschen: {del_e}")
             raise e
         finally:
             self._cleanup_temp_files(temp_files)
+
+    def _generate_watermark_video_path(self, base_output_dir, base_filename):
+        """Generiert den Pfad für die Wasserzeichen-Video-Version"""
+        watermark_dir = os.path.join(base_output_dir, "Wasserzeichen_Video")
+
+        try:
+            os.makedirs(watermark_dir, exist_ok=True)
+        except PermissionError as e:
+            error_msg = f"Zugriff verweigert beim Erstellen des Wasserzeichen-Ordners\n\n"
+            error_msg += f"Basis-Verzeichnis: {base_output_dir}\n"
+            error_msg += f"Unterordner: Wasserzeichen_Video\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise PermissionError(error_msg)
+        except OSError as e:
+            error_msg = f"Fehler beim Erstellen des Wasserzeichen-Ordners\n\n"
+            error_msg += f"Voller Pfad: {watermark_dir}\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise OSError(error_msg)
+
+        output_filename = f"{base_filename}_wasserzeichen.mp4"
+        full_output_path = os.path.join(watermark_dir, output_filename)
+
+        return full_output_path
+
+    def _create_video_with_watermark(self, input_video_path, output_path, video_params):
+        """
+        Erstellt eine Video-Version mit Wasserzeichen über dem gesamten Video.
+        """
+
+        # Pfad zum Wasserzeichen-Bild
+        wasserzeichen_path = os.path.join(os.path.dirname(self.hintergrund_path), "skydivede_wasserzeichen.png")
+
+        if not os.path.exists(wasserzeichen_path):
+            raise FileNotFoundError("skydivede_wasserzeichen.png fehlt im assets/ Ordner")
+
+        # Wasserzeichen-Video in 240p erstellen
+        target_width = 320
+        target_height = 240
+
+        # Wasserzeichen-Filter mit Downscaling + Overlay
+        watermark_filter = (
+            f"[0]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p[v];"
+            f"[1]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease:eval=init[wm_scaled];"
+            f"[v][wm_scaled]overlay=(W-w)/2:(H-h)/2"
+        )
+
+        # Bestimme Video-Codec basierend auf Input
+        vcodec = video_params.get('vcodec', 'h264')
+        if vcodec in ['hevc', 'h265']:
+            codec_name = 'libx265'
+        else:
+            codec_name = 'libx264'
+
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", input_video_path,
+            "-i", wasserzeichen_path,
+            "-filter_complex", watermark_filter,
+            # VIDEO-ENCODING OPTIMIERT FÜR GESCHWINDIGKEIT:
+            "-c:v", codec_name,
+            "-preset", "ultrafast",     # Schnellstes Preset (~10x schneller als medium)
+            "-crf", "28",               # Höheres CRF = schneller + kleinere Datei (für Wasserzeichen-Version OK)
+            "-tune", "fastdecode",      # Optimiert für schnelles Abspielen
+            "-movflags", "+faststart",
+            # Audio entfernen (kein Sound im Wasserzeichen-Video)
+            "-an",                      # Kein Audio → noch schneller + kleinere Datei
+            output_path
+        ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
     def _create_intro_with_silent_audio(self, output_path, dauer, v_params, drawtext_filter):
         """
@@ -199,13 +398,20 @@ class VideoProcessor:
         print(f"Erstelle Intro mit erweiterten Parametern: {v_params}")
         video_filters = f"scale={v_params['width']}:{v_params['height']},{drawtext_filter}"
 
+        # Bestimme den richtigen Codec-Namen für die Intro-Erstellung
+        vcodec = v_params.get('vcodec', 'h264')
+        if vcodec in ['hevc', 'h265']:
+            codec_name = 'libx265'
+        else:
+            codec_name = 'libx264'
+
         command = [
             "ffmpeg", "-y",
             "-loop", "1", "-i", self.hintergrund_path,
             "-f", "lavfi", "-i",
             f"anullsrc=channel_layout={v_params['channel_layout']}:sample_rate={v_params['sample_rate']}",
             "-vf", video_filters,
-            "-c:v", v_params['vcodec'],
+            "-c:v", codec_name,  # Verwende libx265 statt 'hevc'
             "-tag:v", v_params['vtag'],
             "-pix_fmt", v_params['pix_fmt'],
             "-r", v_params['fps'],
@@ -215,12 +421,10 @@ class VideoProcessor:
             "-shortest",
             "-map", "0:v:0",
             "-map", "1:a:0",
-            # NEU: explizite Qualitätseinstellungen und Farbparameter für bessere Kompatibilität
             "-preset", "fast",
-            "-crf", "18",  # Visuell verlustfrei, um Artefakte zu vermeiden
+            "-crf", "18",
         ]
 
-        # Füge die ausgelesenen Farb-Parameter hinzu, falls vorhanden
         if v_params.get('color_range'):
             command.extend(["-color_range", v_params['color_range']])
         if v_params.get('colorspace'):
@@ -230,15 +434,10 @@ class VideoProcessor:
         if v_params.get('color_trc'):
             command.extend(["-color_trc", v_params['color_trc']])
 
-        # NEU: Füge Profil und Level hinzu, falls vorhanden.
-        # Dies ist oft der entscheidende Punkt für 4K-Kompatibilität.
         if v_params.get('profile') and v_params['vcodec'] in ['h264', 'hevc']:
-            # FIX: Der Profil-Name muss für den ffmpeg-Befehl kleingeschrieben werden.
-            profile_str = str(v_params['profile']).lower()
+            profile_str = str(v_params['profile']).lower().replace(" ", "")
             command.extend(["-profile:v", profile_str])
         if v_params.get('level') and v_params['vcodec'] in ['h264', 'hevc']:
-            # Level wird von ffprobe oft als Zahl (z.B. 41 für 4.1) geliefert.
-            # Wir rechnen es für den ffmpeg-Befehl um.
             try:
                 level_str = str(float(v_params['level']) / 10.0)
                 command.extend(["-level:v", level_str])
@@ -254,34 +453,53 @@ class VideoProcessor:
             print(f"Fehler bei Intro-Erstellung: {result.stderr}")
             raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
 
-    def _copy_photos_to_output_directory(self, photo_paths, output_video_path):
-        """Kopiert alle Fotos in ein Foto-Unterverzeichnis"""
-        if not photo_paths:
-            return
+    def _copy_photos_to_output_directory(self, photo_paths, base_output_dir, kunde):
+        """
+        Kopiert alle Fotos in die entsprechenden Unterverzeichnisse (Handcam_Foto / Outside_Foto)
+        basierend auf den im Kunde-Objekt ausgewählten Optionen.
+        Gibt die Anzahl der kopierten *Quelldateien* zurück.
+        """
+        if not photo_paths or not kunde:
+            return 0
 
-        output_dir = os.path.dirname(output_video_path)
-        photos_dir = os.path.join(output_dir, "Fotos")
+        # Definiere Zielverzeichnisse
+        handcam_dir = os.path.join(base_output_dir, "Handcam_Foto")
+        outside_dir = os.path.join(base_output_dir, "Outside_Foto")
 
-        try:
-            os.makedirs(photos_dir, exist_ok=True)
-            copied_count = 0
-            for photo_path in photo_paths:
-                self._check_for_cancellation()  # Check before copying each file
-                if os.path.exists(photo_path):
-                    filename = os.path.basename(photo_path)
-                    destination_path = os.path.join(photos_dir, filename)
-                    shutil.copy2(photo_path, destination_path)
-                    copied_count += 1
-            print(f"{copied_count} Foto(s) nach '{photos_dir}' kopiert")
-        except Exception as e:
-            if not isinstance(e, CancellationError):
-                print(f"Fehler beim Kopieren der Fotos: {e}")
-            raise e
+        # Erstelle Verzeichnisse nur, wenn sie im Formular ausgewählt wurden
+        if kunde.handcam_foto:
+            os.makedirs(handcam_dir, exist_ok=True)
+        if kunde.outside_foto:
+            os.makedirs(outside_dir, exist_ok=True)
+
+        copied_files_count = 0
+        for photo_path in photo_paths:
+            self._check_for_cancellation()
+            if not os.path.exists(photo_path):
+                continue
+
+            filename = os.path.basename(photo_path)
+            copied_this_file = False
+
+            if kunde.handcam_foto:
+                destination_path = os.path.join(handcam_dir, filename)
+                shutil.copy2(photo_path, destination_path)
+                copied_this_file = True
+
+            if kunde.outside_foto:
+                destination_path = os.path.join(outside_dir, filename)
+                shutil.copy2(photo_path, destination_path)
+                copied_this_file = True
+
+            if copied_this_file:
+                copied_files_count += 1
+
+        print(f"{copied_files_count} Foto(s) nach '{handcam_dir}' und/oder '{outside_dir}' kopiert")
+        return copied_files_count
 
     def _get_video_info(self, video_path):
         """
         Ermittelt detaillierte Video- und Audio-Stream-Informationen mit ffprobe.
-        NEU: Liest zusätzliche Farb-Metadaten, Profil und Level aus, die für 4K/HDR-Material entscheidend sind.
         """
         self._check_for_cancellation()
         command = [
@@ -315,12 +533,10 @@ class VideoProcessor:
             "acodec": audio_stream.get("codec_name"),
             "sample_rate": audio_stream.get("sample_rate"),
             "channel_layout": audio_stream.get("channel_layout", "stereo"),
-            # Farb-Parameter auslesen
             "color_range": video_stream.get("color_range"),
             "colorspace": video_stream.get("color_space"),
             "color_primaries": video_stream.get("color_primaries"),
-            "color_trc": video_stream.get("color_transfer"),  # 'color_trc' in ffmpeg
-            # NEU: Codec Profile und Level für maximale Kompatibilität
+            "color_trc": video_stream.get("color_transfer"),
             "profile": video_stream.get("profile"),
             "level": video_stream.get("level"),
         }
@@ -337,7 +553,7 @@ class VideoProcessor:
         text_inhalte.extend([f"Datum: {datum}", f"Ort: {ort}"])
         text_inhalte = [ffmpeg_escape(t) for t in text_inhalte]
 
-        font_size = int(clip_height / 22)  # Etwas kleiner für bessere Lesbarkeit bei 4K
+        font_size = int(clip_height / 22)
         y = clip_height * 0.15
         y_step = clip_height * 0.15
         drawtext_cmds = []
@@ -350,8 +566,8 @@ class VideoProcessor:
 
         return ",".join(drawtext_cmds)
 
-    def _generate_output_path(self, load, gast, tandemmaster, videospringer, datum, speicherort, outside_video):
-        """Generiert den finalen Output-Pfad in einem gleichnamigen Verzeichnis"""
+    def _generate_base_output_dir(self, load, gast, tandemmaster, videospringer, datum, speicherort, outside_video):
+        """Generiert den Basis-Output-Pfad (nur das Verzeichnis)"""
         try:
             datum_obj = date.fromisoformat('-'.join(datum.split('.')[::-1]))
             datum_formatiert = datum_obj.strftime("%Y%m%d")
@@ -363,22 +579,83 @@ class VideoProcessor:
         if outside_video:
             base_filename += f"_V_{videospringer}"
 
-        output_dir = os.path.join(speicherort, sanitize_filename(base_filename))
-        os.makedirs(output_dir, exist_ok=True)
+        base_filename_sanitized = sanitize_filename(base_filename)
+        output_dir = os.path.join(speicherort, base_filename_sanitized)
+
+        # Versuche Verzeichnis zu erstellen mit verbesserter Fehlerbehandlung
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except PermissionError as e:
+            # Detaillierte Fehlerdiagnose
+            error_msg = f"Zugriff verweigert beim Erstellen von '{base_filename_sanitized}'\n\n"
+            error_msg += f"Mögliche Ursachen:\n"
+            error_msg += f"1. Verzeichnis wird von einem anderen Prozess verwendet\n"
+            error_msg += f"2. Keine Schreibrechte für: {speicherort}\n"
+            error_msg += f"3. Antivirus blockiert den Zugriff\n\n"
+            error_msg += f"Bitte prüfen Sie:\n"
+            error_msg += f"• Haben Sie Schreibrechte für den Speicherort?\n"
+            error_msg += f"• Ist das Verzeichnis in einem anderen Programm geöffnet?\n"
+            error_msg += f"• Blockiert Ihr Antivirus den Zugriff?\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise PermissionError(error_msg)
+        except OSError as e:
+            # Andere OS-Fehler (z.B. ungültiger Pfad, Festplatte voll)
+            error_msg = f"Fehler beim Erstellen des Verzeichnisses '{base_filename_sanitized}'\n\n"
+            error_msg += f"Speicherort: {speicherort}\n"
+            error_msg += f"Voller Pfad: {output_dir}\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise OSError(error_msg)
+
+        return output_dir, base_filename_sanitized  # Gebe auch den sauberen Basisnamen zurück
+
+    def _generate_video_output_path(self, base_output_dir, base_filename, kunde):
+        """Generiert den finalen Video-Output-Pfad (in Handcam_Video/Outside_Video)"""
+
+        video_subdir_name = ""
+
+        # Bestimme das Unterverzeichnis basierend auf den Kunde-Optionen
+        # Wir priorisieren Outside_Video, wenn beides ausgewählt ist,
+        # oder speichern es in Handcam, wenn nur das ausgewählt ist.
+        if kunde.outside_video:
+            video_subdir_name = "Outside_Video"
+        elif kunde.handcam_video:
+            video_subdir_name = "Handcam_Video"
+        else:
+            # Fallback, falls die Logik in app.py dies zulässt (sollte nicht, aber sicher ist sicher)
+            video_subdir_name = "Handcam_Video"
+
+        video_dir = os.path.join(base_output_dir, video_subdir_name)
+
+        # Versuche Unterverzeichnis zu erstellen mit Fehlerbehandlung
+        try:
+            os.makedirs(video_dir, exist_ok=True)
+        except PermissionError as e:
+            error_msg = f"Zugriff verweigert beim Erstellen des Unterordners '{video_subdir_name}'\n\n"
+            error_msg += f"Basis-Verzeichnis: {base_output_dir}\n"
+            error_msg += f"Unterordner: {video_subdir_name}\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise PermissionError(error_msg)
+        except OSError as e:
+            error_msg = f"Fehler beim Erstellen des Unterordners '{video_subdir_name}'\n\n"
+            error_msg += f"Voller Pfad: {video_dir}\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise OSError(error_msg)
 
         output_filename = f"{base_filename}.mp4"
-        full_output_path = os.path.join(output_dir, sanitize_filename(output_filename))
+        full_output_path = os.path.join(video_dir, output_filename)  # Name bleibt gleich, nur Pfad ändert sich
 
         return full_output_path
 
-    def _upload_to_server(self, local_video_path):
+    def _upload_to_server(self, local_directory_path):
         """Lädt das erstellte Verzeichnis auf den Server hoch"""
         try:
             from ..utils.file_utils import upload_to_server_simple
-            video_dir = os.path.dirname(local_video_path)
             # Hinzufügen einer Prüfung vor dem langen Upload-Prozess
             self._check_for_cancellation()
-            success, message, server_path = upload_to_server_simple(video_dir)
+
+            # Übergebe das Verzeichnis direkt an die Upload-Funktion
+            success, message, server_path = upload_to_server_simple(local_directory_path)
+
             if success:
                 print(f"Server Upload erfolgreich: {server_path}")
             else:
@@ -386,7 +663,7 @@ class VideoProcessor:
             return success, message, server_path
         except Exception as e:
             if isinstance(e, CancellationError):
-                raise e  # Erneut auslösen, um vom Haupt-Handler gefangen zu werden
+                raise e
             error_msg = f"Upload Fehler: {str(e)}"
             print(error_msg)
             return False, error_msg, ""
@@ -395,12 +672,10 @@ class VideoProcessor:
         if self.progress_callback:
             self.progress_callback(step, total_steps)
 
-    def _show_success_message(self, output_path, server_message=""):
+    def _show_success_message(self, message):
+        """Zeigt die kombinierte Erfolgsmeldung an"""
         if self.status_callback:
-            msg = f"Das finale Video mit Intro wurde unter '{output_path}' gespeichert."
-            if server_message:
-                msg += f"\n{server_message}"
-            self.status_callback("success", msg)
+            self.status_callback("success", message)
 
     def _handle_cancellation(self):
         print("Cancellation signal received and handled in VideoProcessor.")
@@ -409,7 +684,7 @@ class VideoProcessor:
 
     def _handle_error(self, error):
         if self.status_callback:
-            self.status_callback("error", f"Fehler bei der Videoerstellung:\n{error}")
+            self.status_callback("error", f"Fehler bei der Erstellung:\n{error}")
 
     def _update_status(self, message):
         if self.status_callback:
@@ -429,6 +704,45 @@ class VideoProcessor:
     def cancel_process(self):
         print("Cancel event set!")
         self.cancel_event.set()
+
+    def _find_longest_clip(self, video_clip_paths):
+        """
+        Findet den längsten Clip aus einer Liste von Video-Pfaden.
+        Gibt den Pfad des längsten Clips zurück, oder None wenn die Liste leer ist.
+        """
+        if not video_clip_paths:
+            return None
+
+        longest_path = None
+        longest_duration = 0.0
+
+        for video_path in video_clip_paths:
+            if not video_path or not os.path.exists(video_path):
+                continue
+
+            try:
+                # Hole die Dauer des Videos mit ffprobe
+                command = [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1:noprint_wrappers=1",
+                    video_path
+                ]
+                result = subprocess.run(command, capture_output=True, text=True,
+                                      timeout=10, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+                if result.returncode == 0:
+                    duration = float(result.stdout.strip())
+                    if duration > longest_duration:
+                        longest_duration = duration
+                        longest_path = video_path
+                        print(f"Neuer längster Clip gefunden: {video_path} ({duration}s)")
+            except Exception as e:
+                print(f"Fehler beim Ermitteln der Dauer von {video_path}: {e}")
+                continue
+
+        print(f"Längster Clip: {longest_path} (Dauer: {longest_duration}s)")
+        return longest_path
 
     def reset_cancel_event(self):
         self.cancel_event.clear()

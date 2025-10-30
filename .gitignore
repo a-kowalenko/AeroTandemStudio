@@ -17,6 +17,24 @@
 /dependency_installer/vlc/
 /dependency_installer/ffmpeg/
 
+# Build artifacts (automatisch generiert - NICHT committen)
+version_info.txt        # Automatisch von build.py generiert
+version_info.rc         # Nur Referenz, nicht verwendet
+pyzbar_binaries.txt     # Automatisch von build.py generiert
+dist/                   # PyInstaller Output-Verzeichnis
+build/                  # PyInstaller temporäre Dateien
+__pycache__/            # Python Bytecode Cache
+*.pyc                   # Python Bytecode
+*.pyo                   # Python Optimiert
+*.spec.lock             # PyInstaller Lock-Datei
+
+# WICHTIG: *.spec Dateien (ohne .lock) werden COMMITTIERT!
+# Sie enthalten die Build-Konfiguration und müssen versioniert werden.
+
+# Installer artifacts (NICHT committen)
+AeroTandemStudio_Installer_*.exe
+setup_builds/
+
 # AWS User-specific
 .idea/**/aws.xml
 

@@ -14,7 +14,7 @@ except Exception:
     ctypes = None
 
 def _add_to_user_path_windows(bin_path, report):
-    """Add bin_path to HKCU\Environment Path and broadcast change (best-effort)."""
+    r"""Add bin_path to HKCU\Environment Path and broadcast change (best-effort)."""
     if winreg is None:
         report("Skipping PATH update: winreg not available.")
         return

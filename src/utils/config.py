@@ -11,6 +11,14 @@ class ConfigManager:
 
     def load_settings(self):
         """Lädt die Einstellungen aus der JSON-Datei"""
+        # Stelle sicher, dass das Config-Verzeichnis existiert
+        config_dir = os.path.dirname(self.CONFIG_FILE)
+        if config_dir and not os.path.exists(config_dir):
+            try:
+                os.makedirs(config_dir, exist_ok=True)
+            except Exception as e:
+                print(f"Warnung: Konnte Config-Verzeichnis nicht erstellen: {e}")
+
         if os.path.exists(self.CONFIG_FILE):
             try:
                 with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:

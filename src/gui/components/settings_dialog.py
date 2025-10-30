@@ -79,7 +79,7 @@ class SettingsDialog:
         self.server_entry = tk.Entry(server_frame, textvariable=self.server_var, font=("Arial", 11))
         self.server_entry.grid(row=0, column=1, columnspan=3, sticky="ew", padx=5, pady=5)
 
-        tk.Label(server_frame, text="Beispiel: smb://169.254.169.254/aktuell", font=("Arial", 9), fg="gray").grid(row=1,
+        tk.Label(server_frame, text="Beispiel: smb://server/share oder \\\\server\\share oder C:\\lokaler\\pfad", font=("Arial", 9), fg="gray").grid(row=1,
                                                                                                                   column=1,
                                                                                                                   columnspan=3,
                                                                                                                   sticky="w",
@@ -122,9 +122,85 @@ class SettingsDialog:
         # Dauer
         tk.Label(app_settings_frame, text="Dauer (Sek.):", font=("Arial", 11)).grid(row=1, column=0, sticky="w", padx=5,
                                                                                     pady=5)
+
+        # Frame für Dropdown mit Pfeil
+        dauer_frame = tk.Frame(app_settings_frame, bg="white", relief=tk.RAISED, borderwidth=1)
+        dauer_frame.grid(row=1, column=1, sticky="w", padx=5, pady=5)
+        dauer_frame.grid_columnconfigure(0, weight=1)
+
+        # Label das wie ein Button aussieht mit Pfeil
+        self.dauer_display = tk.Label(
+            dauer_frame,
+            textvariable=self.dauer_var,
+            font=("Arial", 10),
+            bg="white",
+            fg="black",
+            anchor="w",
+            width=6,
+            padx=8,
+            pady=4,
+            cursor="hand2"
+        )
+        self.dauer_display.grid(row=0, column=0, sticky="ew")
+
+        # Pfeil-Label (rechts)
+        dauer_arrow = tk.Label(
+            dauer_frame,
+            text="▼",
+            font=("Arial", 8),
+            bg="white",
+            fg="black",
+            padx=5,
+            cursor="hand2"
+        )
+        dauer_arrow.grid(row=0, column=1)
+
+        # Verstecktes OptionMenu (für Funktionalität)
         dauer_dropdown = tk.OptionMenu(app_settings_frame, self.dauer_var, "1", "3", "4", "5", "6", "7", "8", "9", "10")
-        dauer_dropdown.config(font=("Arial", 10), anchor="w")
-        dauer_dropdown.grid(row=1, column=1, sticky="w", padx=5, pady=5)  # Nur 'w' sticky
+
+        # Style für das Dropdown-Menü
+        dauer_dropdown["menu"].config(
+            font=("Arial", 10),
+            bg="white",
+            fg="black",
+            activebackground="#2196F3",
+            activeforeground="white",
+            relief=tk.FLAT,
+            borderwidth=0
+        )
+
+        # Click-Handler für Frame und Labels
+        def show_dauer_menu(event):
+            dauer_dropdown.event_generate("<Button-1>")
+            # Positioniere das Menü unter dem Frame
+            x = dauer_frame.winfo_rootx()
+            y = dauer_frame.winfo_rooty() + dauer_frame.winfo_height()
+            try:
+                dauer_dropdown["menu"].tk_popup(x, y)
+            finally:
+                dauer_dropdown["menu"].grab_release()
+
+        dauer_frame.bind("<Button-1>", show_dauer_menu)
+        self.dauer_display.bind("<Button-1>", show_dauer_menu)
+        dauer_arrow.bind("<Button-1>", show_dauer_menu)
+
+        # Hover-Effekte
+        def on_enter(e):
+            dauer_frame.config(bg="#E3F2FD")
+            self.dauer_display.config(bg="#E3F2FD")
+            dauer_arrow.config(bg="#E3F2FD")
+
+        def on_leave(e):
+            dauer_frame.config(bg="white")
+            self.dauer_display.config(bg="white")
+            dauer_arrow.config(bg="white")
+
+        dauer_frame.bind("<Enter>", on_enter)
+        dauer_frame.bind("<Leave>", on_leave)
+        self.dauer_display.bind("<Enter>", on_enter)
+        self.dauer_display.bind("<Leave>", on_leave)
+        dauer_arrow.bind("<Enter>", on_enter)
+        dauer_arrow.bind("<Leave>", on_leave)
 
         row += 1
 
@@ -190,8 +266,9 @@ class SettingsDialog:
         """Startet die Update-Prüfung"""
         try:
             # Verwende die gleiche Funktion wie beim App-Start, aber mit Benachrichtigung
+            # force_check=True zeigt auch ignorierte Versionen an
             from src.installer.updater import initialize_updater
-            initialize_updater(self.dialog, self.APP_VERSION, show_no_update_message=True)
+            initialize_updater(self.dialog, self.APP_VERSION, show_no_update_message=True, force_check=True)
         except Exception as e:
             messagebox.showerror("Fehler", f"Update-Prüfung konnte nicht gestartet werden:\n{str(e)}",
                                  parent=self.dialog)
@@ -236,13 +313,11 @@ class SettingsDialog:
             messagebox.showwarning("Fehler", "Bitte geben Sie eine Server-Adresse ein.", parent=self.dialog)
             return
 
-        if not server_url.startswith(('smb://', '//', '\\\\')):
-            messagebox.showwarning(
-                "Format Fehler",
-                "Server-Adresse sollte mit 'smb://' beginnen.\n\nBeispiel: smb://169.254.169.254/aktuell",
-                parent=self.dialog
-            )
-            return
+        # Validierung entfernt - normalize_server_path() in file_utils akzeptiert alle Formate:
+        # - smb://server/share
+        # - \\server\share
+        # - //server/share
+        # - C:\lokaler\pfad (für Tests)
 
         if not speicherort:
             messagebox.showwarning("Fehler", "Bitte geben Sie einen Standard-Speicherort an.", parent=self.dialog)

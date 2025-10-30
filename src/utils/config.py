@@ -41,7 +41,8 @@ class ConfigManager:
             "tandemmaster": "",
             "videospringer": "",
             "upload_to_server": False,
-            "server_url": "smb://169.254.169.254/aktuell"  # Neue Standard-URL
+            "server_url": "smb://169.254.169.254/aktuell",  # Neue Standard-URL
+            "qr_check_enabled": False  # QR-Code Prüfung standardmäßig aus
         }
 
     def save_settings(self, settings):

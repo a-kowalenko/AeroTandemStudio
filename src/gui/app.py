@@ -674,7 +674,8 @@ class VideoGeneratorApp:
         # VideoProcessor initialisieren
         self.video_processor = VideoProcessor(
             progress_callback=self._update_progress,
-            status_callback=self._handle_status_update
+            status_callback=self._handle_status_update,
+            config_manager=self.config  # Config Manager übergeben
         )
 
         payload = {

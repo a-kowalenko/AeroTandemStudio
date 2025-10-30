@@ -18,7 +18,11 @@ class DragDropFrame:
         self.video_paths = []
         self.photo_paths = []
         self.last_first_video = None  # NEU: Speichert den ersten Clip für Vergleich
-        self.qr_check_enabled = tk.BooleanVar(value=False)  # NEU: Checkbox-Variable für QR-Prüfung
+
+        # Lade QR-Check-Status aus Config (Standard: False)
+        qr_check_initial = self.app.config.get_settings().get("qr_check_enabled", False)
+        self.qr_check_enabled = tk.BooleanVar(value=qr_check_initial)  # NEU: Checkbox-Variable für QR-Prüfung
+
         self.watermark_clip_index = None  # NEU: Index des Clips für Wasserzeichen
         self.show_watermark_column = False  # NEU: Steuert Sichtbarkeit der Wasserzeichen-Spalte
         self.create_widgets()
@@ -405,14 +409,21 @@ class DragDropFrame:
         """
         Wird aufgerufen, wenn die QR-Code-Checkbox angeklickt wird.
         Führt die QR-Prüfung sofort aus, wenn die Checkbox aktiviert wird.
+        Speichert den Status in der Config.
         """
+        # Speichere den neuen Status in der Config
+        qr_check_status = self.qr_check_enabled.get()
+        settings = self.app.config.get_settings()
+        settings["qr_check_enabled"] = qr_check_status
+        self.app.config.save_settings(settings)
+
         # Nur wenn Checkbox jetzt aktiviert ist UND Videos vorhanden sind
-        if self.qr_check_enabled.get() and self.video_paths:
+        if qr_check_status and self.video_paths:
             print("QR-Code-Prüfung wurde aktiviert - führe Prüfung durch...")
             # Trigger Vorschau-Update mit erzwungener QR-Prüfung
             if hasattr(self.app, 'run_qr_analysis'):
                 self.app.run_qr_analysis(self.video_paths.copy())
-        elif not self.qr_check_enabled.get():
+        elif not qr_check_status:
             print("QR-Code-Prüfung wurde deaktiviert")
 
     def _update_video_table(self):

@@ -1,7 +1,6 @@
-﻿import cv2
+import cv2
 import json
 from pyzbar.pyzbar import decode
-from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from src.model.kunde import Kunde
@@ -91,7 +90,6 @@ def analysiere_ersten_clip(video_pfad: str) -> Tuple[Optional[Kunde], bool]:
                         # (z.B. kein JSON, falsche Felder, falscher Datentyp)
                         print(f"QR-Code bei Frame {frame_zaehler} gefunden, aber Parsing fehlgeschlagen: {e}")
                         # Wir machen weiter und suchen nach einem *gültigen* Code
-                        pass
 
             frame_zaehler += 1
 

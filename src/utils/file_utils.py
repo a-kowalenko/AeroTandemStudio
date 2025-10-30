@@ -22,7 +22,7 @@ from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 # ============================================================================
 
 def normalize_server_path(server_url: str) -> Tuple[Optional[str], bool, bool]:
-    """
+    r"""
     Normalize various server path formats to a unified format.
 
     Accepts:
@@ -137,7 +137,7 @@ def _get_credentials(settings: dict) -> Tuple[str, str]:
 # ============================================================================
 
 def upload_to_server_simple(local_directory: str, config_manager) -> Tuple[bool, str, str]:
-    """
+    r"""
     Simple upload method using native tools.
 
     Args:
@@ -188,7 +188,7 @@ def upload_to_server_simple(local_directory: str, config_manager) -> Tuple[bool,
 # ============================================================================
 
 def _upload_windows_robocopy(local_directory: str, server_path: str, settings: dict) -> Tuple[bool, str, str]:
-    """
+    r"""
     Upload for Windows using robocopy (more reliable than xcopy).
 
     Args:
@@ -233,7 +233,7 @@ def _upload_windows_robocopy(local_directory: str, server_path: str, settings: d
 
 
 def _upload_windows_with_credentials(local_directory: str, server_path: str, settings: dict) -> Tuple[bool, str, str]:
-    """
+    r"""
     Upload for Windows with explicit credentials.
 
     Args:

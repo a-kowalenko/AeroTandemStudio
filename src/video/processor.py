@@ -297,6 +297,12 @@ class VideoProcessor:
             error_details = f"FFmpeg Error:\nSTDOUT:\n{e.stdout}\nSTDERR:\n{e.stderr}"
             print(error_details)
             raise Exception(f"Fehler bei der Videoverarbeitung. Details siehe Konsole.")
+        except PermissionError as e:
+            # Spezifische Behandlung von Zugriffsfehlern
+            raise PermissionError(f"Fehler bei der Erstellung: {str(e)}")
+        except OSError as e:
+            # Spezifische Behandlung von OS-Fehlern
+            raise OSError(f"Fehler bei der Erstellung: {str(e)}")
         except Exception as e:
             # Bei Fehler die (möglicherweise unvollständigen) Videos löschen
             if not isinstance(e, CancellationError):
@@ -317,7 +323,20 @@ class VideoProcessor:
     def _generate_watermark_video_path(self, base_output_dir, base_filename):
         """Generiert den Pfad für die Wasserzeichen-Video-Version"""
         watermark_dir = os.path.join(base_output_dir, "Wasserzeichen_Video")
-        os.makedirs(watermark_dir, exist_ok=True)
+
+        try:
+            os.makedirs(watermark_dir, exist_ok=True)
+        except PermissionError as e:
+            error_msg = f"Zugriff verweigert beim Erstellen des Wasserzeichen-Ordners\n\n"
+            error_msg += f"Basis-Verzeichnis: {base_output_dir}\n"
+            error_msg += f"Unterordner: Wasserzeichen_Video\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise PermissionError(error_msg)
+        except OSError as e:
+            error_msg = f"Fehler beim Erstellen des Wasserzeichen-Ordners\n\n"
+            error_msg += f"Voller Pfad: {watermark_dir}\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise OSError(error_msg)
 
         output_filename = f"{base_filename}_wasserzeichen.mp4"
         full_output_path = os.path.join(watermark_dir, output_filename)
@@ -562,7 +581,30 @@ class VideoProcessor:
 
         base_filename_sanitized = sanitize_filename(base_filename)
         output_dir = os.path.join(speicherort, base_filename_sanitized)
-        os.makedirs(output_dir, exist_ok=True)
+
+        # Versuche Verzeichnis zu erstellen mit verbesserter Fehlerbehandlung
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except PermissionError as e:
+            # Detaillierte Fehlerdiagnose
+            error_msg = f"Zugriff verweigert beim Erstellen von '{base_filename_sanitized}'\n\n"
+            error_msg += f"Mögliche Ursachen:\n"
+            error_msg += f"1. Verzeichnis wird von einem anderen Prozess verwendet\n"
+            error_msg += f"2. Keine Schreibrechte für: {speicherort}\n"
+            error_msg += f"3. Antivirus blockiert den Zugriff\n\n"
+            error_msg += f"Bitte prüfen Sie:\n"
+            error_msg += f"• Haben Sie Schreibrechte für den Speicherort?\n"
+            error_msg += f"• Ist das Verzeichnis in einem anderen Programm geöffnet?\n"
+            error_msg += f"• Blockiert Ihr Antivirus den Zugriff?\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise PermissionError(error_msg)
+        except OSError as e:
+            # Andere OS-Fehler (z.B. ungültiger Pfad, Festplatte voll)
+            error_msg = f"Fehler beim Erstellen des Verzeichnisses '{base_filename_sanitized}'\n\n"
+            error_msg += f"Speicherort: {speicherort}\n"
+            error_msg += f"Voller Pfad: {output_dir}\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise OSError(error_msg)
 
         return output_dir, base_filename_sanitized  # Gebe auch den sauberen Basisnamen zurück
 
@@ -583,7 +625,21 @@ class VideoProcessor:
             video_subdir_name = "Handcam_Video"
 
         video_dir = os.path.join(base_output_dir, video_subdir_name)
-        os.makedirs(video_dir, exist_ok=True)
+
+        # Versuche Unterverzeichnis zu erstellen mit Fehlerbehandlung
+        try:
+            os.makedirs(video_dir, exist_ok=True)
+        except PermissionError as e:
+            error_msg = f"Zugriff verweigert beim Erstellen des Unterordners '{video_subdir_name}'\n\n"
+            error_msg += f"Basis-Verzeichnis: {base_output_dir}\n"
+            error_msg += f"Unterordner: {video_subdir_name}\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise PermissionError(error_msg)
+        except OSError as e:
+            error_msg = f"Fehler beim Erstellen des Unterordners '{video_subdir_name}'\n\n"
+            error_msg += f"Voller Pfad: {video_dir}\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise OSError(error_msg)
 
         output_filename = f"{base_filename}.mp4"
         full_output_path = os.path.join(video_dir, output_filename)  # Name bleibt gleich, nur Pfad ändert sich

@@ -39,9 +39,18 @@ PAYPAL_LOGO_PATH = get_resource_path("assets/paypal_logo.png")
 VLC_PATH = get_resource_path("dependency_installer/vlc")
 
 # --- Konfigurationsdatei-Pfad ---
-CONFIG_FILE = get_resource_path("config/config.json")
+# Speichere config.json im Benutzer-AppData-Verzeichnis (nicht im Programm-Ordner)
+# Grund: Program Files hat keine Schreibrechte, AppData schon
+if IS_WINDOWS:
+    CONFIG_DIR = os.path.join(os.getenv('LOCALAPPDATA'), 'AeroTandemStudio')
+elif IS_MACOS:
+    CONFIG_DIR = os.path.expanduser('~/Library/Application Support/AeroTandemStudio')
+else:  # Linux
+    CONFIG_DIR = os.path.expanduser('~/.config/AeroTandemStudio')
+
+CONFIG_FILE = os.path.join(CONFIG_DIR, 'config.json')
 
 # --- Log-Dateipfad ---
-LOG_FILE = "logs/app.log"
+LOG_FILE = os.path.join(CONFIG_DIR, 'app.log')
 
 WASSERZEICHEN_PATH = get_resource_path("assets/skydivede_wasserzeichen.png")

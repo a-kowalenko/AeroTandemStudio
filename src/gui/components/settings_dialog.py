@@ -79,7 +79,7 @@ class SettingsDialog:
         self.server_entry = tk.Entry(server_frame, textvariable=self.server_var, font=("Arial", 11))
         self.server_entry.grid(row=0, column=1, columnspan=3, sticky="ew", padx=5, pady=5)
 
-        tk.Label(server_frame, text="Beispiel: smb://169.254.169.254/aktuell", font=("Arial", 9), fg="gray").grid(row=1,
+        tk.Label(server_frame, text="Beispiel: smb://server/share oder \\\\server\\share oder C:\\lokaler\\pfad", font=("Arial", 9), fg="gray").grid(row=1,
                                                                                                                   column=1,
                                                                                                                   columnspan=3,
                                                                                                                   sticky="w",
@@ -236,13 +236,11 @@ class SettingsDialog:
             messagebox.showwarning("Fehler", "Bitte geben Sie eine Server-Adresse ein.", parent=self.dialog)
             return
 
-        if not server_url.startswith(('smb://', '//', '\\\\')):
-            messagebox.showwarning(
-                "Format Fehler",
-                "Server-Adresse sollte mit 'smb://' beginnen.\n\nBeispiel: smb://169.254.169.254/aktuell",
-                parent=self.dialog
-            )
-            return
+        # Validierung entfernt - normalize_server_path() in file_utils akzeptiert alle Formate:
+        # - smb://server/share
+        # - \\server\share
+        # - //server/share
+        # - C:\lokaler\pfad (für Tests)
 
         if not speicherort:
             messagebox.showwarning("Fehler", "Bitte geben Sie einen Standard-Speicherort an.", parent=self.dialog)

@@ -53,6 +53,35 @@ def bump_version(level="build"):
     print(f"   Version: {version} → {new_version}")
     return new_version
 
+def find_pyzbar_dlls():
+    """
+    Findet pyzbar DLLs im site-packages Verzeichnis.
+    Schreibt die Pfade in pyzbar_binaries.txt für PyInstaller.
+    """
+    import site
+    import glob
+
+    pyzbar_libs = []
+    for site_dir in site.getsitepackages():
+        pyzbar_path = os.path.join(site_dir, 'pyzbar')
+        if os.path.exists(pyzbar_path):
+            # Alle .dll Dateien im pyzbar Ordner finden
+            dll_files = glob.glob(os.path.join(pyzbar_path, '*.dll'))
+            for dll in dll_files:
+                pyzbar_libs.append((dll, 'pyzbar'))
+            print(f"   ✅ Gefunden: {len(dll_files)} pyzbar DLLs in {pyzbar_path}")
+            break
+
+    if not pyzbar_libs:
+        print("   ⚠️  Warnung: Keine pyzbar DLLs gefunden!")
+
+    # Schreibe in temporäre Datei für .spec
+    binaries_file = Path("pyzbar_binaries.txt")
+    import json
+    binaries_file.write_text(json.dumps(pyzbar_libs), encoding="utf-8")
+
+    return pyzbar_libs
+
 def update_version_info():
     """
     Aktualisiert version_info.txt mit der aktuellen Version aus VERSION.txt
@@ -100,7 +129,7 @@ VSVersionInfo(
       StringTable(
         u'040704B0',  # Deutsch (0x0407), Unicode (0x04B0)
         [StringStruct(u'CompanyName', u'Andreas Kowalenko'),
-        StringStruct(u'FileDescription', u'Aero Tandem Studio - Video Production Tool'),
+        StringStruct(u'FileDescription', u'Aero Tandem Studio'),
         StringStruct(u'FileVersion', u'{version_str}'),
         StringStruct(u'InternalName', u'AeroTandemStudio'),
         StringStruct(u'LegalCopyright', u'Copyright © 2025 Andreas Kowalenko'),
@@ -167,9 +196,13 @@ def main():
 
     # 3. Version Info aktualisieren
     update_version_info()
+
+    # 4. pyzbar DLLs finden
+    print("📋 Suche pyzbar DLLs...")
+    find_pyzbar_dlls()
     print()
 
-    # 4. PyInstaller Build
+    # 5. PyInstaller Build
     total_steps = 2 if create_installer else 1
     print(f"🔨 Schritt 1/{total_steps}: PyInstaller Build")
     print("-" * 70)
@@ -184,7 +217,7 @@ def main():
         print(f"❌ PyInstaller Build fehlgeschlagen: {e}")
         return 1
 
-    # 5. NSIS Installer erstellen (nur wenn 'setup' Parameter übergeben wurde)
+    # 6. NSIS Installer erstellen (nur wenn 'setup' Parameter übergeben wurde)
     if not create_installer:
         print("ℹ️  NSIS Installer wird NICHT erstellt (kein 'setup' Parameter)")
         print("   Zum Erstellen des Installers verwenden Sie: python build.py setup")
@@ -246,7 +279,7 @@ def main():
             print(f"❌ Fehler beim Erstellen des Installers: {e}")
             return 1
 
-    # 6. Erfolgsmeldung
+    # 7. Erfolgsmeldung
     print("=" * 70)
     print("🎉 Build-Prozess erfolgreich abgeschlossen!")
     print("=" * 70)

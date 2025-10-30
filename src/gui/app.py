@@ -420,30 +420,33 @@ class VideoGeneratorApp:
         # NEU: QR-Prüfung nur starten, wenn run_qr_check True ist
         if run_qr_check:
             # 1. Button-Zustand speichern und auf "Warten" setzen
-            self._save_button_state()
-            self._set_button_waiting()
-
-            # 2. Ladefenster anzeigen (verwendet jetzt die importierte Klasse)
-            self.loading_window = LoadingWindow(self.root, text="Analysiere QR-Code im Video...")
-
-            # 3. Eine Queue erstellen, um das Ergebnis vom Thread zu empfangen
-            self.analysis_queue = queue.Queue()
-
-            # 4. Den Analyse-Thread starten
-            analysis_thread = threading.Thread(
-                target=self._run_analysis_thread,
-                args=(video_paths[0], self.analysis_queue),
-                daemon=True
-            )
-            analysis_thread.start()
-
-            # 5. Eine "Polling"-Funktion starten, die auf das Ergebnis wartet
-            self.root.after(100, self._check_analysis_result, video_paths)
+            self.run_qr_analysis(video_paths)
         else:
             # Keine QR-Prüfung, nur Vorschau aktualisieren
             print("QR-Prüfung übersprungen - erster Clip hat sich nicht geändert.")
             if self.video_preview:
                 self.video_preview.update_preview(video_paths)
+
+    def run_qr_analysis(self, video_paths: list[str]):
+        self._save_button_state()
+        self._set_button_waiting()
+
+        # 2. Ladefenster anzeigen (verwendet jetzt die importierte Klasse)
+        self.loading_window = LoadingWindow(self.root, text="Analysiere QR-Code im Video...")
+
+        # 3. Eine Queue erstellen, um das Ergebnis vom Thread zu empfangen
+        self.analysis_queue = queue.Queue()
+
+        # 4. Den Analyse-Thread starten
+        analysis_thread = threading.Thread(
+            target=self._run_analysis_thread,
+            args=(video_paths[0], self.analysis_queue),
+            daemon=True
+        )
+        analysis_thread.start()
+
+        # 5. Eine "Polling"-Funktion starten, die auf das Ergebnis wartet
+        self.root.after(100, self._check_analysis_result, video_paths)
 
     def _run_analysis_thread(self, video_path: str, result_queue: queue.Queue):
         """
@@ -537,7 +540,7 @@ class VideoGeneratorApp:
 
             # Starten Sie die Aktualisierung der GUI-Vorschau
             # update_preview startet einen Thread (_create_combined_preview)
-            self.video_preview.update_preview(video_paths)
+            # self.video_preview.update_preview(video_paths)
 
             # WICHTIG: _create_combined_preview (im Thread) ruft _finalize_processing auf.
             # Wir müssen den Button dort wiederherstellen, NICHT hier.
@@ -677,10 +680,12 @@ class VideoGeneratorApp:
         payload = {
             "form_data": form_data,
             "combined_video_path": combined_video_path if has_video else None,
+            "video_clip_paths": self.drag_drop.get_video_paths() if has_video else [],  # NEU: Einzelne Clips
             "kunde": kunde,
             "photo_paths": photo_paths,
             "settings": self.config.get_settings(),
-            "create_watermark_version": video_gewaehlt_aber_nicht_bezahlt
+            "create_watermark_version": video_gewaehlt_aber_nicht_bezahlt,
+            "watermark_clip_index": self.drag_drop.get_watermark_clip_index()  # NEU: Index des ausgewählten Clips
         }
 
         print('kunde in erstelle_video:', kunde)
@@ -715,6 +720,30 @@ class VideoGeneratorApp:
         """Wird von DragDropFrame aufgerufen, um FormFields zu aktualisieren."""
         if self.form_fields:
             self.form_fields.auto_check_products(has_videos, has_photos)
+
+    def update_watermark_column_visibility(self):
+        """Aktualisiert die Sichtbarkeit der Wasserzeichen-Spalte basierend auf Kunde-Status"""
+        form_data = self.form_fields.get_form_data()
+
+        # Prüfe, ob Video gewählt aber nicht bezahlt ist
+        video_gewaehlt_aber_nicht_bezahlt = (
+                (form_data.get("handcam_video", False) and not form_data.get("ist_bezahlt_handcam_video", False)) or
+                (form_data.get("outside_video", False) and not form_data.get("ist_bezahlt_outside_video", False))
+        )
+
+        # Debug-Ausgabe
+        print(f"🔍 Wasserzeichen-Spalte Update:")
+        print(f"   Handcam Video: {form_data.get('handcam_video', False)}, Bezahlt: {form_data.get('ist_bezahlt_handcam_video', False)}")
+        print(f"   Outside Video: {form_data.get('outside_video', False)}, Bezahlt: {form_data.get('ist_bezahlt_outside_video', False)}")
+        print(f"   → Spalte sichtbar: {video_gewaehlt_aber_nicht_bezahlt}")
+
+        # Zeige Spalte wenn Video ausgewählt aber nicht bezahlt ist
+        self.drag_drop.set_watermark_column_visible(video_gewaehlt_aber_nicht_bezahlt)
+
+        # Wenn Spalte nicht mehr sichtbar, lösche Auswahl
+        if not video_gewaehlt_aber_nicht_bezahlt:
+            self.drag_drop.clear_watermark_selection()
+
 
     def _switch_to_cancel_mode(self):
         """Wechselt den Button zum Abbrechen-Modus"""

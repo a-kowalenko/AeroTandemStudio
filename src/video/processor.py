@@ -55,11 +55,14 @@ class VideoProcessor:
 
         form_data = payload["form_data"]
         combined_video_path = payload["combined_video_path"]  # Kann None sein
+        video_clip_paths = payload.get("video_clip_paths", [])  # NEU: Einzelne Clips
         photo_paths = payload.get("photo_paths", [])
         kunde = payload.get("kunde")
         settings = payload.get("settings")
         # NEU: Flag für Wasserzeichen-Version
         create_watermark_version = payload.get("create_watermark_version", False)
+        # NEU: Index des für Wasserzeichen ausgewählten Clips
+        watermark_clip_index = payload.get("watermark_clip_index", None)
 
         print("kunde Objekt:", kunde)
         gast = form_data["gast"]
@@ -146,34 +149,34 @@ class VideoProcessor:
                     temp_combined_ts_path
                 ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
-                # Schritt 6a: Hauptvideo mit Wasserzeichen erstellen (falls gewünscht)
-                temp_combined_with_watermark_path = None
+                # Schritt 6a: Längsten Clip finden und mit Wasserzeichen versehen (falls gewünscht)
+                temp_longest_clip_with_watermark_path = None
+                longest_clip_path = None
                 if create_watermark_version:
                     self._check_for_cancellation()
                     self._update_progress(7, TOTAL_STEPS)
-                    self._update_status("Füge Wasserzeichen zum Hauptvideo hinzu...")
+                    self._update_status("Suche Clip für Wasserzeichen und füge Wasserzeichen hinzu...")
 
-                    # Temporäre Datei für Hauptvideo mit Wasserzeichen
-                    temp_combined_with_watermark_path = os.path.join(tempfile.gettempdir(),
-                                                                     "combined_with_watermark.mp4")
-                    temp_files.append(temp_combined_with_watermark_path)
+                    # NEU: Verwende ausgewählten Clip, wenn vorhanden; sonst finde längsten Clip
+                    if watermark_clip_index is not None and 0 <= watermark_clip_index < len(video_clip_paths):
+                        longest_clip_path = video_clip_paths[watermark_clip_index]
+                        print(f"Verwende Clip an Index {watermark_clip_index} für Wasserzeichen: {longest_clip_path}")
+                    else:
+                        longest_clip_path = self._find_longest_clip(video_clip_paths)
+                        print(f"Verwende längsten Clip für Wasserzeichen: {longest_clip_path}")
 
-                    # Wasserzeichen nur auf das Hauptvideo anwenden
-                    self._create_video_with_watermark(
-                        combined_video_path,  # Originales Hauptvideo
-                        temp_combined_with_watermark_path,  # Ausgabe mit Wasserzeichen
-                        video_params
-                    )
+                    if longest_clip_path and os.path.exists(longest_clip_path):
+                        # Temporäre Datei für längsten Clip mit Wasserzeichen
+                        temp_longest_clip_with_watermark_path = os.path.join(tempfile.gettempdir(),
+                                                                         "longest_clip_with_watermark.mp4")
+                        temp_files.append(temp_longest_clip_with_watermark_path)
 
-                    # Jetzt das Wasserzeichen-Video in .ts konvertieren
-                    temp_combined_with_watermark_ts_path = os.path.join(tempfile.gettempdir(),
-                                                                        "combined_with_watermark.ts")
-                    temp_files.append(temp_combined_with_watermark_ts_path)
-                    subprocess.run([
-                        "ffmpeg", "-y", "-i", temp_combined_with_watermark_path,
-                        "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
-                        temp_combined_with_watermark_ts_path
-                    ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                        # Wasserzeichen nur auf den längsten Clip anwenden
+                        self._create_video_with_watermark(
+                            longest_clip_path,  # Längster Clip
+                            temp_longest_clip_with_watermark_path,  # Ausgabe mit Wasserzeichen
+                            video_params
+                        )
                 else:
                     self._update_progress(7, TOTAL_STEPS)
 
@@ -209,26 +212,18 @@ class VideoProcessor:
                     self._update_progress(9, TOTAL_STEPS)
                     self._update_status("Überspringe normale Video-Erstellung...")
 
-                # Schritt 8a: Wasserzeichen-Version erstellen (falls gewünscht)
-                if create_watermark_version:
+                # Schritt 8a: Wasserzeichen-Version erstellen (falls gewünscht) - NUR längster Clip ohne Intro
+                if create_watermark_version and temp_longest_clip_with_watermark_path:
                     self._check_for_cancellation()
                     self._update_progress(10, TOTAL_STEPS)
-                    self._update_status("Erstelle Video mit Wasserzeichen...")
+                    self._update_status("Erstelle Video mit Wasserzeichen (nur längster Clip)...")
 
                     watermark_video_output_path = self._generate_watermark_video_path(
                         base_output_dir, base_filename
                     )
 
-                    # Intro (ohne Wasserzeichen) mit Hauptvideo (mit Wasserzeichen) kombinieren
-                    concat_input_watermark = f"concat:{temp_intro_ts_path}|{temp_combined_with_watermark_ts_path}"
-                    subprocess.run([
-                        "ffmpeg", "-y",
-                        "-i", concat_input_watermark,
-                        "-c", "copy",
-                        "-bsf:a", "aac_adtstoasc",
-                        "-movflags", "+faststart",
-                        watermark_video_output_path
-                    ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                    # Kopiere den längsten Clip mit Wasserzeichen direkt (KEIN Intro!)
+                    shutil.copy2(temp_longest_clip_with_watermark_path, watermark_video_output_path)
                 else:
                     self._update_progress(10, TOTAL_STEPS)
 
@@ -384,13 +379,20 @@ class VideoProcessor:
         print(f"Erstelle Intro mit erweiterten Parametern: {v_params}")
         video_filters = f"scale={v_params['width']}:{v_params['height']},{drawtext_filter}"
 
+        # Bestimme den richtigen Codec-Namen für die Intro-Erstellung
+        vcodec = v_params.get('vcodec', 'h264')
+        if vcodec in ['hevc', 'h265']:
+            codec_name = 'libx265'
+        else:
+            codec_name = 'libx264'
+
         command = [
             "ffmpeg", "-y",
             "-loop", "1", "-i", self.hintergrund_path,
             "-f", "lavfi", "-i",
             f"anullsrc=channel_layout={v_params['channel_layout']}:sample_rate={v_params['sample_rate']}",
             "-vf", video_filters,
-            "-c:v", v_params['vcodec'],
+            "-c:v", codec_name,  # Verwende libx265 statt 'hevc'
             "-tag:v", v_params['vtag'],
             "-pix_fmt", v_params['pix_fmt'],
             "-r", v_params['fps'],
@@ -414,7 +416,7 @@ class VideoProcessor:
             command.extend(["-color_trc", v_params['color_trc']])
 
         if v_params.get('profile') and v_params['vcodec'] in ['h264', 'hevc']:
-            profile_str = str(v_params['profile']).lower()
+            profile_str = str(v_params['profile']).lower().replace(" ", "")
             command.extend(["-profile:v", profile_str])
         if v_params.get('level') and v_params['vcodec'] in ['h264', 'hevc']:
             try:
@@ -646,6 +648,45 @@ class VideoProcessor:
     def cancel_process(self):
         print("Cancel event set!")
         self.cancel_event.set()
+
+    def _find_longest_clip(self, video_clip_paths):
+        """
+        Findet den längsten Clip aus einer Liste von Video-Pfaden.
+        Gibt den Pfad des längsten Clips zurück, oder None wenn die Liste leer ist.
+        """
+        if not video_clip_paths:
+            return None
+
+        longest_path = None
+        longest_duration = 0.0
+
+        for video_path in video_clip_paths:
+            if not video_path or not os.path.exists(video_path):
+                continue
+
+            try:
+                # Hole die Dauer des Videos mit ffprobe
+                command = [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1:noprint_wrappers=1",
+                    video_path
+                ]
+                result = subprocess.run(command, capture_output=True, text=True,
+                                      timeout=10, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+                if result.returncode == 0:
+                    duration = float(result.stdout.strip())
+                    if duration > longest_duration:
+                        longest_duration = duration
+                        longest_path = video_path
+                        print(f"Neuer längster Clip gefunden: {video_path} ({duration}s)")
+            except Exception as e:
+                print(f"Fehler beim Ermitteln der Dauer von {video_path}: {e}")
+                continue
+
+        print(f"Längster Clip: {longest_path} (Dauer: {longest_duration}s)")
+        return longest_path
 
     def reset_cancel_event(self):
         self.cancel_event.clear()

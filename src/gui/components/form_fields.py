@@ -45,6 +45,10 @@ class FormFields:
         self.outside_foto_var.trace_add('write', lambda *args: self._on_product_changed('outside_foto'))
         self.outside_video_var.trace_add('write', lambda *args: self._on_product_changed('outside_video'))
 
+        # NEU: Callbacks für Bezahlt-Checkboxen, um Wasserzeichen-Spalte zu aktualisieren
+        self.handcam_video_bezahlt_var.trace_add('write', lambda *args: self._on_payment_status_changed())
+        self.outside_video_bezahlt_var.trace_add('write', lambda *args: self._on_payment_status_changed())
+
         # --- Widget-Platzhalter ---
         self.entry_load = None
         self.entry_kunde_id = None
@@ -118,6 +122,14 @@ class FormFields:
             # Dies fängt qr_success=False ODER kunde=None ab
             self.form_mode = 'manual'
             self.build_manual_form(load_nr_val)
+
+        # NEU: Benachrichtige App über Wasserzeichen-Status-Änderungen nach Formular-Update
+        # Nur aufrufen, wenn die App vollständig initialisiert ist
+        if (self.app and
+            hasattr(self.app, 'update_watermark_column_visibility') and
+            hasattr(self.app, 'form_fields') and
+            hasattr(self.app, 'drag_drop')):
+            self.app.update_watermark_column_visibility()
 
     # --- Methoden zum Erstellen von Formular-Layouts ---
 
@@ -692,3 +704,26 @@ class FormFields:
         except tk.TclError:
             # Widget existiert möglicherweise nicht mehr
             print("Fehler beim Zurücksetzen der Bezahlt-Checkbox.")
+
+        # NEU: Benachrichtige App über Wasserzeichen-Status-Änderungen
+        # Nur aufrufen, wenn die App vollständig initialisiert ist
+        if (self.app and
+            hasattr(self.app, 'update_watermark_column_visibility') and
+            hasattr(self.app, 'form_fields') and
+            hasattr(self.app, 'drag_drop')):
+            self.app.update_watermark_column_visibility()
+
+    def _on_payment_status_changed(self):
+        """
+        Trace-Callback für Bezahlt-Checkboxen.
+        Aktualisiert die Wasserzeichen-Spalten-Sichtbarkeit.
+        """
+        # Benachrichtige App über Wasserzeichen-Status-Änderungen
+        # Nur aufrufen, wenn die App vollständig initialisiert ist
+        if (self.app and
+            hasattr(self.app, 'update_watermark_column_visibility') and
+            hasattr(self.app, 'form_fields') and
+            hasattr(self.app, 'drag_drop')):
+            self.app.update_watermark_column_visibility()
+
+

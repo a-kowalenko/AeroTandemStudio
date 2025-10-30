@@ -19,6 +19,8 @@ class DragDropFrame:
         self.photo_paths = []
         self.last_first_video = None  # NEU: Speichert den ersten Clip für Vergleich
         self.qr_check_enabled = tk.BooleanVar(value=False)  # NEU: Checkbox-Variable für QR-Prüfung
+        self.watermark_clip_index = None  # NEU: Index des Clips für Wasserzeichen
+        self.show_watermark_column = False  # NEU: Steuert Sichtbarkeit der Wasserzeichen-Spalte
         self.create_widgets()
 
     def create_widgets(self):
@@ -42,8 +44,13 @@ class DragDropFrame:
                                    font=("Arial", 12))
         self.drop_label.pack(side=tk.LEFT)
 
-        # Notebook (Tabs) erstellen
-        self.notebook = ttk.Notebook(self.frame)
+        # Notebook (Tabs) erstellen mit größerem Style
+        style = ttk.Style()
+        style.configure('Large.TNotebook.Tab',
+                       font=('Arial', 8, 'bold'),
+                       padding=[20, 5])  # [horizontal, vertical] padding
+
+        self.notebook = ttk.Notebook(self.frame, style='Large.TNotebook')
         self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
 
         # Tab für Videos
@@ -76,7 +83,7 @@ class DragDropFrame:
         # Treeview für Videos
         self.video_tree = ttk.Treeview(
             video_table_frame,
-            columns=("Nr", "Dateiname", "Dauer", "Größe", "Datum", "Uhrzeit"),
+            columns=("Nr", "Dateiname", "Format", "Dauer", "Größe", "Datum", "Uhrzeit", "WM"),
             show="headings",
             height=6,
             yscrollcommand=video_scrollbar.set
@@ -85,23 +92,30 @@ class DragDropFrame:
         # Spalten konfigurieren für Videos
         self.video_tree.heading("Nr", text="#")
         self.video_tree.heading("Dateiname", text="Dateiname")
+        self.video_tree.heading("Format", text="Format")
         self.video_tree.heading("Dauer", text="Dauer")
         self.video_tree.heading("Größe", text="Größe")
         self.video_tree.heading("Datum", text="Datum")
         self.video_tree.heading("Uhrzeit", text="Uhrzeit")
+        self.video_tree.heading("WM", text="💧")
 
         self.video_tree.column("Nr", width=10, anchor="center")
-        self.video_tree.column("Dateiname", width=200)
-        self.video_tree.column("Dauer", width=80, anchor="center")
-        self.video_tree.column("Größe", width=80, anchor="center")
+        self.video_tree.column("Dateiname", width=180)
+        self.video_tree.column("Format", width=70, anchor="center")
+        self.video_tree.column("Dauer", width=50, anchor="center")
+        self.video_tree.column("Größe", width=70, anchor="center")
         self.video_tree.column("Datum", width=80, anchor="center")
-        self.video_tree.column("Uhrzeit", width=80, anchor="center")
+        self.video_tree.column("Uhrzeit", width=70, anchor="center")
+        self.video_tree.column("WM", width=0, minwidth=0, stretch=False, anchor="center")  # Startet versteckt
 
         self.video_tree.pack(side=tk.LEFT, fill="both", expand=True)
         video_scrollbar.config(command=self.video_tree.yview)
 
         # Doppelklick-Event für Videos
         self.video_tree.bind("<Double-1>", self._on_video_double_click)
+
+        # NEU: Event für Checkbox-Klicks in der Wasserzeichen-Spalte (auf Release um Doppelklicks zu vermeiden)
+        self.video_tree.bind("<ButtonRelease-1>", self._on_watermark_checkbox_click)
 
         # Drag & Drop für Video-Tabelle
         self.video_tree.drop_target_register(DND_FILES)
@@ -111,15 +125,15 @@ class DragDropFrame:
         video_button_frame = tk.Frame(self.video_tab)
         video_button_frame.pack(pady=5)
 
-        tk.Button(video_button_frame, text="Nach oben", command=self.move_video_up).pack(side=tk.LEFT, padx=2)
-        tk.Button(video_button_frame, text="Nach unten", command=self.move_video_down).pack(side=tk.LEFT, padx=2)
+        tk.Button(video_button_frame, text="▲ Nach oben", command=self.move_video_up).pack(side=tk.LEFT, padx=2)
+        tk.Button(video_button_frame, text="▼ Nach unten", command=self.move_video_down).pack(side=tk.LEFT, padx=2)
 
         # NEU: Button zum Schneiden
         self.cut_button = tk.Button(video_button_frame, text="✂ Schneiden", command=self.open_cut_dialog)
         self.cut_button.pack(side=tk.LEFT, padx=5)
 
-        tk.Button(video_button_frame, text="Entfernen", command=self.remove_selected_video).pack(side=tk.LEFT, padx=2)
-        tk.Button(video_button_frame, text="Alle Videos löschen", command=self.clear_videos).pack(side=tk.LEFT, padx=2)
+        tk.Button(video_button_frame, text="✕ Entfernen", command=self.remove_selected_video).pack(side=tk.LEFT, padx=2)
+        tk.Button(video_button_frame, text="🗑 Alle Videos löschen", command=self.clear_videos).pack(side=tk.LEFT, padx=2)
 
     def create_photo_tab(self):
         """Erstellt den Foto-Tab mit Tabelle"""
@@ -167,8 +181,8 @@ class DragDropFrame:
         photo_button_frame = tk.Frame(self.photo_tab)
         photo_button_frame.pack(pady=5)
 
-        tk.Button(photo_button_frame, text="Entfernen", command=self.remove_selected_photo).pack(side=tk.LEFT, padx=2)
-        tk.Button(photo_button_frame, text="Alle Fotos löschen", command=self.clear_photos).pack(side=tk.LEFT, padx=2)
+        tk.Button(photo_button_frame, text="✕ Entfernen", command=self.remove_selected_photo).pack(side=tk.LEFT, padx=2)
+        tk.Button(photo_button_frame, text="🗑 Alle Fotos löschen", command=self.clear_photos).pack(side=tk.LEFT, padx=2)
 
     def setup_drag_drop(self):
         self.drop_label.drop_target_register(DND_FILES)
@@ -396,8 +410,8 @@ class DragDropFrame:
         if self.qr_check_enabled.get() and self.video_paths:
             print("QR-Code-Prüfung wurde aktiviert - führe Prüfung durch...")
             # Trigger Vorschau-Update mit erzwungener QR-Prüfung
-            if hasattr(self.app, 'update_video_preview'):
-                self.app.update_video_preview(self.video_paths.copy(), run_qr_check=True)
+            if hasattr(self.app, 'run_qr_analysis'):
+                self.app.run_qr_analysis(self.video_paths.copy())
         elif not self.qr_check_enabled.get():
             print("QR-Code-Prüfung wurde deaktiviert")
 
@@ -413,7 +427,7 @@ class DragDropFrame:
             filename = os.path.basename(original_path)
 
             # Standard-Werte
-            duration, size, date, timestamp = "--:--", "-- MB", "--.--.----", "--:--:--"
+            duration, size, date, timestamp, format_str = "--:--", "-- MB", "--.--.----", "--:--:--", "---"
 
             if self.app and hasattr(self.app, 'video_preview'):
                 # Prüfen, ob die Vorschau-Sitzung (temp_dir) überhaupt schon läuft
@@ -427,6 +441,7 @@ class DragDropFrame:
                     size = metadata.get("size", "-- MB")
                     date = metadata.get("date", "--.--.----")
                     timestamp = metadata.get("timestamp", "--:--:--")
+                    format_str = metadata.get("format", "---")
 
                 elif preview_session_active:
                     # Fall 2: Vorschau ist aktiv, aber *keine* Metadaten für diesen Clip.
@@ -441,6 +456,7 @@ class DragDropFrame:
                     size = self._get_file_size_fallback(original_path)
                     date = self._get_file_date_fallback(original_path)
                     timestamp = self._get_file_time_fallback(original_path)
+                    format_str = self._get_video_format_fallback(original_path)
 
             else:
                 # Fallback, falls self.app nicht existiert (sollte nicht passieren)
@@ -448,8 +464,12 @@ class DragDropFrame:
                 size = self._get_file_size_fallback(original_path)
                 date = self._get_file_date_fallback(original_path)
                 timestamp = self._get_file_time_fallback(original_path)
+                format_str = self._get_video_format_fallback(original_path)
 
-            self.video_tree.insert("", "end", values=(i, filename, duration, size, date, timestamp))
+            # NEU: Wasserzeichen-Spalte
+            watermark_value = "☑" if i - 1 == self.watermark_clip_index else "☐"
+
+            self.video_tree.insert("", "end", values=(i, filename, format_str, duration, size, date, timestamp, watermark_value))
 
     def _update_photo_table(self):
         """Aktualisiert die Foto-Tabelle"""
@@ -512,6 +532,42 @@ class DragDropFrame:
         except:
             return "Unbekannt"
 
+    def _get_video_format_fallback(self, video_path):
+        """Ermittelt das Video-Format (Auflösung und FPS) mit ffprobe"""
+        try:
+            import json
+            result = subprocess.run([
+                'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                '-show_streams', '-select_streams', 'v:0',
+                video_path
+            ], capture_output=True, text=True, timeout=5, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                if 'streams' in data and len(data['streams']) > 0:
+                    stream = data['streams'][0]
+                    width = stream.get('width', 0)
+                    height = stream.get('height', 0)
+
+                    # FPS berechnen
+                    fps_str = stream.get('r_frame_rate', '0/0')
+                    try:
+                        num, denom = map(int, fps_str.split('/'))
+                        fps = round(num / denom) if denom != 0 else 0
+                    except:
+                        fps = 0
+
+                    # Format-String erstellen (z.B. "1080p@30")
+                    if height > 0:
+                        format_label = f"{height}p"
+                        if fps > 0:
+                            format_label += f"@{fps}"
+                        return format_label
+
+            return "---"
+        except:
+            return "---"
+
     # --- ENDE Fallback-Methoden ---
 
     # --- NEUE METHODEN (von app.py aufgerufen) ---
@@ -542,6 +598,13 @@ class DragDropFrame:
             if index > 0:
                 self.video_paths[index], self.video_paths[index - 1] = self.video_paths[index - 1], self.video_paths[
                     index]
+
+                # NEU: Aktualisiere Wasserzeichen-Index
+                if self.watermark_clip_index == index:
+                    self.watermark_clip_index = index - 1
+                elif self.watermark_clip_index == index - 1:
+                    self.watermark_clip_index = index
+
                 self._update_video_table()
                 self.video_tree.selection_set(self.video_tree.get_children()[index - 1])
                 # Vorschau aktualisieren
@@ -555,6 +618,13 @@ class DragDropFrame:
             if index < len(self.video_paths) - 1:
                 self.video_paths[index], self.video_paths[index + 1] = self.video_paths[index + 1], self.video_paths[
                     index]
+
+                # NEU: Aktualisiere Wasserzeichen-Index
+                if self.watermark_clip_index == index:
+                    self.watermark_clip_index = index + 1
+                elif self.watermark_clip_index == index + 1:
+                    self.watermark_clip_index = index
+
                 self._update_video_table()
                 self.video_tree.selection_set(self.video_tree.get_children()[index + 1])
                 # Vorschau aktualisieren
@@ -571,6 +641,12 @@ class DragDropFrame:
             if self.app and hasattr(self.app, 'video_preview'):
                 self.app.video_preview.remove_path_from_cache(original_path)
 
+            # NEU: Aktualisiere Wasserzeichen-Index
+            if self.watermark_clip_index == index:
+                self.watermark_clip_index = None
+            elif self.watermark_clip_index is not None and self.watermark_clip_index > index:
+                self.watermark_clip_index -= 1
+
             self._update_video_table()
             # Vorschau aktualisieren
             self._update_app_preview()
@@ -586,6 +662,9 @@ class DragDropFrame:
     def clear_videos(self):
         """Entfernt alle Videos"""
         self.video_paths.clear()
+
+        # NEU: Löschen Sie auch die Wasserzeichen-Auswahl
+        self.watermark_clip_index = None
 
         # NEU: Cache leeren
         if self.app and hasattr(self.app, 'video_preview'):
@@ -704,3 +783,66 @@ class DragDropFrame:
         self.handle_drop(event)
         # Wechsle zum Foto-Tab nach dem Drop
         self.notebook.select(1)
+
+    # NEU: Methoden für Wasserzeichen-Spalte
+    def set_watermark_column_visible(self, visible: bool):
+        """Zeigt oder verbirgt die Wasserzeichen-Spalte"""
+        self.show_watermark_column = visible
+        if visible:
+            self.video_tree.column("WM", width=20, minwidth=30, stretch=False)
+        else:
+            self.video_tree.column("WM", width=0, minwidth=0, stretch=False)
+
+        # Aktualisiere die Tabelle, um die Änderungen sofort zu reflektieren
+        self.video_tree.update_idletasks()
+
+    def get_watermark_clip_index(self):
+        """Gibt den Index des für Wasserzeichen ausgewählten Clips zurück (oder None)"""
+        return self.watermark_clip_index
+
+    def set_watermark_clip_index(self, index):
+        """Setzt den Index des für Wasserzeichen ausgewählten Clips"""
+        self.watermark_clip_index = index
+        self._update_video_table()
+
+    def clear_watermark_selection(self):
+        """Löscht die Wasserzeichen-Auswahl"""
+        self.watermark_clip_index = None
+        self._update_video_table()
+
+    def _on_watermark_checkbox_click(self, event):
+        """Verarbeitet Klicks auf die Wasserzeichen-Spalte"""
+        if not self.show_watermark_column or not self.video_paths:
+            return
+
+        # Finde die angeklickte Spalte
+        region = self.video_tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+
+        column = self.video_tree.identify_column(event.x)
+        # Spalte 8 ist die Wasserzeichen-Spalte (0-indiziert: 7, aber +1 für tree_id)
+        # Spalten: tree_id (#0), Nr, Dateiname, Format, Dauer, Größe, Datum, Uhrzeit, Wasserzeichen
+        # Index:    0        1     2           3       4      5      6      7        8
+
+        if column != "#8":
+            return
+
+        # Finde die Reihe
+        item = self.video_tree.identify_row(event.y)
+        if not item:
+            return
+
+        index = self.video_tree.index(item)
+
+        # Toggle: Wenn bereits ausgewählt, deselektiere; sonst selektiere diese Reihe
+        if self.watermark_clip_index == index:
+            self.watermark_clip_index = None
+        else:
+            self.watermark_clip_index = index
+
+        self._update_video_table()
+
+        # Verhindere, dass die Reihe ausgewählt wird
+        self.video_tree.selection_remove(self.video_tree.selection())
+

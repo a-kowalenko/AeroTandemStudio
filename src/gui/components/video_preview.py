@@ -181,10 +181,15 @@ class VideoPreview:
         self.metadata_cache.clear()  # NEU
         self.videos_were_reencoded = False  # Flag zurücksetzen
 
-    def _prepare_video_copies(self, original_paths, needs_reencoding):
+    def _prepare_video_copies(self, original_paths, needs_reencoding, preserve_cache=False):
         """
         Erstellt temporäre Kopien der Videos (A/B-Logik) UND
         füllt den Metadaten-Cache im selben Thread.
+
+        Args:
+            original_paths: Liste der zu verarbeitenden Video-Pfade
+            needs_reencoding: True = Re-Encoding, False = Stream-Copy
+            preserve_cache: True = Cache behalten (für inkrementelles Hinzufügen neuer Videos)
         """
         if not self.temp_dir:
             raise Exception("Temporäres Verzeichnis nicht initialisiert.")
@@ -193,8 +198,8 @@ class VideoPreview:
         if needs_reencoding and self.app and hasattr(self.app, 'drag_drop'):
             self.parent.after(0, lambda: self.app.drag_drop.set_cut_button_enabled(False))
 
-        # OPTIMIERUNG: Behalte existierende Kopien NUR wenn KEIN Re-Encoding nötig
-        if needs_reencoding:
+        # OPTIMIERUNG: Behalte existierende Kopien NUR wenn KEIN Re-Encoding nötig ODER preserve_cache=True
+        if needs_reencoding and not preserve_cache:
             # Bei Re-Encoding müssen ALLE Videos neu kodiert werden
             # Entferne ALLE alten Kopien (könnten unterschiedliche Formate haben)
             print("⚠️ Re-Encoding aktiviert → Cache wird geleert, ALLE Videos werden neu kodiert")
@@ -207,6 +212,9 @@ class VideoPreview:
                             pass
             self.video_copies_map.clear()
             self.metadata_cache.clear()
+        elif needs_reencoding and preserve_cache:
+            # Bei Re-Encoding MIT preserve_cache: Nur neue Videos verarbeiten, Cache behalten
+            print(f"⚠️ Re-Encoding aktiviert → Kodiere nur neue Videos, Cache bleibt erhalten")
         else:
             # Bei Stream-Copy: Behalte existierende Kopien, entferne nur nicht mehr benötigte
             current_paths_set = set(original_paths)
@@ -229,10 +237,17 @@ class VideoPreview:
         total_clips = len(original_paths)
 
         # Zähle wie viele Videos tatsächlich verarbeitet werden müssen
-        if needs_reencoding:
-            # Bei Re-Encoding müssen ALLE Videos verarbeitet werden
+        if needs_reencoding and not preserve_cache:
+            # Bei Re-Encoding OHNE preserve_cache: ALLE Videos verarbeiten
             clips_to_process = total_clips
             print(f"📦 ALLE {total_clips} Videos müssen neu kodiert werden (Format-Unterschiede)")
+        elif needs_reencoding and preserve_cache:
+            # Bei Re-Encoding MIT preserve_cache: Nur neue Videos (nicht im Cache)
+            clips_to_process = 0
+            for original_path in original_paths:
+                if original_path not in self.video_copies_map:
+                    clips_to_process += 1
+            print(f"📦 {clips_to_process} von {total_clips} Videos müssen neu kodiert werden ({total_clips - clips_to_process} bereits im Cache)")
         else:
             # Bei Stream-Copy: Nur neue Videos
             clips_to_process = 0
@@ -256,8 +271,9 @@ class VideoPreview:
             safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
             copy_path = os.path.join(self.temp_dir, f"{i:03d}_{safe_filename}")
 
-            # OPTIMIERUNG: Prüfe ob bereits eine gültige Kopie existiert (NUR bei Stream-Copy!)
-            if not needs_reencoding and original_path in self.video_copies_map:
+            # OPTIMIERUNG: Prüfe ob bereits eine gültige Kopie existiert
+            # Bei Stream-Copy ODER bei Re-Encoding mit preserve_cache
+            if (not needs_reencoding or preserve_cache) and original_path in self.video_copies_map:
                 existing_copy = self.video_copies_map[original_path]
                 if os.path.exists(existing_copy):
                     # Kopie existiert bereits - überspringen!
@@ -653,16 +669,21 @@ class VideoPreview:
                         print("✅ Gecachte Videos bereits standardisiert (1080p@30)")
                         print(f"→ Kodiere nur die {len(new_videos)} neuen Video(s) auf 1080p@30")
 
-                        # Verwende existierende Kopien
-                        temp_copy_paths = [self.video_copies_map[p] for p in cached_videos]
-
-                        # Kodiere nur neue Videos
+                        # WICHTIG: needs_reencoding=True, ABER Cache NICHT leeren!
+                        # Wir kodieren nur die neuen Videos, gecachte bleiben
                         needs_reencoding = True
-                        new_encoded_paths = self._prepare_video_copies(new_videos, needs_reencoding=True)
-                        temp_copy_paths.extend(new_encoded_paths)
 
-                        # Sortiere nach Original-Reihenfolge
-                        temp_copy_paths = [self.video_copies_map[p] for p in video_paths]
+                        # Kodiere nur neue Videos (mit speziellem Flag um Cache-Clear zu vermeiden)
+                        new_encoded_paths = self._prepare_video_copies(new_videos, needs_reencoding=True, preserve_cache=True)
+
+                        # Jetzt baue temp_copy_paths in der richtigen Reihenfolge
+                        temp_copy_paths = []
+                        for p in video_paths:
+                            if p in self.video_copies_map:
+                                temp_copy_paths.append(self.video_copies_map[p])
+                            else:
+                                # Sollte nicht passieren, aber zur Sicherheit
+                                raise Exception(f"Video {p} nicht in Cache gefunden!")
                     else:
                         # Gecachte Videos wurden nur kopiert (Stream-Copy)
                         # → Prüfe ob neue Videos kompatibel sind
@@ -1220,6 +1241,8 @@ class VideoPreview:
             # Hole Datum/Zeit
             date_str = self._get_file_date(copy_path)
             time_str = self._get_file_time(copy_path)
+            # Hole Format (Auflösung und FPS)
+            format_str = self._get_video_format(copy_path)
 
             self.metadata_cache[original_path] = {
                 "duration": duration_str,
@@ -1227,7 +1250,8 @@ class VideoPreview:
                 "size": size_str,
                 "size_bytes": size_bytes,
                 "date": date_str,
-                "timestamp": time_str
+                "timestamp": time_str,
+                "format": format_str
             }
 
             # NEU: Aktualisiere die Tabelle im Haupt-Thread, wenn Metadaten hinzugefügt werden
@@ -1237,7 +1261,7 @@ class VideoPreview:
         except Exception as e:
             print(f"Fehler beim Cachen der Metadaten für {original_path}: {e}")
             self.metadata_cache[original_path] = {
-                "duration": "FEHLER", "size": "FEHLER", "date": "FEHLER", "timestamp": "FEHLER"
+                "duration": "FEHLER", "size": "FEHLER", "date": "FEHLER", "timestamp": "FEHLER", "format": "FEHLER"
             }
 
     def refresh_metadata_async(self, original_paths_list: List[str], on_complete_callback: Callable):
@@ -1333,6 +1357,41 @@ class VideoPreview:
             return time.strftime("%H:%M:%S", time.localtime(modification_time))
         except:
             return "Unbekannt"
+
+    def _get_video_format(self, video_path):
+        """Ermittelt das Video-Format (Auflösung und FPS)"""
+        try:
+            result = subprocess.run([
+                'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                '-show_streams', '-select_streams', 'v:0',
+                video_path
+            ], capture_output=True, text=True, timeout=5, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                if 'streams' in data and len(data['streams']) > 0:
+                    stream = data['streams'][0]
+                    width = stream.get('width', 0)
+                    height = stream.get('height', 0)
+
+                    # FPS berechnen
+                    fps_str = stream.get('r_frame_rate', '0/0')
+                    try:
+                        num, denom = map(int, fps_str.split('/'))
+                        fps = round(num / denom) if denom != 0 else 0
+                    except:
+                        fps = 0
+
+                    # Format-String erstellen (z.B. "1080p@30")
+                    if height > 0:
+                        format_label = f"{height}p"
+                        if fps > 0:
+                            format_label += f"@{fps}"
+                        return format_label
+
+            return "---"
+        except:
+            return "---"
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)

@@ -57,8 +57,9 @@ VIAddVersionKey "CompanyName" "${APP_PUBLISHER}"
 ; --- Abschluss-Seite (Mit "App starten"-Checkbox) ---
 !define MUI_FINISHPAGE_TITLE "Installation von ${APP_NAME} abgeschlossen"
 !define MUI_FINISHPAGE_TEXT "Das Setup hat ${APP_NAME} erfolgreich auf Ihrem Computer installiert."
-!define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
+!define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_TEXT "${APP_NAME} jetzt starten"
+!define MUI_FINISHPAGE_RUN_FUNCTION "LaunchAppAsUser"
 !insertmacro MUI_PAGE_FINISH
 
 ; --- Deinstaller-Seiten ---
@@ -374,12 +375,13 @@ Section "${APP_NAME} (Erforderlich)" SectionApp
 
     DetailPrint "${APP_NAME} wurde installiert."
 
-    ; --- NEU: App nach Silent-Update neu starten ---
+    ; --- NEU: App nach Silent-Update neu starten (ohne Admin-Rechte) ---
     ; Prüft, ob der Installer im Silent-Modus (/S) aufgerufen wurde.
     IfSilent 0 not_silent ; Springe zu not_silent, WENN NICHT silent
     ; Wir sind im Silent-Mode, also App neu starten
-    ; Wir verwenden die Variable ${APP_EXE}, die oben definiert wurde.
-    Exec '"$INSTDIR\${APP_EXE}"'
+    ; Verwende 'explorer.exe' um die App im normalen Benutzerkontext zu starten
+    DetailPrint "Starte ${APP_NAME} neu (ohne Admin-Rechte)..."
+    Exec '"$WINDIR\explorer.exe" "$INSTDIR\${APP_EXE}"'
     not_silent:
     ; --- ENDE NEU ---
 
@@ -477,3 +479,11 @@ Function .onInit
 
     continue_install:
 FunctionEnd
+
+; --- Funktion zum Starten der App ohne Admin-Rechte ---
+Function LaunchAppAsUser
+    ; Verwende 'explorer.exe' um die App im normalen Benutzerkontext zu starten
+    ; Dies verhindert, dass Admin-Rechte vererbt werden und Drag & Drop blockiert wird
+    Exec '"$WINDIR\explorer.exe" "$INSTDIR\${APP_EXE}"'
+FunctionEnd
+

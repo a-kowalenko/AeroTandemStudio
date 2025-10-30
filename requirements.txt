@@ -1,7 +1,25 @@
-﻿tkinter
-proglog
-moviepy
-tkcalendar
+﻿# GUI Framework
 tkinterdnd2
-urllib3
+tkcalendar
+
+# Video/Medien Processing
+moviepy>=1.0.3
+python-vlc
+opencv-python
+
+# QR/Barcode Scanner
+pyzbar
+
+# Logging
+proglog
+
+# Bildverarbeitung
 Pillow
+
+# HTTP/Networking
+requests
+urllib3
+
+# Version Management
+packaging
+

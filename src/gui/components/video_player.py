@@ -45,7 +45,15 @@ class VideoPlayer:
 
         # VLC-Instanz und Media Player initialisieren
         try:
-            self.vlc_instance = vlc.Instance()
+            # VLC Instance mit speziellen Parametern erstellen
+            vlc_args = [
+                '--no-plugins-cache',
+                '--reset-plugins-cache',
+                '--ignore-config',
+                '--no-xlib'
+            ]
+
+            self.vlc_instance = vlc.Instance(*vlc_args)
             self.media_player = self.vlc_instance.media_player_new()
         except Exception as e:
             print(f"Fehler beim Initialisieren von VLC: {e}")

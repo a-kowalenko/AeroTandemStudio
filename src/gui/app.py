@@ -444,12 +444,23 @@ class VideoGeneratorApp:
 
     def _save_button_state(self):
         """Speichert den aktuellen Zustand des Buttons."""
-        self.old_button_text = self.erstellen_button.cget("text")
-        self.old_button_bg = self.erstellen_button.cget("bg")
-        try:
-            self.old_button_cursor = self.erstellen_button.cget("cursor")
-        except tk.TclError:
-            self.old_button_cursor = ""  # Standard-Cursor
+        current_text = self.erstellen_button.cget("text")
+
+        # Speichere nur gültige Button-Zustände (nicht "Bitte warten..." oder "Abbrechen")
+        # Wenn der Button bereits in einem temporären Zustand ist, behalte den gespeicherten Wert
+        if current_text not in ("Bitte warten...", "Abbrechen"):
+            self.old_button_text = current_text
+            self.old_button_bg = self.erstellen_button.cget("bg")
+            try:
+                self.old_button_cursor = self.erstellen_button.cget("cursor")
+            except tk.TclError:
+                self.old_button_cursor = ""  # Standard-Cursor
+        # Sonst: Behalte die vorher gespeicherten Werte
+        # Falls keine gespeichert wurden, setze Default-Werte
+        elif not hasattr(self, 'old_button_text') or not self.old_button_text:
+            self.old_button_text = "Erstellen"
+            self.old_button_bg = "#4CAF50"
+            self.old_button_cursor = ""
 
     def _set_button_waiting(self):
         """Setzt den Button in den Wartezustand."""
@@ -503,7 +514,20 @@ class VideoGeneratorApp:
             except Exception as e:
                 print(f"Fehler beim Entladen des Players: {e}")
 
-            self._restore_button_state()  # Button auch zurücksetzen
+            # Button-Status wiederherstellen - WICHTIG: Setze Button explizit auf "Erstellen"
+            # um sicherzustellen dass er nicht im "Bitte warten"-Zustand hängen bleibt
+            print("Stelle Button-Status nach Video-Löschung wieder her")
+            self.erstellen_button.config(
+                text="Erstellen",
+                bg="#4CAF50",
+                state="normal",
+                cursor=""
+            )
+            # Speichere den korrekten Status für zukünftige Wiederherstellungen
+            self.old_button_text = "Erstellen"
+            self.old_button_bg = "#4CAF50"
+            self.old_button_cursor = ""
+
             return
             # --- ENDE NEU ---
 
@@ -1155,6 +1179,9 @@ class VideoGeneratorApp:
                 print("QR-Code-Prüfung temporär deaktiviert für Auto-Import")
                 self.drag_drop.qr_check_enabled.set(False)
 
+        # Variable für finally-Block
+        videos_imported = False
+
         try:
             # Sammle alle Dateien aus dem Backup
             video_files = []
@@ -1182,12 +1209,15 @@ class VideoGeneratorApp:
                 if self.drag_drop:
                     self.drag_drop.add_files(video_files, photo_files)
 
+                if video_files:
+                    videos_imported = True
+
                 print(f"Auto-Import: {len(video_files)} Videos und {len(photo_files)} Fotos importiert")
 
-                messagebox.showinfo("Import erfolgreich",
-                                  f"SD-Karten Backup erfolgreich importiert:\n"
-                                  f"{len(video_files)} Videos und {len(photo_files)} Fotos",
-                                  parent=self.root)
+                # messagebox.showinfo("Import erfolgreich",
+                #                   f"SD-Karten Backup erfolgreich importiert:\n"
+                #                   f"{len(video_files)} Videos und {len(photo_files)} Fotos",
+                #                   parent=self.root)
             else:
                 print("Keine Dateien zum Importieren gefunden")
                 messagebox.showwarning("Keine Dateien",
@@ -1204,6 +1234,13 @@ class VideoGeneratorApp:
             if qr_check_was_enabled and self.drag_drop and hasattr(self.drag_drop, 'qr_check_enabled'):
                 print("QR-Code-Prüfung wieder aktiviert nach Auto-Import")
                 self.drag_drop.qr_check_enabled.set(True)
+
+                # Trigger QR-Analyse für das erste importierte Video
+                if videos_imported:
+                    print("Starte QR-Analyse für erstes importiertes Video")
+                    video_paths = self.drag_drop.get_video_paths()
+                    if video_paths:
+                        self.run_qr_analysis(video_paths)
 
     def run(self):
         """Startet die Hauptloop der Anwendung"""

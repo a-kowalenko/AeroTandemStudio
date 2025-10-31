@@ -119,11 +119,7 @@ class SDCardMonitor:
             try:
                 current_drives = self._get_available_drives()
                 new_drives = current_drives - self.known_drives
-                print('---------------')
-                print('current_drives:', current_drives)
-                print('known_drives:', self.known_drives)
-                print('new_drives:', new_drives)
-                print('---------------')
+
                 # Prüfe neue Laufwerke
                 for drive in new_drives:
                     if self._is_removable_drive(drive):

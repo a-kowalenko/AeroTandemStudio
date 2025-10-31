@@ -10,6 +10,7 @@ from tkinterdnd2 import TkinterDnD
 from .components.form_fields import FormFields
 from .components.drag_drop import DragDropFrame
 from .components.video_preview import VideoPreview
+from .components.photo_preview import PhotoPreview
 from .components.progress_indicator import ProgressHandler
 from .components.circular_spinner import CircularSpinner
 from .components.settings_dialog import SettingsDialog
@@ -40,6 +41,13 @@ class VideoGeneratorApp:
         self.video_player = None
         self.video_cutter_dialog = None  # NEU: Referenz auf offenen Dialog
         self.APP_VERSION = APP_VERSION
+
+        # Preview Tab-Elemente
+        # self.title_label = None
+        # self.preview_separator = None
+        self.preview_notebook = None
+        self.video_tab = None
+        self.foto_tab = None
 
         # Für Threading und Ladefenster ---
         self.analysis_queue = None
@@ -80,15 +88,36 @@ class VideoGeneratorApp:
         self.form_fields = FormFields(self.left_frame, self.config, self)
         self.drag_drop = DragDropFrame(self.left_frame, self)
 
-        # Rechte Spalte: Vorschau, Checkbox und Button
-        # Titel
-        self.title_label = tk.Label(self.right_frame, text="Video Vorschau", font=("Arial", 14, "bold"))
+        # Rechte Spalte: Tab-View für Vorschau-Inhalte
+        # Tab-View erstellen mit gleichem Style wie Drag-and-Drop
+        style = ttk.Style()
+        style.configure('Preview.TNotebook.Tab',
+                       font=('Arial', 8, 'bold'),
+                       padding=[20, 5])  # [horizontal, vertical] padding
 
-        # Separator
-        self.preview_separator = ttk.Separator(self.right_frame, orient='horizontal')
+        self.preview_notebook = ttk.Notebook(self.right_frame, style='Preview.TNotebook')
 
-        self.video_player = VideoPlayer(self.right_frame, self)
-        self.video_preview = VideoPreview(self.right_frame, self)
+        # Tab für Video Vorschau
+        self.video_tab = ttk.Frame(self.preview_notebook)
+        self.preview_notebook.add(self.video_tab, text="Video Vorschau")
+
+        # Tab für Foto Vorschau
+        self.foto_tab = ttk.Frame(self.preview_notebook)
+        self.preview_notebook.add(self.foto_tab, text="Foto Vorschau")
+
+        # Video-Tab Inhalt
+        # Titel im Video-Tab
+        # self.title_label = tk.Label(self.video_tab, text="Video Vorschau", font=("Arial", 14, "bold"))
+
+        # Separator im Video-Tab
+        # self.preview_separator = ttk.Separator(self.video_tab, orient='horizontal')
+
+        # Video Player und Preview im Video-Tab
+        self.video_player = VideoPlayer(self.video_tab, self)
+        self.video_preview = VideoPreview(self.video_tab, self)
+
+        # Foto-Tab Inhalt
+        self.photo_preview = PhotoPreview(self.foto_tab, self)
 
         # Server-Upload Frame mit Status-Anzeige
         self.upload_frame = tk.Frame(self.right_frame)
@@ -102,7 +131,7 @@ class VideoGeneratorApp:
             font=("Arial", 12),
             command=self.on_upload_checkbox_toggle
         )
-        self.upload_checkbox.pack(side="left", padx=(0, 10))
+        self.upload_checkbox.pack(side="left", padx=(0, 5))
 
         # Server Status Label
         self.server_status_label = tk.Label(
@@ -214,16 +243,20 @@ class VideoGeneratorApp:
         self.drag_drop.pack(fill="both", expand=True, pady=10)
 
         # Rechte Spalte
-        self.title_label.pack(pady=0)
-        self.preview_separator.pack(fill='x', pady=5)
+        # Tab-View packen
+        self.preview_notebook.pack(fill="both", expand=True, pady=(0, 10))
+
+        # Video-Tab Inhalt packen
+        # self.title_label.pack(pady=0)
+        # self.preview_separator.pack(fill='x', pady=5)
         self.video_player.pack(fill="x", pady=(0, 10), side="top")
         self.video_preview.pack(fill="x", pady=(0, 8), side="top")
 
-        # Spacer to push the following right-column elements slightly down
-        self.right_spacer = tk.Frame(self.right_frame, bg=self.right_frame.cget("bg"))
-        self.right_spacer.pack(fill="x", expand=True)
+        # Foto-Tab Inhalt packen
+        self.photo_preview.pack(fill="both", expand=True, padx=5, pady=5)
 
-        self.upload_frame.pack(pady=10, fill="x", side="top")
+        # Upload-Frame und Button bleiben außerhalb der Tabs
+        self.upload_frame.pack(pady=0, fill="x", side="top")
         self.erstellen_button.pack(pady=10, fill="x", side="top")
 
         # Progress unten

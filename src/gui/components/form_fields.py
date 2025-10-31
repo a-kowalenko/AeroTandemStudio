@@ -46,8 +46,11 @@ class FormFields:
         self.outside_video_var.trace_add('write', lambda *args: self._on_product_changed('outside_video'))
 
         # NEU: Callbacks für Bezahlt-Checkboxen, um Wasserzeichen-Spalte zu aktualisieren
-        self.handcam_video_bezahlt_var.trace_add('write', lambda *args: self._on_payment_status_changed())
-        self.outside_video_bezahlt_var.trace_add('write', lambda *args: self._on_payment_status_changed())
+        # und um automatisch die entsprechende Produkt-Checkbox zu aktivieren
+        self.handcam_foto_bezahlt_var.trace_add('write', lambda *args: self._on_payment_status_changed('handcam_foto'))
+        self.handcam_video_bezahlt_var.trace_add('write', lambda *args: self._on_payment_status_changed('handcam_video'))
+        self.outside_foto_bezahlt_var.trace_add('write', lambda *args: self._on_payment_status_changed('outside_foto'))
+        self.outside_video_bezahlt_var.trace_add('write', lambda *args: self._on_payment_status_changed('outside_video'))
 
         # --- Widget-Platzhalter ---
         self.entry_load = None
@@ -788,11 +791,28 @@ class FormFields:
             hasattr(self.app, 'drag_drop')):
             self.app.update_watermark_column_visibility()
 
-    def _on_payment_status_changed(self):
+    def _on_payment_status_changed(self, product_name=None):
         """
         Trace-Callback für Bezahlt-Checkboxen.
+        Aktiviert automatisch die entsprechende Produkt-Checkbox,
+        wenn die Bezahlt-Checkbox ausgewählt wird.
         Aktualisiert die Wasserzeichen-Spalten-Sichtbarkeit.
         """
+        # Automatisches Aktivieren der Produkt-Checkbox
+        if product_name:
+            try:
+                if product_name == 'handcam_foto' and self.handcam_foto_bezahlt_var.get():
+                    self.handcam_foto_var.set(True)
+                elif product_name == 'handcam_video' and self.handcam_video_bezahlt_var.get():
+                    self.handcam_video_var.set(True)
+                elif product_name == 'outside_foto' and self.outside_foto_bezahlt_var.get():
+                    self.outside_foto_var.set(True)
+                elif product_name == 'outside_video' and self.outside_video_bezahlt_var.get():
+                    self.outside_video_var.set(True)
+            except tk.TclError as e:
+                # Widget existiert möglicherweise nicht mehr
+                print(f"Fehler beim Aktivieren der Produkt-Checkbox für {product_name}: {e}")
+
         # Benachrichtige App über Wasserzeichen-Status-Änderungen
         # Nur aufrufen, wenn die App vollständig initialisiert ist
         if (self.app and

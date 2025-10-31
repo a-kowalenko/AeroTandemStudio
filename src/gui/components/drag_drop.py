@@ -379,6 +379,10 @@ class DragDropFrame:
         if new_videos_added:
             self._update_app_preview()
 
+        # Foto-Vorschau aktualisieren
+        if new_photos_added:
+            self._update_photo_preview()
+
         # App über *alle* neuen Dateien benachrichtigen
         if new_videos_added or new_photos_added:
             if hasattr(self.app, 'on_files_added'):
@@ -669,6 +673,7 @@ class DragDropFrame:
             index = self.photo_tree.index(selection[0])
             self.photo_paths.pop(index)
             self._update_photo_table()
+            self._update_photo_preview()
 
     def clear_videos(self):
         """Entfernt alle Videos"""
@@ -689,6 +694,21 @@ class DragDropFrame:
         """Entfernt alle Fotos"""
         self.photo_paths.clear()
         self._update_photo_table()
+        self._update_photo_preview()
+
+    def remove_photo(self, photo_path, update_preview=True):
+        """Entfernt ein bestimmtes Foto aus der Liste"""
+        if photo_path in self.photo_paths:
+            self.photo_paths.remove(photo_path)
+            self._update_photo_table()
+            # Nur Preview aktualisieren wenn nicht von Preview selbst aufgerufen
+            if update_preview:
+                self._update_photo_preview()
+
+    def _update_photo_preview(self):
+        """Aktualisiert die Foto-Vorschau in der App"""
+        if self.app and hasattr(self.app, 'photo_preview'):
+            self.app.photo_preview.set_photos(self.photo_paths)
 
     def clear_all(self):
         """Entfernt alle Videos und Fotos"""

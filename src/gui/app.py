@@ -17,11 +17,13 @@ from .components.settings_dialog import SettingsDialog
 from .components.video_player import VideoPlayer
 from .components.video_cutter import VideoCutterDialog  # Importiert
 from .components.loading_window import LoadingWindow
+from .components.sd_status_indicator import SDStatusIndicator
 from ..model.kunde import Kunde
 
 from ..video.processor import VideoProcessor
 from ..utils.config import ConfigManager
 from ..utils.validation import validate_form_data
+from ..utils.sd_card_monitor import SDCardMonitor
 from ..installer.ffmpeg_installer import ensure_ffmpeg_installed
 from ..utils.file_utils import test_server_connection
 from ..installer.updater import initialize_updater
@@ -53,6 +55,10 @@ class VideoGeneratorApp:
         self.analysis_queue = None
         self.loading_window = None
 
+        # SD-Karten Monitor
+        self.sd_card_monitor = None
+        self.sd_status_indicator = None
+
         # Speichern der Button-Originalzustände
         self.old_button_text = ""
         self.old_button_bg = ""
@@ -60,6 +66,7 @@ class VideoGeneratorApp:
 
         self.setup_gui()
         self.ensure_dependencies()
+        self.initialize_sd_card_monitor()
 
         # NEU: Schließ-Ereignis abfangen
         self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
@@ -196,6 +203,11 @@ class VideoGeneratorApp:
         )
         title_label.pack(side="left")
 
+        # SD-Status Indikator (wird rechts vom Titel angezeigt, wenn aktiv)
+        self.sd_status_indicator = SDStatusIndicator(header_frame)
+        self.sd_status_indicator.create_widgets()
+        # Wird später gepackt wenn Monitoring aktiv ist
+
         # Settings-Button (rechts)
         self.settings_button = tk.Button(
             header_frame,
@@ -214,28 +226,74 @@ class VideoGeneratorApp:
     def create_tooltip(self, widget, text):
         """Erstellt einen Tooltip für ein Widget"""
 
-        def on_enter(event):
-            tooltip = tk.Toplevel()
-            tooltip.wm_overrideredirect(True)
-            tooltip.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
+        tooltip_window = None
+        tooltip_timer = None
 
-            label = tk.Label(tooltip, text=text, background="yellow", relief="solid", borderwidth=1)
-            label.pack()
+        def show_tooltip(event):
+            nonlocal tooltip_window, tooltip_timer
 
-            widget.tooltip = tooltip
+            # Cleanup vorhandener Tooltip
+            hide_tooltip()
 
-        def on_leave(event):
-            if hasattr(widget, 'tooltip'):
-                widget.tooltip.destroy()
+            # Verzögerte Anzeige (verhindert Flackern)
+            def create_window():
+                nonlocal tooltip_window
+                try:
+                    tooltip_window = tk.Toplevel()
+                    tooltip_window.wm_overrideredirect(True)
+                    tooltip_window.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
 
-        widget.bind("<Enter>", on_enter)
-        widget.bind("<Leave>", on_leave)
+                    label = tk.Label(
+                        tooltip_window,
+                        text=text,
+                        background="#ffffcc",
+                        relief="solid",
+                        borderwidth=1,
+                        padx=5,
+                        pady=3
+                    )
+                    label.pack()
+
+                    # Auto-Cleanup nach 5 Sekunden
+                    tooltip_window.after(5000, hide_tooltip)
+                except tk.TclError:
+                    tooltip_window = None
+
+            tooltip_timer = widget.after(500, create_window)
+
+        def hide_tooltip(event=None):
+            nonlocal tooltip_window, tooltip_timer
+
+            # Stoppe Timer
+            if tooltip_timer:
+                try:
+                    widget.after_cancel(tooltip_timer)
+                except tk.TclError:
+                    # Ignore if timer is already cancelled or invalid
+                    pass
+                tooltip_timer = None
+
+            # Zerstöre Fenster
+            if tooltip_window:
+                try:
+                    tooltip_window.destroy()
+                except Exception:
+                    pass
+                tooltip_window = None
+
+        widget.bind("<Enter>", show_tooltip)
+        widget.bind("<Leave>", hide_tooltip)
 
     def show_settings(self):
         """Zeigt den Einstellungs-Dialog"""
-        SettingsDialog(self.root, self.config).show()
-        # Nach Schließen des Dialogs Verbindung erneut testen
-        self.root.after(1000, self.test_server_connection_async)
+        SettingsDialog(self.root, self.config, on_settings_saved=self.on_settings_saved).show()
+
+    def on_settings_saved(self):
+        """Wird aufgerufen nachdem Settings gespeichert wurden"""
+        # Server-Verbindung testen
+        self.test_server_connection_async()
+        # SD-Monitor sofort neu starten
+        self._restart_sd_monitor_if_needed()
 
     def pack_components(self):
         # Linke Spalte
@@ -387,12 +445,23 @@ class VideoGeneratorApp:
 
     def _save_button_state(self):
         """Speichert den aktuellen Zustand des Buttons."""
-        self.old_button_text = self.erstellen_button.cget("text")
-        self.old_button_bg = self.erstellen_button.cget("bg")
-        try:
-            self.old_button_cursor = self.erstellen_button.cget("cursor")
-        except tk.TclError:
-            self.old_button_cursor = ""  # Standard-Cursor
+        current_text = self.erstellen_button.cget("text")
+
+        # Speichere nur gültige Button-Zustände (nicht "Bitte warten..." oder "Abbrechen")
+        # Wenn der Button bereits in einem temporären Zustand ist, behalte den gespeicherten Wert
+        if current_text not in ("Bitte warten...", "Abbrechen"):
+            self.old_button_text = current_text
+            self.old_button_bg = self.erstellen_button.cget("bg")
+            try:
+                self.old_button_cursor = self.erstellen_button.cget("cursor")
+            except tk.TclError:
+                self.old_button_cursor = ""  # Standard-Cursor
+        # Sonst: Behalte die vorher gespeicherten Werte
+        # Falls keine gespeichert wurden, setze Default-Werte
+        elif not hasattr(self, 'old_button_text') or not self.old_button_text:
+            self.old_button_text = "Erstellen"
+            self.old_button_bg = "#4CAF50"
+            self.old_button_cursor = ""
 
     def _set_button_waiting(self):
         """Setzt den Button in den Wartezustand."""
@@ -446,7 +515,20 @@ class VideoGeneratorApp:
             except Exception as e:
                 print(f"Fehler beim Entladen des Players: {e}")
 
-            self._restore_button_state()  # Button auch zurücksetzen
+            # Button-Status wiederherstellen - WICHTIG: Setze Button explizit auf "Erstellen"
+            # um sicherzustellen dass er nicht im "Bitte warten"-Zustand hängen bleibt
+            print("Stelle Button-Status nach Video-Löschung wieder her")
+            self.erstellen_button.config(
+                text="Erstellen",
+                bg="#4CAF50",
+                state="normal",
+                cursor=""
+            )
+            # Speichere den korrekten Status für zukünftige Wiederherstellungen
+            self.old_button_text = "Erstellen"
+            self.old_button_bg = "#4CAF50"
+            self.old_button_cursor = ""
+
             return
             # --- ENDE NEU ---
 
@@ -942,12 +1024,224 @@ class VideoGeneratorApp:
             except tk.TclError:
                 pass  # Fenster vielleicht schon weg
 
-        # 2. Temporäre Vorschau-Kopien löschen
+        # 2. SD-Karten Monitor stoppen
+        if self.sd_card_monitor:
+            self.sd_card_monitor.stop_monitoring()
+
+        # 3. Temporäre Vorschau-Kopien löschen
         if self.video_preview:
             self.video_preview._cleanup_temp_copies()  # Zugriff auf private Methode für Cleanup
 
-        # 3. Root-Fenster zerstören
+        # 4. Root-Fenster zerstören
         self.root.destroy()
+
+    def initialize_sd_card_monitor(self):
+        """Initialisiert und startet den SD-Karten Monitor"""
+        try:
+            self.sd_card_monitor = SDCardMonitor(
+                self.config,
+                on_backup_complete=self.on_sd_backup_complete,
+                on_progress_update=self.on_sd_progress_update,
+                on_status_change=self.on_sd_status_change
+            )
+            self.sd_card_monitor.start_monitoring()
+            print("SD-Karten Monitor initialisiert")
+        except Exception as e:
+            print(f"Fehler beim Initialisieren des SD-Karten Monitors: {e}")
+            # Nicht kritisch, App kann weiter laufen
+            self.sd_card_monitor = None
+
+    def on_sd_status_change(self, status_type, data):
+        """
+        Callback wenn sich der SD-Karten Status ändert
+
+        Args:
+            status_type: Art des Status ('monitoring_started', 'sd_detected', 'backup_started',
+                        'backup_finished', 'clearing_started', 'clearing_finished')
+            data: Zusätzliche Daten je nach Status
+        """
+        def update_ui():
+            if not self.sd_status_indicator:
+                return
+
+            if status_type == 'monitoring_started':
+                self.sd_status_indicator.set_monitoring_active(True)
+                self.progress_handler.set_status("Status: SD-Überwachung aktiv")
+
+            elif status_type == 'sd_detected':
+                self.sd_status_indicator.set_sd_detected(True)
+                self.progress_handler.set_status(f"Status: SD-Karte erkannt ({data})")
+
+            elif status_type == 'backup_started':
+                self.sd_status_indicator.set_backup_active(True)
+                self.sd_status_indicator.set_sd_detected(False)
+                self.progress_handler.set_status("Status: SD-Karten Backup läuft...")
+
+            elif status_type == 'backup_finished':
+                self.sd_status_indicator.set_backup_active(False)
+                self.sd_status_indicator.set_sd_detected(False)
+                if data:  # Erfolg
+                    self.progress_handler.set_status("Status: Backup abgeschlossen")
+                else:  # Fehler
+                    self.progress_handler.set_status("Status: Backup fehlgeschlagen")
+
+            elif status_type == 'clearing_started':
+                self.sd_status_indicator.set_clearing_active(True)
+                self.sd_status_indicator.show_clearing_progress()
+                self.progress_handler.set_status("Status: SD-Karte wird geleert...")
+
+            elif status_type == 'clearing_finished':
+                self.sd_status_indicator.set_clearing_active(False)
+                self.progress_handler.set_status("Status: SD-Karte geleert")
+
+        # UI-Update im Haupt-Thread
+        self.root.after(0, update_ui)
+
+    def on_sd_progress_update(self, current_mb, total_mb, speed_mbps):
+        """
+        Callback für SD-Backup Progress-Updates
+
+        Args:
+            current_mb: Bereits kopierte MB
+            total_mb: Gesamt MB
+            speed_mbps: Kopiergeschwindigkeit in MB/s
+        """
+        def update_ui():
+            if self.sd_status_indicator:
+                self.sd_status_indicator.update_backup_progress(current_mb, total_mb, speed_mbps)
+
+            # Auch in der Status-Bar anzeigen
+            progress_percent = (current_mb / total_mb * 100) if total_mb > 0 else 0
+            self.progress_handler.set_status(
+                f"Status: SD-Backup {progress_percent:.0f}% ({current_mb:.0f}/{total_mb:.0f} MB, {speed_mbps:.1f} MB/s)"
+            )
+
+        # UI-Update im Haupt-Thread
+        self.root.after(0, update_ui)
+
+    def _restart_sd_monitor_if_needed(self):
+        """Startet den SD-Monitor neu wenn Einstellungen geändert wurden"""
+        settings = self.config.get_settings()
+        should_monitor = settings.get("sd_auto_backup", False)
+
+        if self.sd_card_monitor:
+            is_monitoring = self.sd_card_monitor.monitoring
+
+            if should_monitor and not is_monitoring:
+                # Monitoring wurde aktiviert
+                self.sd_card_monitor.start_monitoring()
+            elif not should_monitor and is_monitoring:
+                # Monitoring wurde deaktiviert
+                self.sd_card_monitor.stop_monitoring()
+                if self.sd_status_indicator:
+                    self.sd_status_indicator.hide()
+                self.progress_handler.set_status("Status: Bereit.")
+
+    def on_sd_backup_complete(self, backup_path, success):
+        """
+        Wird aufgerufen wenn SD-Karten Backup abgeschlossen ist
+
+        Args:
+            backup_path: Pfad zum Backup-Ordner oder None bei Fehler
+            success: True wenn Backup erfolgreich war
+        """
+        if not success:
+            print("SD-Karten Backup fehlgeschlagen")
+            messagebox.showerror("Backup Fehler",
+                               "Das Backup von der SD-Karte ist fehlgeschlagen.",
+                               parent=self.root)
+            return
+
+        print(f"SD-Karten Backup erfolgreich: {backup_path}")
+
+        settings = self.config.get_settings()
+
+        # Prüfe ob automatischer Import aktiviert ist
+        if settings.get("sd_auto_import", False):
+            self.import_from_backup(backup_path)
+        else:
+            # Zeige Info-Nachricht
+            messagebox.showinfo("Backup erfolgreich",
+                              f"SD-Karten Backup wurde erfolgreich erstellt:\n{backup_path}",
+                              parent=self.root)
+
+    def import_from_backup(self, backup_path):
+        """
+        Importiert Dateien aus dem Backup-Ordner (simuliert Drag&Drop)
+
+        Args:
+            backup_path: Pfad zum Backup-Ordner
+        """
+        # Merke QR-Check Status und deaktiviere temporär
+        qr_check_was_enabled = False
+        if self.drag_drop and hasattr(self.drag_drop, 'qr_check_enabled'):
+            qr_check_was_enabled = self.drag_drop.qr_check_enabled.get()
+            if qr_check_was_enabled:
+                print("QR-Code-Prüfung temporär deaktiviert für Auto-Import")
+                self.drag_drop.qr_check_enabled.set(False)
+
+        # Variable für finally-Block
+        videos_imported = False
+
+        try:
+            # Sammle alle Dateien aus dem Backup
+            video_files = []
+            photo_files = []
+
+            # Dateien liegen jetzt direkt im Backup-Ordner (flache Struktur)
+            if os.path.isdir(backup_path):
+                for file in os.listdir(backup_path):
+                    file_lower = file.lower()
+                    file_path = os.path.join(backup_path, file)
+
+                    # Nur Dateien, keine Ordner
+                    if not os.path.isfile(file_path):
+                        continue
+
+                    # Video-Formate
+                    if file_lower.endswith(('.mp4', '.mov', '.avi', '.mkv', '.m4v', '.mpg', '.mpeg', '.wmv', '.flv', '.webm')):
+                        video_files.append(file_path)
+                    # Foto-Formate
+                    elif file_lower.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.gif', '.webp', '.heic', '.raw', '.cr2', '.nef', '.arw', '.dng')):
+                        photo_files.append(file_path)
+
+            if video_files or photo_files:
+                # Füge Dateien zum Drag&Drop hinzu
+                if self.drag_drop:
+                    self.drag_drop.add_files(video_files, photo_files)
+
+                if video_files:
+                    videos_imported = True
+
+                print(f"Auto-Import: {len(video_files)} Videos und {len(photo_files)} Fotos importiert")
+
+                # messagebox.showinfo("Import erfolgreich",
+                #                   f"SD-Karten Backup erfolgreich importiert:\n"
+                #                   f"{len(video_files)} Videos und {len(photo_files)} Fotos",
+                #                   parent=self.root)
+            else:
+                print("Keine Dateien zum Importieren gefunden")
+                messagebox.showwarning("Keine Dateien",
+                                     "Im Backup wurden keine Videos oder Fotos gefunden.",
+                                     parent=self.root)
+
+        except Exception as e:
+            print(f"Fehler beim Importieren aus Backup: {e}")
+            messagebox.showerror("Import Fehler",
+                               f"Fehler beim Importieren der Dateien:\n{str(e)}",
+                               parent=self.root)
+        finally:
+            # Stelle QR-Check Status wieder her
+            if qr_check_was_enabled and self.drag_drop and hasattr(self.drag_drop, 'qr_check_enabled'):
+                print("QR-Code-Prüfung wieder aktiviert nach Auto-Import")
+                self.drag_drop.qr_check_enabled.set(True)
+
+                # Trigger QR-Analyse für das erste importierte Video
+                if videos_imported:
+                    print("Starte QR-Analyse für erstes importiertes Video")
+                    video_paths = self.drag_drop.get_video_paths()
+                    if video_paths:
+                        self.run_qr_analysis(video_paths)
 
     def run(self):
         """Startet die Hauptloop der Anwendung"""

@@ -1,4 +1,4 @@
-﻿﻿# GUI Framework
+﻿# GUI Framework
 tkinterdnd2
 tkcalendar
 
@@ -15,6 +15,9 @@ proglog
 
 # Bildverarbeitung
 Pillow
+
+# Windows API (for SD card monitoring)
+pywin32
 
 # HTTP/Networking
 requests

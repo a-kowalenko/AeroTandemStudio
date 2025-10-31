@@ -42,7 +42,12 @@ class ConfigManager:
             "videospringer": "",
             "upload_to_server": False,
             "server_url": "smb://169.254.169.254/aktuell",  # Neue Standard-URL
-            "qr_check_enabled": False  # QR-Code Prüfung standardmäßig aus
+            "qr_check_enabled": False,  # QR-Code Prüfung standardmäßig aus
+            # SD-Karten Backup Einstellungen
+            "sd_backup_folder": "",
+            "sd_auto_backup": False,
+            "sd_clear_after_backup": False,
+            "sd_auto_import": False
         }
 
     def save_settings(self, settings):

@@ -22,6 +22,7 @@ class PhotoPreview:
         # Widgets
         self.large_preview_canvas = None
         self.thumbnail_canvas = None
+        self.thumbnail_scrollbar = None
         self.thumbnail_inner_frame = None
         self.thumbnail_canvas_window = None
         self.info_labels = {}
@@ -30,6 +31,8 @@ class PhotoPreview:
         # Drag-Scrolling-Variablen
         self.drag_start_x = 0
         self.drag_start_scroll = 0
+        self.is_dragging = False
+        self.drag_start_scroll = 0
 
         # Navigation Pfeile
         self.left_arrow_id = None
@@ -37,8 +40,8 @@ class PhotoPreview:
         self.show_arrows = False
 
         # Größen
-        self.large_preview_width = 533
-        self.large_preview_height = 300
+        self.large_preview_width = 568
+        self.large_preview_height = 320
         self.thumbnail_size = 60
 
         self.create_widgets()
@@ -77,22 +80,31 @@ class PhotoPreview:
 
         # --- Thumbnail-Galerie ---
         thumbnail_frame = tk.Frame(self.frame)
-        thumbnail_frame.pack(fill="x", pady=(0, 10))
+        thumbnail_frame.pack(fill="x", pady=(0, 5))
 
-        # Scrollbarer Canvas für Thumbnails (ohne sichtbare Scrollbar)
+        # Scrollbarer Canvas für Thumbnails
         self.thumbnail_canvas = tk.Canvas(
             thumbnail_frame,
-            height=self.thumbnail_size + 10,
+            height=self.thumbnail_size,
             bg="#f0f0f0",
             highlightthickness=0
         )
         self.thumbnail_canvas.pack(fill="x", expand=True)
 
+        # Sichtbare Scrollbar für Thumbnails
+        self.thumbnail_scrollbar = ttk.Scrollbar(
+            thumbnail_frame,
+            orient="horizontal",
+            command=self.thumbnail_canvas.xview
+        )
+        self.thumbnail_scrollbar.pack(fill="x", pady=(2, 0))
+        self.thumbnail_canvas.configure(xscrollcommand=self.thumbnail_scrollbar.set)
+
         # Frame innerhalb des Canvas für die Thumbnails
         self.thumbnail_inner_frame = tk.Frame(self.thumbnail_canvas, bg="#f0f0f0")
         self.thumbnail_canvas_window = self.thumbnail_canvas.create_window((0, 0), window=self.thumbnail_inner_frame, anchor="nw")
 
-        # Maus-Drag-Scrolling aktivieren (wie Smartphone Touch)
+        # Maus-Drag-Scrolling aktivieren (wie Smartphone Touch) - zusätzlich zur Scrollbar
         self.thumbnail_canvas.bind("<ButtonPress-1>", self._on_thumbnail_drag_start)
         self.thumbnail_canvas.bind("<B1-Motion>", self._on_thumbnail_drag_motion)
         self.thumbnail_canvas.bind("<ButtonRelease-1>", self._on_thumbnail_drag_end)
@@ -103,6 +115,7 @@ class PhotoPreview:
         # Drag-Variablen
         self.drag_start_x = 0
         self.drag_start_scroll = 0
+        self.is_dragging = False
 
         # --- Foto-Informationen ---
         info_frame = tk.Frame(self.frame, relief="groove", borderwidth=1, padx=5, pady=5)
@@ -121,15 +134,14 @@ class PhotoPreview:
 
         # === LINKE SPALTE: Aktuelles Foto ===
         single_info_title = tk.Label(left_info_frame, text="Aktuelles Foto:", font=("Arial", 9, "bold"))
-        single_info_title.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        single_info_title.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 0))
 
         # Info-Labels erstellen
         info_fields = [
             ("Dateiname:", "filename"),
             ("Auflösung:", "resolution"),
             ("Größe:", "size"),
-            ("Datum:", "date"),
-            ("Uhrzeit:", "time")
+            ("Datum:", "date")
         ]
 
         for idx, (label_text, key) in enumerate(info_fields, start=1):
@@ -143,7 +155,7 @@ class PhotoPreview:
 
         # === RECHTE SPALTE: Gesamt-Statistik ===
         stats_title = tk.Label(right_info_frame, text="Gesamt-Statistik:", font=("Arial", 9, "bold"))
-        stats_title.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        stats_title.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 0))
 
         total_count_label = tk.Label(right_info_frame, text="Anzahl Fotos:", font=("Arial", 8), anchor="w")
         total_count_label.grid(row=1, column=0, sticky="w", padx=(0, 5))
@@ -224,9 +236,9 @@ class PhotoPreview:
                 thumb_label.image = thumbnail  # Referenz behalten
                 thumb_label.pack()
 
-                # Click-Event
-                thumb_label.bind("<Button-1>", lambda e, i=idx: self._on_thumbnail_click(i))
-                thumb_frame.bind("<Button-1>", lambda e, i=idx: self._on_thumbnail_click(i))
+                # Click-Event - verwende ButtonRelease statt Button-1 um Drag-Scrolling zu ermöglichen
+                thumb_label.bind("<ButtonRelease-1>", lambda e, i=idx: self._on_thumbnail_click_release(e, i))
+                thumb_frame.bind("<ButtonRelease-1>", lambda e, i=idx: self._on_thumbnail_click_release(e, i))
 
         # Canvas-Scroll-Region aktualisieren
         self.thumbnail_inner_frame.update_idletasks()
@@ -237,6 +249,7 @@ class PhotoPreview:
     def _on_thumbnail_drag_start(self, event):
         """Startet das Drag-Scrolling"""
         self.drag_start_x = event.x
+        self.is_dragging = False
         # Hole aktuelle Scroll-Position
         scroll_region = self.thumbnail_canvas.cget("scrollregion")
         if scroll_region:
@@ -245,6 +258,13 @@ class PhotoPreview:
 
     def _on_thumbnail_drag_motion(self, event):
         """Führt das Drag-Scrolling durch"""
+        # Wenn sich die Maus mehr als 5 Pixel bewegt hat, ist es ein Drag, kein Klick
+        if abs(event.x - self.drag_start_x) > 5:
+            self.is_dragging = True
+
+        if not self.is_dragging:
+            return
+
         scroll_region = self.thumbnail_canvas.cget("scrollregion")
         if not scroll_region or scroll_region == "0 0 0 0":
             return
@@ -270,7 +290,8 @@ class PhotoPreview:
 
     def _on_thumbnail_drag_end(self, event):
         """Beendet das Drag-Scrolling"""
-        pass  # Cleanup falls nötig
+        # Reset drag flag nach kurzer Zeit, damit Klicks funktionieren
+        self.frame.after(50, lambda: setattr(self, 'is_dragging', False))
 
     def _on_thumbnail_mousewheel(self, event):
         """Scrolling mit Mausrad"""
@@ -416,6 +437,12 @@ class PhotoPreview:
         self._update_thumbnails()
         self._update_info()
 
+    def _on_thumbnail_click_release(self, event, index):
+        """Behandelt ButtonRelease auf ein Thumbnail - nur wenn es kein Drag war"""
+        # Nur als Klick behandeln wenn nicht gedragged wurde
+        if not self.is_dragging:
+            self._on_thumbnail_click(index)
+
     def _show_previous_photo(self):
         """Zeigt das vorherige Foto"""
         if self.current_photo_index > 0:
@@ -436,7 +463,7 @@ class PhotoPreview:
         """Aktualisiert die Foto-Informationen"""
         if not self.photo_paths or self.current_photo_index < 0:
             # Alle Infos zurücksetzen
-            for key in ["filename", "resolution", "size", "date", "time"]:
+            for key in ["filename", "resolution", "size", "date"]:
                 self.info_labels[key].config(text="-")
             self.info_labels["total_count"].config(text="0")
             self.info_labels["total_size"].config(text="0 MB")
@@ -463,8 +490,7 @@ class PhotoPreview:
             # Datum und Uhrzeit
             timestamp = os.path.getmtime(photo_path)
             dt = datetime.fromtimestamp(timestamp)
-            self.info_labels["date"].config(text=dt.strftime("%d.%m.%Y"))
-            self.info_labels["time"].config(text=dt.strftime("%H:%M:%S"))
+            self.info_labels["date"].config(text=dt.strftime("%d.%m.%Y - %H:%M:%S"))
 
         except Exception as e:
             print(f"Fehler beim Abrufen der Foto-Informationen: {e}")
@@ -512,8 +538,10 @@ class PhotoPreview:
             if self.current_photo_index >= len(self.photo_paths):
                 self.current_photo_index = len(self.photo_paths) - 1
 
-            # PERFORMANCE-OPTIMIERUNG: Cache intelligent aufräumen statt komplett leeren
-            # Nur Einträge ab dem gelöschten Index verschieben
+            # INSTANT: Gelöschtes Thumbnail sofort entfernen (visuelles Feedback)
+            self._remove_thumbnail_widget_instantly(deleted_index)
+
+            # PERFORMANCE-OPTIMIERUNG: Cache intelligent aufräumen
             self._cleanup_cache_after_delete(deleted_index)
 
             # Sofort große Vorschau und Info aktualisieren (schnell)
@@ -521,18 +549,19 @@ class PhotoPreview:
             self._update_info()
             self._update_delete_button()
 
-            # Thumbnails asynchron aktualisieren (verzögert, damit UI responsive bleibt)
-            self.frame.after(50, self._update_thumbnails)
+            # Thumbnails komplett neu rendern (nach kurzer Verzögerung für sauberes Layout)
+            self.frame.after(10, self._update_thumbnails)
         else:
             # Fallback: Entferne nur aus lokaler Liste
             self.photo_paths.pop(self.current_photo_index)
+            self._remove_thumbnail_widget_instantly(deleted_index)
             self._cleanup_cache_after_delete(deleted_index)
             if self.current_photo_index >= len(self.photo_paths):
                 self.current_photo_index = len(self.photo_paths) - 1
             self._update_large_preview()
             self._update_info()
             self._update_delete_button()
-            self.frame.after(50, self._update_thumbnails)
+            self.frame.after(10, self._update_thumbnails)
 
     def _cleanup_cache_after_delete(self, deleted_index):
         """Räumt Cache intelligent auf nach dem Löschen eines Fotos"""
@@ -547,6 +576,19 @@ class PhotoPreview:
         for key in keys_to_delete:
             if key in self.photo_images:
                 del self.photo_images[key]
+
+    def _remove_thumbnail_widget_instantly(self, index):
+        """Entfernt das Thumbnail-Widget am angegebenen Index sofort für instant Feedback"""
+        try:
+            children = self.thumbnail_inner_frame.winfo_children()
+            if 0 <= index < len(children):
+                # Entferne das Widget sofort
+                children[index].destroy()
+                # Update Canvas sofort
+                self.thumbnail_inner_frame.update_idletasks()
+        except Exception as e:
+            # Fehler ignorieren, wird beim nächsten Update eh neu gerendert
+            pass
 
     def pack(self, **kwargs):
         """Packt den Frame"""

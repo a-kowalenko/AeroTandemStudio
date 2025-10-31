@@ -421,21 +421,21 @@ class PhotoPreview:
                 fill=arrow_color, outline="", tags="arrow", state="hidden"
             )
 
-        # Vollbild-Button (unten links)
+        # Vollbild-Button (unten rechts)
         if self.photo_paths:
-            button_x = 15
+            button_x = self.large_preview_width - 35
             button_y = self.large_preview_height - 15
 
             # Hintergrund-Rechteck
             self.fullscreen_button_bg = self.large_preview_canvas.create_rectangle(
-                button_x - 5, button_y - 12, button_x + 45, button_y + 12,
+                button_x - 35, button_y - 12, button_x + 35, button_y + 12,
                 fill=arrow_bg, outline="", stipple="gray50", tags="fullscreen_btn", state="hidden"
             )
 
             # Text-Icon
             self.fullscreen_button_text = self.large_preview_canvas.create_text(
-                button_x + 20, button_y,
-                text="⛶ Vollbild",
+                button_x, button_y,
+                text="Vollbild ⛶ ",
                 fill=arrow_color,
                 font=("Arial", 9, "bold"),
                 tags="fullscreen_btn",
@@ -457,8 +457,8 @@ class PhotoPreview:
 
     def _on_preview_click(self, event):
         """Behandelt Klicks auf die Preview (Navigation oder Vollbild)"""
-        # Prüfe ob auf Vollbild-Button geklickt wurde (unten links)
-        if event.y > self.large_preview_height - 30 and event.x < 60:
+        # Prüfe ob auf Vollbild-Button geklickt wurde (unten rechts)
+        if event.y > self.large_preview_height - 30 and event.x > self.large_preview_width - 70:
             self._open_fullscreen()
             return
 

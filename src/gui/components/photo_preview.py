@@ -32,7 +32,6 @@ class PhotoPreview:
         self.drag_start_x = 0
         self.drag_start_scroll = 0
         self.is_dragging = False
-        self.drag_start_scroll = 0
 
         # Navigation Pfeile
         self.left_arrow_id = None
@@ -128,9 +127,6 @@ class PhotoPreview:
         self.thumbnail_canvas.bind("<MouseWheel>", self._on_thumbnail_mousewheel)
 
         # Drag-Variablen
-        self.drag_start_x = 0
-        self.drag_start_scroll = 0
-        self.is_dragging = False
 
         # --- Foto-Informationen ---
         info_frame = tk.Frame(self.frame, relief="groove", borderwidth=1, padx=5, pady=5)
@@ -379,7 +375,6 @@ class PhotoPreview:
         if len(self.photo_paths) <= 1:
             return
 
-        arrow_size = 30
         arrow_color = "#ffffff"
         arrow_bg = "#000000"
 
@@ -649,7 +644,7 @@ class PhotoPreview:
         for path in self.photo_paths:
             try:
                 total_size += os.path.getsize(path)
-            except:
+            except Exception:
                 pass
 
         total_size_mb = total_size / (1024 * 1024)

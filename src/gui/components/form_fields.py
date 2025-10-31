@@ -809,9 +809,9 @@ class FormFields:
                     self.outside_foto_var.set(True)
                 elif product_name == 'outside_video' and self.outside_video_bezahlt_var.get():
                     self.outside_video_var.set(True)
-            except tk.TclError:
+            except tk.TclError as e:
                 # Widget existiert möglicherweise nicht mehr
-                print("Fehler beim Aktivieren der Produkt-Checkbox.")
+                print(f"Fehler beim Aktivieren der Produkt-Checkbox für {product_name}: {e}")
 
         # Benachrichtige App über Wasserzeichen-Status-Änderungen
         # Nur aufrufen, wenn die App vollständig initialisiert ist

@@ -131,7 +131,7 @@ class VideoGeneratorApp:
             font=("Arial", 12),
             command=self.on_upload_checkbox_toggle
         )
-        self.upload_checkbox.pack(side="left", padx=(0, 10))
+        self.upload_checkbox.pack(side="left", padx=(0, 5))
 
         # Server Status Label
         self.server_status_label = tk.Label(
@@ -256,7 +256,7 @@ class VideoGeneratorApp:
         self.photo_preview.pack(fill="both", expand=True, padx=5, pady=5)
 
         # Upload-Frame und Button bleiben außerhalb der Tabs
-        self.upload_frame.pack(pady=10, fill="x", side="top")
+        self.upload_frame.pack(pady=0, fill="x", side="top")
         self.erstellen_button.pack(pady=10, fill="x", side="top")
 
         # Progress unten

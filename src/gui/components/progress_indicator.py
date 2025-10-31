@@ -20,7 +20,7 @@ class ProgressHandler:
         self.eta_label.pack(pady=2)
 
     def pack_status_label(self):
-        self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_label.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
 
     def update_progress(self, step, total_steps=7):
         progress = (step / total_steps) * 100

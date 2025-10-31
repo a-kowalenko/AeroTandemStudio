@@ -73,10 +73,25 @@ class PhotoPreview:
             font=("Arial", 12)
         )
 
-        # Event-Bindings für Navigation-Pfeile
+        # Vollbild-Button (unten links)
+        self.fullscreen_button_id = None
+        self.fullscreen_button_bg = None
+        self.fullscreen_button_text = None
+
+        # Event-Bindings für Navigation-Pfeile und Vollbild
         self.large_preview_canvas.bind("<Enter>", self._on_preview_enter)
         self.large_preview_canvas.bind("<Leave>", self._on_preview_leave)
         self.large_preview_canvas.bind("<Button-1>", self._on_preview_click)
+
+        # Tastatur-Navigation (Pfeiltasten)
+        self.frame.bind("<Left>", self._on_key_left)
+        self.frame.bind("<Right>", self._on_key_right)
+        # Focus setzen damit Tastatur-Events funktionieren
+        self.frame.bind("<FocusIn>", lambda e: None)
+        self.large_preview_canvas.bind("<Button-1>", self._on_canvas_click_focus, add="+")
+
+        # Vollbild-Fenster
+        self.fullscreen_window = None
 
         # --- Thumbnail-Galerie ---
         thumbnail_frame = tk.Frame(self.frame)
@@ -406,19 +421,47 @@ class PhotoPreview:
                 fill=arrow_color, outline="", tags="arrow", state="hidden"
             )
 
+        # Vollbild-Button (unten links)
+        if self.photo_paths:
+            button_x = 15
+            button_y = self.large_preview_height - 15
+
+            # Hintergrund-Rechteck
+            self.fullscreen_button_bg = self.large_preview_canvas.create_rectangle(
+                button_x - 5, button_y - 12, button_x + 45, button_y + 12,
+                fill=arrow_bg, outline="", stipple="gray50", tags="fullscreen_btn", state="hidden"
+            )
+
+            # Text-Icon
+            self.fullscreen_button_text = self.large_preview_canvas.create_text(
+                button_x + 20, button_y,
+                text="⛶ Vollbild",
+                fill=arrow_color,
+                font=("Arial", 9, "bold"),
+                tags="fullscreen_btn",
+                state="hidden"
+            )
+
     def _on_preview_enter(self, event):
-        """Zeigt Pfeile an wenn Maus über Preview schwebt"""
-        if len(self.photo_paths) > 1:
+        """Zeigt Pfeile und Vollbild-Button an wenn Maus über Preview schwebt"""
+        if len(self.photo_paths) > 0:
             self.large_preview_canvas.itemconfig("arrow", state="normal")
+            self.large_preview_canvas.itemconfig("fullscreen_btn", state="normal")
             self.show_arrows = True
 
     def _on_preview_leave(self, event):
-        """Versteckt Pfeile wenn Maus Preview verlässt"""
+        """Versteckt Pfeile und Vollbild-Button wenn Maus Preview verlässt"""
         self.large_preview_canvas.itemconfig("arrow", state="hidden")
+        self.large_preview_canvas.itemconfig("fullscreen_btn", state="hidden")
         self.show_arrows = False
 
     def _on_preview_click(self, event):
-        """Behandelt Klicks auf die Preview (Navigation)"""
+        """Behandelt Klicks auf die Preview (Navigation oder Vollbild)"""
+        # Prüfe ob auf Vollbild-Button geklickt wurde (unten links)
+        if event.y > self.large_preview_height - 30 and event.x < 60:
+            self._open_fullscreen()
+            return
+
         if len(self.photo_paths) <= 1:
             return
 
@@ -458,6 +501,109 @@ class PhotoPreview:
             self._update_large_preview()
             self._update_thumbnails()
             self._update_info()
+
+    def _on_canvas_click_focus(self, event):
+        """Setzt Focus auf Frame bei Klick auf Canvas für Tastatur-Events"""
+        self.frame.focus_set()
+
+    def _on_key_left(self, event):
+        """Behandelt linke Pfeiltaste - vorheriges Foto"""
+        if self.photo_paths and self.current_photo_index > 0:
+            self._show_previous_photo()
+
+    def _on_key_right(self, event):
+        """Behandelt rechte Pfeiltaste - nächstes Foto"""
+        if self.photo_paths and self.current_photo_index < len(self.photo_paths) - 1:
+            self._show_next_photo()
+
+    def _open_fullscreen(self):
+        """Öffnet das aktuelle Foto im Vollbild-Modus"""
+        if not self.photo_paths or self.current_photo_index < 0:
+            return
+
+        # Erstelle Vollbild-Fenster
+        self.fullscreen_window = tk.Toplevel(self.frame)
+        self.fullscreen_window.title("Vollbild")
+        self.fullscreen_window.attributes('-fullscreen', True)
+        self.fullscreen_window.configure(bg='black')
+
+        # Canvas für Vollbild-Foto
+        fullscreen_canvas = tk.Canvas(
+            self.fullscreen_window,
+            bg='black',
+            highlightthickness=0
+        )
+        fullscreen_canvas.pack(fill="both", expand=True)
+
+        # Lade aktuelles Foto in voller Auflösung
+        photo_path = self.photo_paths[self.current_photo_index]
+        try:
+            img = Image.open(photo_path)
+
+            # Bildschirmgröße
+            screen_width = self.fullscreen_window.winfo_screenwidth()
+            screen_height = self.fullscreen_window.winfo_screenheight()
+
+            # Skaliere Bild auf Bildschirmgröße (Aspect Ratio beibehalten)
+            img.thumbnail((screen_width, screen_height), Image.LANCZOS)
+            photo_image = ImageTk.PhotoImage(img)
+
+            # Zentriert anzeigen
+            x = screen_width // 2
+            y = screen_height // 2
+            fullscreen_canvas.create_image(x, y, image=photo_image, anchor="center")
+
+            # Referenz behalten
+            fullscreen_canvas.image = photo_image
+
+            # Info-Text (unten links)
+            filename = os.path.basename(photo_path)
+            info_text = f"{self.current_photo_index + 1}/{len(self.photo_paths)} - {filename}"
+            fullscreen_canvas.create_text(
+                20, screen_height - 20,
+                text=info_text,
+                fill="white",
+                font=("Arial", 12),
+                anchor="sw"
+            )
+
+            # Hinweis-Text (unten rechts)
+            help_text = "ESC: Beenden | ← →: Navigation"
+            fullscreen_canvas.create_text(
+                screen_width - 20, screen_height - 20,
+                text=help_text,
+                fill="white",
+                font=("Arial", 11),
+                anchor="se"
+            )
+
+        except Exception as e:
+            print(f"Fehler beim Laden des Vollbild-Fotos: {e}")
+
+        # Event-Bindings für Vollbild
+        self.fullscreen_window.bind("<Escape>", lambda e: self.fullscreen_window.destroy())
+        self.fullscreen_window.bind("<Button-1>", lambda e: self.fullscreen_window.destroy())
+        self.fullscreen_window.bind("<Left>", self._on_fullscreen_key_left)
+        self.fullscreen_window.bind("<Right>", self._on_fullscreen_key_right)
+
+        # Focus setzen
+        self.fullscreen_window.focus_set()
+
+    def _on_fullscreen_key_left(self, event):
+        """Behandelt linke Pfeiltaste im Vollbild-Modus"""
+        if self.current_photo_index > 0:
+            self.fullscreen_window.destroy()
+            self._show_previous_photo()
+            # Kurz warten, dann Vollbild wieder öffnen
+            self.frame.after(50, self._open_fullscreen)
+
+    def _on_fullscreen_key_right(self, event):
+        """Behandelt rechte Pfeiltaste im Vollbild-Modus"""
+        if self.current_photo_index < len(self.photo_paths) - 1:
+            self.fullscreen_window.destroy()
+            self._show_next_photo()
+            # Kurz warten, dann Vollbild wieder öffnen
+            self.frame.after(50, self._open_fullscreen)
 
     def _update_info(self):
         """Aktualisiert die Foto-Informationen"""

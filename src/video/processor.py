@@ -249,20 +249,8 @@ class VideoProcessor:
 
             # --- SERVER UPLOAD (Schritt 12) ---
             self._check_for_cancellation()
-            step_server = 12 if create_watermark_version else 11
-            self._update_progress(step_server, TOTAL_STEPS)
-            server_message = ""
-            if upload_to_server:
-                self._update_status("Lade Verzeichnis auf Server hoch...")
-                # Wir laden das gesamte Basis-Verzeichnis hoch
-                success, message, server_path = self._upload_to_server(base_output_dir)
-                server_message = f"\nServer: {message}" if message else ""
 
-            # --- ABSCHLUSS (letzter Schritt) ---
-            final_step = 13 if create_watermark_version else 12
-            self._update_progress(final_step, TOTAL_STEPS)
-
-            # Speichere MARKER Datei im Ausgabeordner
+            # Speichere MARKER Datei im Ausgabeordner (VOR dem Server-Upload!)
             marker_path = os.path.join(base_output_dir, "_fertig.txt")
             with open(marker_path, 'w') as marker_file:
                 try:
@@ -272,6 +260,21 @@ class VideoProcessor:
                         marker_file.write(json.dumps({}, ensure_ascii=False))
                 except TypeError as json_err:
                     print(f"Fehler beim Serialisieren der 'kunde'-Daten: {json_err}")
+
+            # Jetzt Server-Upload durchführen (inkl. _fertig.txt)
+            step_server = 12 if create_watermark_version else 11
+            self._update_progress(step_server, TOTAL_STEPS)
+            server_message = ""
+            if upload_to_server:
+                self._update_status("Lade Verzeichnis auf Server hoch...")
+                # Wir laden das gesamte Basis-Verzeichnis hoch (inkl. _fertig.txt)
+                success, message, server_path = self._upload_to_server(base_output_dir)
+                server_message = f"\nServer: {message}" if message else ""
+
+            # --- ABSCHLUSS (letzter Schritt) ---
+            final_step = 13 if create_watermark_version else 12
+            self._update_progress(final_step, TOTAL_STEPS)
+
 
             # Fertig-Meldung erstellen
             success_messages = []

@@ -1,4 +1,4 @@
-﻿"""
+"""
 SD-Karten Monitor
 Überwacht USB/SD-Karten Anschlüsse und führt automatische Backups durch.
 """
@@ -99,7 +99,7 @@ class SDCardMonitor:
         try:
             drive_type = win32file.GetDriveType(drive + "\\")
             return drive_type == win32con.DRIVE_REMOVABLE
-        except:
+        except Exception:
             return False
 
     def _is_action_cam_sd_card(self, drive):
@@ -253,7 +253,7 @@ class SDCardMonitor:
             for file_path in media_files:
                 try:
                     total_size += os.path.getsize(file_path)
-                except:
+                except Exception:
                     pass
 
             total_mb = total_size / (1024 * 1024)
@@ -309,7 +309,7 @@ class SDCardMonitor:
             if backup_path and os.path.isdir(backup_path):
                 try:
                     shutil.rmtree(backup_path)
-                except:
+                except Exception:
                     pass
             return None
 

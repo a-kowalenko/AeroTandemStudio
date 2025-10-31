@@ -1,4 +1,4 @@
-﻿"""
+"""
 SD-Karten Status Anzeige
 Zeigt den Status der SD-Karten Überwachung und Backup-Fortschritt
 """
@@ -21,7 +21,7 @@ class SDStatusIndicator:
         # Status-Variablen
         self.monitoring_active = False
         self.backup_active = False
-        self.clearing_active = False  # NEU: SD-Karte wird geleert
+        self.clearing_active = False  # SD-Karte wird geleert
         self.sd_detected = False
 
         # Tooltip-Verwaltung
@@ -143,7 +143,7 @@ class SDStatusIndicator:
         if self.tooltip_timer:
             try:
                 self.container.after_cancel(self.tooltip_timer)
-            except:
+            except Exception:
                 pass
             self.tooltip_timer = None
 
@@ -151,7 +151,8 @@ class SDStatusIndicator:
         if self.tooltip:
             try:
                 self.tooltip.destroy()
-            except:
+            except tk.TclError:
+                # Tooltip-Fenster wurde möglicherweise bereits zerstört, Fehler ignorieren
                 pass
             self.tooltip = None
 

@@ -268,7 +268,8 @@ class VideoGeneratorApp:
             if tooltip_timer:
                 try:
                     widget.after_cancel(tooltip_timer)
-                except:
+                except tk.TclError:
+                    # Ignore if timer is already cancelled or invalid
                     pass
                 tooltip_timer = None
 
@@ -276,7 +277,7 @@ class VideoGeneratorApp:
             if tooltip_window:
                 try:
                     tooltip_window.destroy()
-                except:
+                except Exception:
                     pass
                 tooltip_window = None
 

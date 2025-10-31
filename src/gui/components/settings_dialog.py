@@ -8,11 +8,12 @@ from src.utils.constants import APP_VERSION, PAYPAL_LOGO_PATH
 class SettingsDialog:
     """Einstellungs-Dialog für Server- und App-Konfiguration"""
 
-    def __init__(self, parent, config):
+    def __init__(self, parent, config, on_settings_saved=None):
         self.parent = parent
         self.config = config
         self.dialog = None
         self.APP_VERSION = APP_VERSION
+        self.on_settings_saved = on_settings_saved  # Callback für nach dem Speichern
 
     def show(self):
         """Zeigt den Einstellungs-Dialog"""
@@ -27,9 +28,14 @@ class SettingsDialog:
         self.server_var = tk.StringVar()
         self.login_var = tk.StringVar()
         self.password_var = tk.StringVar()
-        # NEU: Variablen für Speicherort und Dauer
+        # Variablen für Speicherort und Dauer
         self.speicherort_var = tk.StringVar()
         self.dauer_var = tk.StringVar()
+        # Variablen für SD-Karten Backup
+        self.sd_backup_folder_var = tk.StringVar()
+        self.sd_auto_backup_var = tk.BooleanVar()
+        self.sd_clear_var = tk.BooleanVar()
+        self.sd_auto_import_var = tk.BooleanVar()
 
         # Zentriere den Dialog
         self._center_dialog()
@@ -60,119 +66,101 @@ class SettingsDialog:
         self.dialog.geometry(f"+{x}+{y}")
 
     def create_widgets(self):
-        """Erstellt die Widgets für den Dialog (NEUES GRID-LAYOUT)"""
+        """Erstellt die Widgets für den Dialog mit Tab-Layout"""
 
         main_frame = tk.Frame(self.dialog, padx=15, pady=15)
         main_frame.pack(fill="both", expand=True)
-        main_frame.grid_columnconfigure(0, weight=1)  # Ganze Spalte dehnbar
+        main_frame.grid_columnconfigure(0, weight=1)
 
-        row = 0
+        # Tab-View erstellen
+        style = ttk.Style()
+        style.configure('Settings.TNotebook.Tab',
+                       font=('Arial', 10, 'bold'),
+                       padding=[20, 8])
 
-        # --- Sektion 1: Server-Verbindung ---
-        server_frame = ttk.LabelFrame(main_frame, text="Server-Verbindung", padding=(10, 10))
-        server_frame.grid(row=row, column=0, sticky="ew", pady=(0, 10))
-        server_frame.grid_columnconfigure(1, weight=1)  # Spalte für Entries dehnbar
+        self.notebook = ttk.Notebook(main_frame, style='Settings.TNotebook')
+        self.notebook.pack(fill="both", expand=True, pady=(0, 15))
 
-        # Server Adresse
-        tk.Label(server_frame, text="Adresse:", font=("Arial", 11)).grid(row=0, column=0, sticky="w", padx=5,
-                                                                                pady=5)
-        self.server_entry = tk.Entry(server_frame, textvariable=self.server_var, font=("Arial", 11))
-        self.server_entry.grid(row=0, column=1, columnspan=3, sticky="ew", padx=5, pady=5)
+        # --- Tab 1: Allgemein ---
+        self.tab_allgemein = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.tab_allgemein, text="Allgemein")
+        self.create_allgemein_tab()
 
-        tk.Label(server_frame, text="Beispiel: smb://server/share oder \\\\server\\share oder C:\\lokaler\\pfad", font=("Arial", 9), fg="gray").grid(row=1,
-                                                                                                                  column=1,
-                                                                                                                  columnspan=3,
-                                                                                                                  sticky="w",
-                                                                                                                  padx=5)
+        # --- Tab 2: Server ---
+        self.tab_server = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.tab_server, text="Server")
+        self.create_server_tab()
 
-        # Login / Passwort
-        tk.Label(server_frame, text="Login:", font=("Arial", 11)).grid(row=2, column=0, sticky="w", padx=5,
-                                                                              pady=(10, 5))
-        self.login_entry = tk.Entry(server_frame, textvariable=self.login_var, font=("Arial", 11), width=20)
-        self.login_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=(10, 5))
+        # --- Tab 3: Extras ---
+        self.tab_extras = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.tab_extras, text="Extras")
+        self.create_extras_tab()
 
-        tk.Label(server_frame, text="Passwort:", font=("Arial", 11)).grid(row=2, column=2, sticky="w",
-                                                                                 padx=(10, 5), pady=(10, 5))
-        self.password_entry = tk.Entry(server_frame, textvariable=self.password_var, font=("Arial", 11), width=20,
-                                       show="*")
-        self.password_entry.grid(row=2, column=3, sticky="ew", padx=5, pady=(10, 5))
+        # --- Dialog-Buttons (außerhalb der Tabs) ---
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(side="bottom", fill="x", pady=(10, 0))
 
-        row += 1
+        cancel_button = tk.Button(
+            button_frame, text="Abbrechen", font=("Arial", 11),
+            command=self.dialog.destroy, bg="#f44336", fg="white", width=12, height=1
+        )
+        cancel_button.pack(side="right", padx=5)
 
-        # --- Sektion 2: App-Einstellungen (NEU) ---
-        app_settings_frame = ttk.LabelFrame(main_frame, text="App-Einstellungen", padding=(10, 10))
-        app_settings_frame.grid(row=row, column=0, sticky="ew", pady=10)
-        app_settings_frame.grid_columnconfigure(1, weight=1)  # Spalte 1 (Entry/Dropdown) dehnbar
+        save_button = tk.Button(
+            button_frame, text="Speichern", font=("Arial", 11, "bold"),
+            command=self.save_settings, bg="#4CAF50", fg="white", width=12, height=1
+        )
+        save_button.pack(side="right", padx=5)
+
+        # Enter-Taste binden
+        self.dialog.bind('<Return>', lambda e: self.save_settings())
+        # Escape-Taste binden
+        self.dialog.bind('<Escape>', lambda e: self.dialog.destroy())
+
+    def create_allgemein_tab(self):
+        """Erstellt den Tab 'Allgemein'"""
+        # --- Sektion 1: Speicherort & Dauer ---
+        storage_frame = ttk.LabelFrame(self.tab_allgemein, text="Speicherort", padding=(10, 10))
+        storage_frame.pack(fill="x", pady=(0, 15))
+        storage_frame.grid_columnconfigure(1, weight=1)
 
         # Speicherort
-        tk.Label(app_settings_frame, text="Speicherort:", font=("Arial", 11)).grid(row=0, column=0, sticky="w", padx=5,
-                                                                                   pady=5)
+        tk.Label(storage_frame, text="Speicherort:", font=("Arial", 11)).grid(row=0, column=0, sticky="w", padx=5, pady=5)
 
-        speicherort_entry_frame = tk.Frame(app_settings_frame)  # Frame für Entry + Button
-        speicherort_entry_frame.grid(row=0, column=1, sticky="ew")
+        speicherort_entry_frame = tk.Frame(storage_frame)
+        speicherort_entry_frame.grid(row=0, column=1, sticky="ew", padx=5)
         speicherort_entry_frame.grid_columnconfigure(0, weight=1)
 
-        speicherort_entry = tk.Entry(speicherort_entry_frame, textvariable=self.speicherort_var, font=("Arial", 10),
-                                     state="readonly")
-        speicherort_entry.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+        speicherort_entry = tk.Entry(speicherort_entry_frame, textvariable=self.speicherort_var,
+                                     font=("Arial", 10), state="readonly")
+        speicherort_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
 
-        speicherort_button = tk.Button(speicherort_entry_frame, text="Wählen...", command=self.waehle_speicherort)
-        speicherort_button.grid(row=0, column=1, sticky="e", padx=(0, 5), pady=5)
+        speicherort_button = tk.Button(speicherort_entry_frame, text="Wählen...",
+                                       command=self.waehle_speicherort)
+        speicherort_button.grid(row=0, column=1, sticky="e")
 
         # Dauer
-        tk.Label(app_settings_frame, text="Dauer (Sek.):", font=("Arial", 11)).grid(row=1, column=0, sticky="w", padx=5,
-                                                                                    pady=5)
+        tk.Label(storage_frame, text="Dauer (Sek.):", font=("Arial", 11)).grid(row=1, column=0, sticky="w", padx=5, pady=5)
 
-        # Frame für Dropdown mit Pfeil
-        dauer_frame = tk.Frame(app_settings_frame, bg="white", relief=tk.RAISED, borderwidth=1)
+        dauer_frame = tk.Frame(storage_frame, bg="white", relief=tk.RAISED, borderwidth=1)
         dauer_frame.grid(row=1, column=1, sticky="w", padx=5, pady=5)
-        dauer_frame.grid_columnconfigure(0, weight=1)
 
-        # Label das wie ein Button aussieht mit Pfeil
         self.dauer_display = tk.Label(
-            dauer_frame,
-            textvariable=self.dauer_var,
-            font=("Arial", 10),
-            bg="white",
-            fg="black",
-            anchor="w",
-            width=6,
-            padx=8,
-            pady=4,
-            cursor="hand2"
+            dauer_frame, textvariable=self.dauer_var, font=("Arial", 10),
+            bg="white", fg="black", anchor="w", width=6, padx=8, pady=4, cursor="hand2"
         )
         self.dauer_display.grid(row=0, column=0, sticky="ew")
 
-        # Pfeil-Label (rechts)
-        dauer_arrow = tk.Label(
-            dauer_frame,
-            text="▼",
-            font=("Arial", 8),
-            bg="white",
-            fg="black",
-            padx=5,
-            cursor="hand2"
-        )
+        dauer_arrow = tk.Label(dauer_frame, text="▼", font=("Arial", 8),
+                              bg="white", fg="black", padx=5, cursor="hand2")
         dauer_arrow.grid(row=0, column=1)
 
-        # Verstecktes OptionMenu (für Funktionalität)
-        dauer_dropdown = tk.OptionMenu(app_settings_frame, self.dauer_var, "1", "3", "4", "5", "6", "7", "8", "9", "10")
+        dauer_dropdown = tk.OptionMenu(storage_frame, self.dauer_var, "1", "3", "4", "5", "6", "7", "8", "9", "10")
+        dauer_dropdown["menu"].config(font=("Arial", 10), bg="white", fg="black",
+                                      activebackground="#2196F3", activeforeground="white")
 
-        # Style für das Dropdown-Menü
-        dauer_dropdown["menu"].config(
-            font=("Arial", 10),
-            bg="white",
-            fg="black",
-            activebackground="#2196F3",
-            activeforeground="white",
-            relief=tk.FLAT,
-            borderwidth=0
-        )
-
-        # Click-Handler für Frame und Labels
         def show_dauer_menu(event):
             dauer_dropdown.event_generate("<Button-1>")
-            # Positioniere das Menü unter dem Frame
             x = dauer_frame.winfo_rootx()
             y = dauer_frame.winfo_rooty() + dauer_frame.winfo_height()
             try:
@@ -184,7 +172,6 @@ class SettingsDialog:
         self.dauer_display.bind("<Button-1>", show_dauer_menu)
         dauer_arrow.bind("<Button-1>", show_dauer_menu)
 
-        # Hover-Effekte
         def on_enter(e):
             dauer_frame.config(bg="#E3F2FD")
             self.dauer_display.config(bg="#E3F2FD")
@@ -195,19 +182,107 @@ class SettingsDialog:
             self.dauer_display.config(bg="white")
             dauer_arrow.config(bg="white")
 
-        dauer_frame.bind("<Enter>", on_enter)
-        dauer_frame.bind("<Leave>", on_leave)
-        self.dauer_display.bind("<Enter>", on_enter)
-        self.dauer_display.bind("<Leave>", on_leave)
-        dauer_arrow.bind("<Enter>", on_enter)
-        dauer_arrow.bind("<Leave>", on_leave)
+        for widget in [dauer_frame, self.dauer_display, dauer_arrow]:
+            widget.bind("<Enter>", on_enter)
+            widget.bind("<Leave>", on_leave)
 
-        row += 1
+        # --- Sektion 2: SD-Karten Backup ---
+        backup_frame = ttk.LabelFrame(self.tab_allgemein, text="SD-Karten Backup", padding=(10, 10))
+        backup_frame.pack(fill="x", pady=(0, 10))
+        backup_frame.grid_columnconfigure(1, weight=1)
 
-        # --- Sektion 3: Info & Updates ---
-        info_frame = ttk.LabelFrame(main_frame, text="Info & Updates", padding=(10, 10))
-        info_frame.grid(row=row, column=0, sticky="ew", pady=10)
-        info_frame.grid_columnconfigure(0, weight=1)  # Zentriert Buttons/Text
+        # Backup Ordner
+        tk.Label(backup_frame, text="Backup Ordner:", font=("Arial", 11)).grid(row=0, column=0, sticky="w", padx=5, pady=5)
+
+        backup_folder_frame = tk.Frame(backup_frame)
+        backup_folder_frame.grid(row=0, column=1, sticky="ew", padx=5)
+        backup_folder_frame.grid_columnconfigure(0, weight=1)
+
+        backup_folder_entry = tk.Entry(backup_folder_frame, textvariable=self.sd_backup_folder_var,
+                                       font=("Arial", 10), state="readonly")
+        backup_folder_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+
+        backup_folder_button = tk.Button(backup_folder_frame, text="Wählen...",
+                                         command=self.waehle_backup_ordner)
+        backup_folder_button.grid(row=0, column=1, sticky="e")
+
+        # Haupt-Checkbox: Automatischer Backup
+        self.sd_auto_backup_checkbox = tk.Checkbutton(
+            backup_frame,
+            text="Automatischer Backup von SD-Karte",
+            variable=self.sd_auto_backup_var,
+            font=("Arial", 10),
+            command=self.on_auto_backup_toggle
+        )
+        self.sd_auto_backup_checkbox.grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+
+        # Abhängige Checkboxen (nur sichtbar wenn Auto-Backup aktiviert)
+        self.sd_clear_checkbox = tk.Checkbutton(
+            backup_frame,
+            text="SD-Karte nach Backup leeren",
+            variable=self.sd_clear_var,
+            font=("Arial", 10)
+        )
+
+        self.sd_auto_import_checkbox = tk.Checkbutton(
+            backup_frame,
+            text="Automatisch importieren in Aero Tandem Studio",
+            variable=self.sd_auto_import_var,
+            font=("Arial", 10)
+        )
+
+        # Werden nur angezeigt wenn Auto-Backup aktiviert ist
+        # Initial-Zustand wird in load_settings() gesetzt
+
+    def on_auto_backup_toggle(self):
+        """Wird aufgerufen wenn die Auto-Backup Checkbox geändert wird"""
+        is_enabled = self.sd_auto_backup_var.get()
+
+        if is_enabled:
+            # Zeige abhängige Checkboxen
+            self.sd_clear_checkbox.grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+            self.sd_auto_import_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+        else:
+            # Verstecke und deaktiviere abhängige Checkboxen
+            self.sd_clear_checkbox.grid_forget()
+            self.sd_auto_import_checkbox.grid_forget()
+            self.sd_clear_var.set(False)
+            self.sd_auto_import_var.set(False)
+
+    def create_server_tab(self):
+        """Erstellt den Tab 'Server'"""
+        # --- Server-Verbindung ---
+        server_frame = ttk.LabelFrame(self.tab_server, text="Server-Verbindung", padding=(10, 10))
+        server_frame.pack(fill="x", pady=(0, 10))
+        server_frame.grid_columnconfigure(1, weight=1)
+
+        # Server Adresse
+        tk.Label(server_frame, text="Adresse:", font=("Arial", 11)).grid(
+            row=0, column=0, sticky="w", padx=5, pady=5)
+        self.server_entry = tk.Entry(server_frame, textvariable=self.server_var, font=("Arial", 11))
+        self.server_entry.grid(row=0, column=1, columnspan=3, sticky="ew", padx=5, pady=5)
+
+        tk.Label(server_frame, text="Beispiel: smb://server/share oder \\\\server\\share oder C:\\lokaler\\pfad",
+                font=("Arial", 9), fg="gray").grid(row=1, column=1, columnspan=3, sticky="w", padx=5)
+
+        # Login / Passwort
+        tk.Label(server_frame, text="Login:", font=("Arial", 11)).grid(
+            row=2, column=0, sticky="w", padx=5, pady=(10, 5))
+        self.login_entry = tk.Entry(server_frame, textvariable=self.login_var, font=("Arial", 11), width=20)
+        self.login_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=(10, 5))
+
+        tk.Label(server_frame, text="Passwort:", font=("Arial", 11)).grid(
+            row=2, column=2, sticky="w", padx=(10, 5), pady=(10, 5))
+        self.password_entry = tk.Entry(server_frame, textvariable=self.password_var,
+                                       font=("Arial", 11), width=20, show="*")
+        self.password_entry.grid(row=2, column=3, sticky="ew", padx=5, pady=(10, 5))
+
+    def create_extras_tab(self):
+        """Erstellt den Tab 'Extras'"""
+        # --- Info & Updates ---
+        info_frame = ttk.LabelFrame(self.tab_extras, text="Info & Updates", padding=(10, 10))
+        info_frame.pack(fill="x", pady=(0, 10))
+        info_frame.grid_columnconfigure(0, weight=1)
         info_frame.grid_columnconfigure(1, weight=1)
 
         # Update Button
@@ -226,7 +301,6 @@ class SettingsDialog:
                 fg="#0070ba", relief="flat", cursor="hand2", height=30
             )
         except tk.TclError:
-            # Fallback, wenn Logo nicht geladen werden kann
             paypal_button = tk.Button(
                 info_frame, text="Entwicklung unterstützen (PayPal)",
                 font=("Arial", 9), command=self.open_paypal_donation, bg="#f8f9fa",
@@ -239,28 +313,6 @@ class SettingsDialog:
         author_label = tk.Label(info_frame, text=author_text, font=("Arial", 9), fg="gray", justify="center")
         author_label.grid(row=2, column=0, columnspan=2, pady=(10, 0), padx=5)
 
-        row += 1
-
-        # --- Sektion 4: Dialog-Buttons ---
-        button_frame = tk.Frame(main_frame)
-        button_frame.grid(row=row, column=0, sticky="e", pady=(15, 0))  # Rechtsbündig
-
-        cancel_button = tk.Button(
-            button_frame, text="Abbrechen", font=("Arial", 11),
-            command=self.dialog.destroy, bg="#f44336", fg="white", width=12, height=1
-        )
-        cancel_button.pack(side="right", padx=5)
-
-        save_button = tk.Button(
-            button_frame, text="Speichern", font=("Arial", 11, "bold"),
-            command=self.save_settings, bg="#4CAF50", fg="white", width=12, height=1
-        )
-        save_button.pack(side="right", padx=5)
-
-        # Enter-Taste binden
-        self.dialog.bind('<Return>', lambda e: self.save_settings())
-        # Escape-Taste binden
-        self.dialog.bind('<Escape>', lambda e: self.dialog.destroy())
 
     def check_for_updates(self):
         """Startet die Update-Prüfung"""
@@ -283,44 +335,64 @@ class SettingsDialog:
             messagebox.showerror("Fehler", f"PayPal Seite konnte nicht geöffnet werden:\n{str(e)}", parent=self.dialog)
 
     def waehle_speicherort(self):
-        """NEU: Öffnet Dialog zur Auswahl des Speicherorts."""
+        """Öffnet Dialog zur Auswahl des Speicherorts."""
         directory = filedialog.askdirectory(parent=self.dialog, title="Standard-Speicherort wählen")
         if directory:
             self.speicherort_var.set(directory)
 
+    def waehle_backup_ordner(self):
+        """Öffnet Dialog zur Auswahl des Backup-Ordners."""
+        directory = filedialog.askdirectory(parent=self.dialog, title="SD-Karten Backup-Ordner wählen")
+        if directory:
+            self.sd_backup_folder_var.set(directory)
+
     def load_settings(self):
-        """Lädt die gespeicherten Einstellungen (inkl. Speicherort und Dauer)"""
+        """Lädt die gespeicherten Einstellungen"""
         settings = self.config.get_settings()
         self.server_var.set(settings.get("server_url", "smb://169.254.169.254/aktuell"))
         self.login_var.set(settings.get("server_login", ""))
         self.password_var.set(settings.get("server_password", ""))
 
-        # NEU
+        # Allgemein
         self.speicherort_var.set(settings.get("speicherort", ""))
         self.dauer_var.set(str(settings.get("dauer", 8)))
 
+        # SD-Karten Backup
+        self.sd_backup_folder_var.set(settings.get("sd_backup_folder", ""))
+        self.sd_auto_backup_var.set(settings.get("sd_auto_backup", False))
+        self.sd_clear_var.set(settings.get("sd_clear_after_backup", False))
+        self.sd_auto_import_var.set(settings.get("sd_auto_import", False))
+
+        # Trigger checkbox visibility based on auto_backup setting
+        self.on_auto_backup_toggle()
+
     def save_settings(self):
-        """Speichert die Einstellungen (inkl. Speicherort und Dauer)"""
+        """Speichert die Einstellungen"""
         server_url = self.server_var.get().strip()
         server_login = self.login_var.get().strip()
         server_password = self.password_var.get()
 
-        # NEU
+        # Allgemein
         speicherort = self.speicherort_var.get()
         dauer = self.dauer_var.get()
+
+        # SD-Karten Backup
+        sd_backup_folder = self.sd_backup_folder_var.get()
+        sd_auto_backup = self.sd_auto_backup_var.get()
+        sd_clear = self.sd_clear_var.get()
+        sd_auto_import = self.sd_auto_import_var.get()
 
         if not server_url:
             messagebox.showwarning("Fehler", "Bitte geben Sie eine Server-Adresse ein.", parent=self.dialog)
             return
 
-        # Validierung entfernt - normalize_server_path() in file_utils akzeptiert alle Formate:
-        # - smb://server/share
-        # - \\server\share
-        # - //server/share
-        # - C:\lokaler\pfad (für Tests)
-
         if not speicherort:
             messagebox.showwarning("Fehler", "Bitte geben Sie einen Standard-Speicherort an.", parent=self.dialog)
+            return
+
+        # Prüfe SD-Backup Einstellungen wenn aktiviert
+        if sd_auto_backup and not sd_backup_folder:
+            messagebox.showwarning("Fehler", "Bitte geben Sie einen Backup-Ordner an.", parent=self.dialog)
             return
 
         try:
@@ -330,16 +402,27 @@ class SettingsDialog:
             # Server-Daten aktualisieren
             current_settings["server_url"] = server_url
             current_settings["server_login"] = server_login
-            current_settings["server_password"] = server_password  # todo: keyring
+            current_settings["server_password"] = server_password
 
-            # NEU: App-Einstellungen aktualisieren
+            # App-Einstellungen aktualisieren
             current_settings["speicherort"] = speicherort
             current_settings["dauer"] = int(dauer)
+
+            # SD-Karten Backup Einstellungen
+            current_settings["sd_backup_folder"] = sd_backup_folder
+            current_settings["sd_auto_backup"] = sd_auto_backup
+            current_settings["sd_clear_after_backup"] = sd_clear
+            current_settings["sd_auto_import"] = sd_auto_import
 
             # Speichern
             self.config.save_settings(current_settings)
 
             messagebox.showinfo("Erfolg", "Einstellungen wurden gespeichert.", parent=self.dialog)
+
+            # Callback aufrufen bevor Dialog geschlossen wird
+            if self.on_settings_saved:
+                self.on_settings_saved()
+
             self.dialog.destroy()
 
         except Exception as e:

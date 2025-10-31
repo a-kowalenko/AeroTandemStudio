@@ -49,6 +49,13 @@
   - Server-Status-Überwachung
   - Automatische Fehlerbehandlung
 
+- **💾 SD-Karten Auto-Backup** ✨ NEU
+  - Automatische Erkennung von Action-Cam SD-Karten
+  - Automatisches Backup beim Einstecken
+  - Optionales Leeren der SD-Karte nach Backup
+  - Automatischer Import in die Anwendung
+  - Zeitstempel-basierte Backup-Ordner
+
 - **🔄 Auto-Update**
   - Automatische Update-Prüfung beim Start
   - Download und Installation neuer Versionen
@@ -167,6 +174,31 @@ Die Anwendung kann QR-Codes aus Videos analysieren:
 - Unterstützte Formate: QR-Codes mit Kundendaten
 - JSON-Format für strukturierte Daten
 
+### SD-Karten Auto-Backup ✨ NEU
+
+Die Anwendung überwacht automatisch SD-Karten und erstellt Backups:
+
+**Einrichtung:**
+1. Einstellungen öffnen (⚙️ Button)
+2. Tab "Allgemein" auswählen
+3. Backup-Ordner festlegen
+4. Gewünschte Optionen aktivieren:
+   - ☑ **Automatischer Backup von SD-Karte**: Aktiviert die Überwachung
+   - ☑ **SD-Karte nach Backup leeren**: Löscht DCIM-Ordner nach erfolgreichem Backup
+   - ☑ **Automatisch importieren**: Importiert Dateien direkt in die App
+5. Speichern
+
+**Verwendung:**
+1. SD-Karte einstecken (mit DCIM-Ordner)
+2. Backup wird automatisch erstellt
+3. Bei aktiviertem Auto-Import werden Videos und Fotos direkt geladen
+4. Fertig! ☕
+
+**Sicherheit:**
+- SD-Karte wird nur nach ERFOLGREICHEM Backup geleert
+- Backup-Ordner haben Zeitstempel (z.B. `SD_Backup_20231031_143025`)
+- Fehlerbehandlung mit aussagekräftigen Meldungen
+
 ---
 
 ## 📁 Projektstruktur
@@ -192,6 +224,7 @@ TandemIntro/
 │   ├── utils/                   # Hilfsfunktionen
 │   │   ├── config.py           # Konfigurations-Manager
 │   │   ├── file_utils.py       # Datei-Operationen
+│   │   ├── sd_card_monitor.py  # SD-Karten Überwachung ✨ NEU
 │   │   ├── validation.py       # Validierung
 │   │   └── constants.py        # Konstanten
 │   └── installer/               # Installation & Updates

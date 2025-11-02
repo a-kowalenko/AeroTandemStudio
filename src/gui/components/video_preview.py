@@ -10,6 +10,7 @@ import shutil
 import time
 from .progress_indicator import ProgressHandler
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
+from src.utils.hardware_acceleration import HardwareAccelerationDetector
 from typing import List, Dict, Callable  # NEU
 
 
@@ -19,6 +20,10 @@ class VideoPreview:
         self.app = app_instance
         self.frame = tk.Frame(parent)
         self.combined_video_path = None
+
+        # Hardware-Beschleunigung initialisieren
+        self.hw_detector = HardwareAccelerationDetector()
+        self._init_hardware_acceleration()
         self.progress_handler = None
         self.last_video_paths = None  # Speichert die *originalen* Pfade für "Erneut versuchen"
 
@@ -38,6 +43,64 @@ class VideoPreview:
         # ---
 
         self.create_widgets()
+
+    def _init_hardware_acceleration(self):
+        """Initialisiert Hardware-Beschleunigung basierend auf Einstellungen"""
+        self.hw_accel_enabled = False
+
+        if self.app and hasattr(self.app, 'config'):
+            settings = self.app.config.get_settings()
+            self.hw_accel_enabled = settings.get("hardware_acceleration_enabled", True)
+
+            if self.hw_accel_enabled:
+                hw_info = self.hw_detector.detect_hardware()
+                if hw_info['available']:
+                    print(f"✓ VideoPreview: Hardware-Beschleunigung aktiviert: {self.hw_detector.get_hardware_info_string()}")
+                else:
+                    print("⚠ VideoPreview: Hardware-Beschleunigung aktiviert, aber keine kompatible Hardware gefunden")
+                    print("  → Fallback auf Software-Encoding für Vorschau")
+            else:
+                print("ℹ VideoPreview: Hardware-Beschleunigung deaktiviert (Software-Encoding)")
+        else:
+            # Fallback wenn keine Config verfügbar
+            print("ℹ VideoPreview: Keine Config verfügbar, verwende Software-Encoding")
+
+    def _get_encoding_params(self, codec='h264'):
+        """
+        Gibt Encoding-Parameter basierend auf Hardware-Beschleunigung zurück.
+
+        Args:
+            codec: 'h264' oder 'hevc'
+
+        Returns:
+            Dict mit input_params, output_params und encoder
+        """
+        return self.hw_detector.get_encoding_params(codec, self.hw_accel_enabled)
+
+    def _get_current_encoder_name(self):
+        """
+        Gibt einen lesbaren Namen des aktuell verwendeten Encoders zurück.
+
+        Returns:
+            String wie "Intel Quick Sync (h264_qsv)" oder "Software (libx264)"
+        """
+        if not self.hw_accel_enabled:
+            return "Software (libx264)"
+
+        hw_info = self.hw_detector.detect_hardware()
+        if hw_info['available']:
+            type_names = {
+                'nvidia': 'NVIDIA NVENC',
+                'amd': 'AMD AMF',
+                'intel': 'Intel Quick Sync',
+                'videotoolbox': 'Apple VideoToolbox',
+                'vaapi': 'VAAPI'
+            }
+            hw_name = type_names.get(hw_info['type'], hw_info['type'])
+            encoder = hw_info.get('encoder', 'unknown')
+            return f"{hw_name} ({encoder})"
+        else:
+            return "Software (libx264)"
 
     def _check_for_cancellation(self):
         """Prüft, ob ein Abbruch angefordert wurde und wirft ggf. eine Exception."""
@@ -527,48 +590,73 @@ class VideoPreview:
         """
         Neukodiert eine einzelne Videodatei auf 1080p@30fps. (Blockierend)
         Fehlertolerantes Encoding für korrupte/beschädigte Videos.
-        OPTIMIERT für Geschwindigkeit - Vorschau-Qualität ist ausreichend.
+        OPTIMIERT für Geschwindigkeit mit Hardware-Beschleunigung wenn verfügbar.
         """
         target_params = {
             'width': 1920, 'height': 1080, 'fps': 30, 'pix_fmt': 'yuv420p',
-            'video_codec': 'libx264', 'audio_codec': 'aac', 'audio_sample_rate': 48000, 'audio_channels': 2
+            'audio_codec': 'aac', 'audio_sample_rate': 48000, 'audio_channels': 2
         }
         tp = target_params
 
-        cmd = [
-            "ffmpeg", "-y",
-            # FEHLERTOLERANZ: Ignoriere Dekodier-Fehler in korrupten Videos
-            "-err_detect", "ignore_err",
-            "-fflags", "+genpts+igndts",
-            "-i", input_path,
-            # OPTIMIERT: Einfachere Filter-Chain (schneller)
-            "-vf", f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']}",
-            "-c:v", tp['video_codec'],
-            # SPEED-OPTIMIERUNG:
-            "-preset", "veryfast",     # veryfast statt fast = ~2x schneller
-            "-crf", "26",              # 26 statt 23 = kleinere Datei, für Vorschau OK
-            "-tune", "fastdecode",     # Optimiert für schnelles Dekodieren
-            "-x264-params", "ref=1:me=dia:subme=1:trellis=0",  # Minimale Qualitätseinstellungen für max. Speed
-            # Audio-Encoding
+        # Hole Encoding-Parameter (Hardware oder Software)
+        encoding_params = self._get_encoding_params('h264')
+
+        cmd = ["ffmpeg", "-y"]
+
+        # FEHLERTOLERANZ: Ignoriere Dekodier-Fehler
+        cmd.extend(["-err_detect", "ignore_err", "-fflags", "+genpts+igndts"])
+
+        # Hardware-Decoder wenn verfügbar (Input)
+        cmd.extend(encoding_params['input_params'])
+
+        # Input
+        cmd.extend(["-i", input_path])
+
+        # Filter-Chain für Skalierung und FPS
+        cmd.extend([
+            "-vf", f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']}"
+        ])
+
+        # Video-Encoder (Hardware oder Software)
+        cmd.extend(encoding_params['output_params'])
+
+        # Zusätzliche Parameter für Software-Encoding (wenn HW nicht aktiv)
+        if not self.hw_accel_enabled:
+            cmd.extend([
+                "-preset", "veryfast",
+                "-crf", "26",
+                "-tune", "fastdecode",
+                "-x264-params", "ref=1:me=dia:subme=1:trellis=0"
+            ])
+        else:
+            # Bei Hardware-Encoding: Optimierte Qualitätseinstellungen
+            # (preset und tune sind bereits in encoding_params enthalten)
+            print(f"  → Nutze Hardware-Encoder: {encoding_params['encoder']}")
+
+        # Audio-Encoding
+        cmd.extend([
             "-c:a", tp['audio_codec'],
-            "-b:a", "96k",             # 96k statt 128k - ausreichend für Vorschau
+            "-b:a", "96k",
             "-ar", str(tp['audio_sample_rate']),
-            "-ac", str(tp['audio_channels']),
-            # Container-Optionen
+            "-ac", str(tp['audio_channels'])
+        ])
+
+        # Container-Optionen
+        cmd.extend([
             "-movflags", "+faststart",
             "-max_muxing_queue_size", "1024",
             "-map", "0:v:0", "-map", "0:a:0?",
             output_path
-        ]
+        ])
 
         # WICHTIG: Capture stderr für Fehlerdiagnose
-        # Auf Windows müssen wir communicate() verwenden statt manuell zu lesen
-        print(f"Starte Re-Encoding: {os.path.basename(input_path)} → 1080p@30fps")
+        hw_status = "HW-Beschleunigung" if self.hw_accel_enabled else "Software"
+        print(f"Starte Re-Encoding ({hw_status}): {os.path.basename(input_path)} → 1080p@30fps")
 
         self.ffmpeg_process = subprocess.Popen(
             cmd,
             stderr=subprocess.PIPE,
-            stdout=subprocess.PIPE,  # Auch stdout capturen
+            stdout=subprocess.PIPE,
             universal_newlines=True,
             encoding='utf-8',
             errors='replace',
@@ -658,6 +746,63 @@ class VideoPreview:
             print(f"\nLetzter FFmpeg Output:")
             print(last_lines)
             print(f"{'='*60}\n")
+
+            # WICHTIG: Prüfe auf Hardware-Encoder-Fehler und versuche Fallback
+            if self.hw_accel_enabled and stderr_text:
+                hw_error_indicators = [
+                    "Driver does not support",
+                    "nvenc API version",
+                    "minimum required Nvidia driver",
+                    "Error while opening encoder",
+                    "Could not open encoder",
+                    "No NVENC capable devices found",
+                    "Cannot load nvcuda.dll",
+                    "amf encoder error",
+                    "qsv encoder error",
+                    "Unable to parse option",           # AMD AMF: Parameter-Fehler
+                    "Error setting option",             # AMD AMF: Option ungültig
+                    "Undefined constant",               # AMD AMF: Ungültiger Wert
+                    "Error opening output file",        # Allgemein: Output-Fehler nach Encoder-Init
+                    "hwaccel initialisation returned error"  # Allgemein: HW-Accel Init fehlgeschlagen
+                ]
+
+                if any(indicator in stderr_text for indicator in hw_error_indicators):
+                    print(f"⚠️ Hardware-Encoder-Fehler erkannt!")
+                    print(f"→ Versuche Fallback auf Software-Encoding (libx264)...")
+
+                    # Deaktiviere Hardware-Beschleunigung temporär
+                    original_hw_state = self.hw_accel_enabled
+                    self.hw_accel_enabled = False
+
+                    try:
+                        # Rekursiver Aufruf mit Software-Encoding
+                        self._reencode_single_clip(input_path, output_path)
+                        print(f"✅ Software-Encoding erfolgreich als Fallback")
+
+                        # Warnung für zukünftige Encodings
+                        print(f"⚠️ HINWEIS: Hardware-Beschleunigung fehlgeschlagen!")
+                        if "nvenc" in stderr_text and "driver" in stderr_text.lower():
+                            print(f"   → Bitte aktualisieren Sie Ihren NVIDIA-Treiber auf Version 570.0 oder neuer")
+                            print(f"   → Download: https://www.nvidia.com/download/index.aspx")
+                        elif "amf" in stderr_text.lower() or "h264_amf" in stderr_text:
+                            print(f"   → AMD AMF: Möglicherweise sind die FFmpeg AMF-Parameter nicht kompatibel")
+                            print(f"   → Oder: Aktualisieren Sie Ihren AMD-Treiber auf die neueste Version")
+                            print(f"   → Download: https://www.amd.com/en/support")
+                        elif "qsv" in stderr_text.lower():
+                            print(f"   → Intel Quick Sync: Stellen Sie sicher, dass QSV in Ihrem System aktiviert ist")
+                            print(f"   → Eventuell: Aktualisieren Sie Ihren Intel-Grafiktreiber")
+                        print(f"   → Die App verwendet nun Software-Encoding (langsamer, aber funktioniert)")
+
+                        return  # Erfolgreicher Fallback, beende Methode
+
+                    except Exception as fallback_error:
+                        print(f"❌ Auch Software-Encoding fehlgeschlagen: {fallback_error}")
+                        # Stelle ursprünglichen Zustand wieder her
+                        self.hw_accel_enabled = original_hw_state
+                        # Fahre mit normaler Fehlerbehandlung fort
+                    finally:
+                        # Stelle ursprünglichen Zustand wieder her für nächstes Video
+                        self.hw_accel_enabled = original_hw_state
 
             # Gebe detaillierte Fehlermeldung
             error_msg = f"FFmpeg-Fehler (Code {returncode}) bei der Neukodierung von {input_path}"
@@ -1025,10 +1170,12 @@ class VideoPreview:
 
     def _update_encoding_info(self, format_info):
         """Aktualisiert die Encoding-Information in der UI"""
+        encoder_name = self._get_current_encoder_name()
+
         if format_info["compatible"]:
-            self.encoding_label.config(text=f"Encoding: Kompatibel (Fall A)", fg="green")
+            self.encoding_label.config(text=f"Encoding: Kompatibel | {encoder_name}", fg="green")
         else:
-            self.encoding_label.config(text=f"Encoding: Standardisiert (Fall B)", fg="orange")
+            self.encoding_label.config(text=f"Encoding: Standardisiert | {encoder_name}", fg="orange")
 
     def _update_ui_success(self, copy_paths, was_reencoded):
         """
@@ -1058,12 +1205,15 @@ class VideoPreview:
         self.size_label.config(text=f"Dateigröße: {total_size}")
         self.clips_label.config(text=f"Anzahl Clips: {len(copy_paths)}")
 
+        # Hole Encoder-Namen
+        encoder_name = self._get_current_encoder_name()
+
         if was_reencoded:
             self.status_label.config(text="Vorschau bereit (standardisiert)", fg="green")
-            self.encoding_label.config(text="Encoding: Standardisiert (Fall B)", fg="orange")
+            self.encoding_label.config(text=f"Encoding: Standardisiert | {encoder_name}", fg="orange")
         else:
             self.status_label.config(text="Vorschau bereit (schnell)", fg="green")
-            self.encoding_label.config(text="Encoding: Direkt kombiniert (Fall A)", fg="green")
+            self.encoding_label.config(text=f"Encoding: Direkt kombiniert | {encoder_name}", fg="green")
 
         self.play_button.config(state="normal")
         self.action_button.config(state="disabled")

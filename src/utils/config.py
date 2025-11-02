@@ -47,7 +47,9 @@ class ConfigManager:
             "sd_backup_folder": "",
             "sd_auto_backup": False,
             "sd_clear_after_backup": False,
-            "sd_auto_import": False
+            "sd_auto_import": False,
+            # Hardware-Beschleunigung
+            "hardware_acceleration_enabled": True  # Hardware-Beschleunigung standardmäßig aktiviert
         }
 
     def save_settings(self, settings):

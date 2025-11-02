@@ -36,6 +36,8 @@ class SettingsDialog:
         self.sd_auto_backup_var = tk.BooleanVar()
         self.sd_clear_var = tk.BooleanVar()
         self.sd_auto_import_var = tk.BooleanVar()
+        # Variable für Hardware-Beschleunigung
+        self.hardware_acceleration_var = tk.BooleanVar()
 
         # Zentriere den Dialog
         self._center_dialog()
@@ -234,6 +236,47 @@ class SettingsDialog:
         # Werden nur angezeigt wenn Auto-Backup aktiviert ist
         # Initial-Zustand wird in load_settings() gesetzt
 
+        # --- Sektion 3: Erweitert ---
+        advanced_frame = ttk.LabelFrame(self.tab_allgemein, text="Erweitert", padding=(10, 10))
+        advanced_frame.pack(fill="x", pady=(0, 10))
+        advanced_frame.grid_columnconfigure(0, weight=1)
+
+        # Hardware-Beschleunigung Checkbox
+        self.hw_accel_checkbox = tk.Checkbutton(
+            advanced_frame,
+            text="Hardware-Beschleunigung aktivieren (empfohlen)",
+            variable=self.hardware_acceleration_var,
+            font=("Arial", 10),
+            command=self.on_hw_accel_toggle
+        )
+        self.hw_accel_checkbox.grid(row=0, column=0, sticky="w", padx=5, pady=5)
+
+        # Info-Label für erkannte Hardware
+        self.hw_info_label = tk.Label(
+            advanced_frame,
+            text="Erkannte Hardware wird beim Speichern angezeigt",
+            font=("Arial", 9),
+            fg="gray",
+            anchor="w"
+        )
+        self.hw_info_label.grid(row=1, column=0, sticky="w", padx=20, pady=(0, 5))
+
+    def on_hw_accel_toggle(self):
+        """Wird aufgerufen wenn die Hardware-Beschleunigung Checkbox geändert wird"""
+        is_enabled = self.hardware_acceleration_var.get()
+
+        if is_enabled:
+            # Erkenne verfügbare Hardware
+            try:
+                from src.utils.hardware_acceleration import HardwareAccelerationDetector
+                detector = HardwareAccelerationDetector()
+                hw_info_text = detector.get_hardware_info_string()
+                self.hw_info_label.config(text=f"✓ {hw_info_text}", fg="green")
+            except Exception as e:
+                self.hw_info_label.config(text=f"⚠ Fehler bei Hardware-Erkennung: {str(e)}", fg="orange")
+        else:
+            self.hw_info_label.config(text="Hardware-Beschleunigung deaktiviert (Software-Encoding)", fg="gray")
+
     def on_auto_backup_toggle(self):
         """Wird aufgerufen wenn die Auto-Backup Checkbox geändert wird"""
         is_enabled = self.sd_auto_backup_var.get()
@@ -363,8 +406,14 @@ class SettingsDialog:
         self.sd_clear_var.set(settings.get("sd_clear_after_backup", False))
         self.sd_auto_import_var.set(settings.get("sd_auto_import", False))
 
+        # Hardware-Beschleunigung
+        self.hardware_acceleration_var.set(settings.get("hardware_acceleration_enabled", True))
+
         # Trigger checkbox visibility based on auto_backup setting
         self.on_auto_backup_toggle()
+
+        # Trigger hardware info update
+        self.on_hw_accel_toggle()
 
     def save_settings(self):
         """Speichert die Einstellungen"""
@@ -381,6 +430,9 @@ class SettingsDialog:
         sd_auto_backup = self.sd_auto_backup_var.get()
         sd_clear = self.sd_clear_var.get()
         sd_auto_import = self.sd_auto_import_var.get()
+
+        # Hardware-Beschleunigung
+        hardware_acceleration_enabled = self.hardware_acceleration_var.get()
 
         if not server_url:
             messagebox.showwarning("Fehler", "Bitte geben Sie eine Server-Adresse ein.", parent=self.dialog)
@@ -413,6 +465,9 @@ class SettingsDialog:
             current_settings["sd_auto_backup"] = sd_auto_backup
             current_settings["sd_clear_after_backup"] = sd_clear
             current_settings["sd_auto_import"] = sd_auto_import
+
+            # Hardware-Beschleunigung
+            current_settings["hardware_acceleration_enabled"] = hardware_acceleration_enabled
 
             # Speichern
             self.config.save_settings(current_settings)

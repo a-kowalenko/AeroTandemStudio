@@ -11,6 +11,7 @@ from .logger import CancellableProgressBarLogger, CancellationError
 from ..utils.file_utils import sanitize_filename
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.constants import HINTERGRUND_PATH
+from src.utils.hardware_acceleration import HardwareAccelerationDetector
 
 
 class VideoProcessor:
@@ -21,6 +22,40 @@ class VideoProcessor:
         self.cancel_event = threading.Event()
         self.logger = CancellableProgressBarLogger(self.cancel_event)
         self.config_manager = config_manager  # Config Manager speichern
+
+        # Hardware-Beschleunigung initialisieren
+        self.hw_detector = HardwareAccelerationDetector()
+        self._init_hardware_acceleration()
+
+    def _init_hardware_acceleration(self):
+        """Initialisiert Hardware-Beschleunigung basierend auf Einstellungen"""
+        self.hw_accel_enabled = False
+
+        if self.config_manager:
+            settings = self.config_manager.get_settings()
+            self.hw_accel_enabled = settings.get("hardware_acceleration_enabled", True)
+
+            if self.hw_accel_enabled:
+                hw_info = self.hw_detector.detect_hardware()
+                if hw_info['available']:
+                    print(f"✓ Hardware-Beschleunigung aktiviert: {self.hw_detector.get_hardware_info_string()}")
+                else:
+                    print("⚠ Hardware-Beschleunigung aktiviert, aber keine kompatible Hardware gefunden")
+                    print("  → Fallback auf Software-Encoding")
+            else:
+                print("ℹ Hardware-Beschleunigung deaktiviert (Software-Encoding)")
+
+    def _get_encoding_params(self, codec='h264'):
+        """
+        Gibt Encoding-Parameter basierend auf Hardware-Beschleunigung zurück.
+
+        Args:
+            codec: 'h264' oder 'hevc'
+
+        Returns:
+            Dict mit input_params, output_params und encoder
+        """
+        return self.hw_detector.get_encoding_params(codec, self.hw_accel_enabled)
 
     def create_video_with_intro_only(self, payload):
         """Erstellt ein Verzeichnis, verarbeitet optional Videos und kopiert Fotos."""
@@ -350,6 +385,7 @@ class VideoProcessor:
     def _create_video_with_watermark(self, input_video_path, output_path, video_params):
         """
         Erstellt eine Video-Version mit Wasserzeichen über dem gesamten Video.
+        NEU: Nutzt Hardware-Beschleunigung wenn verfügbar.
         """
 
         # Pfad zum Wasserzeichen-Bild
@@ -370,52 +406,70 @@ class VideoProcessor:
             f"[v][wm_scaled]overlay=(W-w)/2:(H-h)/2"
         )
 
-        # Bestimme Video-Codec basierend auf Input
+        # Hole Encoding-Parameter (mit oder ohne Hardware-Beschleunigung)
         vcodec = video_params.get('vcodec', 'h264')
-        if vcodec in ['hevc', 'h265']:
-            codec_name = 'libx265'
-        else:
-            codec_name = 'libx264'
+        codec_type = 'hevc' if vcodec in ['hevc', 'h265'] else 'h264'
+        encoding_params = self._get_encoding_params(codec_type)
 
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-i", input_video_path,
-            "-i", wasserzeichen_path,
-            "-filter_complex", watermark_filter,
-            # VIDEO-ENCODING OPTIMIERT FÜR GESCHWINDIGKEIT:
-            "-c:v", codec_name,
-            "-preset", "ultrafast",     # Schnellstes Preset (~10x schneller als medium)
-            "-crf", "28",               # Höheres CRF = schneller + kleinere Datei (für Wasserzeichen-Version OK)
-            "-tune", "fastdecode",      # Optimiert für schnelles Abspielen
+        # Baue FFmpeg-Befehl
+        command = ["ffmpeg", "-y"]
+
+        # Input-Parameter (Hardware-Decoder wenn verfügbar)
+        command.extend(encoding_params['input_params'])
+        command.extend(["-i", input_video_path, "-i", wasserzeichen_path])
+
+        # Filter
+        command.extend(["-filter_complex", watermark_filter])
+
+        # Output-Parameter
+        command.extend(encoding_params['output_params'])
+
+        # Für Wasserzeichen-Version: schnellere Einstellungen wenn Software-Encoding
+        if not self.hw_accel_enabled:
+            command.extend([
+                "-preset", "ultrafast",     # Schnellstes Preset
+                "-crf", "28",               # Höheres CRF = schneller + kleinere Datei
+            ])
+
+        command.extend([
             "-movflags", "+faststart",
-            # Audio entfernen (kein Sound im Wasserzeichen-Video)
-            "-an",                      # Kein Audio → noch schneller + kleinere Datei
+            "-an",  # Kein Audio
             output_path
-        ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+        ])
+
+        subprocess.run(command, capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
     def _create_intro_with_silent_audio(self, output_path, dauer, v_params, drawtext_filter):
         """
         Erstellt den Intro-Clip inklusive einer passenden stillen Audiospur in einem einzigen Befehl.
-        NEU: Nutzt erweiterte Parameter für maximale Kompatibilität, speziell für 4K.
+        NEU: Nutzt erweiterte Parameter für maximale Kompatibilität und Hardware-Beschleunigung.
         """
         self._check_for_cancellation()
         print(f"Erstelle Intro mit erweiterten Parametern: {v_params}")
         video_filters = f"scale={v_params['width']}:{v_params['height']},{drawtext_filter}"
 
-        # Bestimme den richtigen Codec-Namen für die Intro-Erstellung
+        # Hole Encoding-Parameter (mit oder ohne Hardware-Beschleunigung)
         vcodec = v_params.get('vcodec', 'h264')
-        if vcodec in ['hevc', 'h265']:
-            codec_name = 'libx265'
-        else:
-            codec_name = 'libx264'
+        codec_type = 'hevc' if vcodec in ['hevc', 'h265'] else 'h264'
+        encoding_params = self._get_encoding_params(codec_type)
 
-        command = [
-            "ffmpeg", "-y",
+        command = ["ffmpeg", "-y"]
+
+        # Inputs
+        command.extend([
             "-loop", "1", "-i", self.hintergrund_path,
             "-f", "lavfi", "-i",
-            f"anullsrc=channel_layout={v_params['channel_layout']}:sample_rate={v_params['sample_rate']}",
-            "-vf", video_filters,
-            "-c:v", codec_name,  # Verwende libx265 statt 'hevc'
+            f"anullsrc=channel_layout={v_params['channel_layout']}:sample_rate={v_params['sample_rate']}"
+        ])
+
+        # Video-Filter
+        command.extend(["-vf", video_filters])
+
+        # Encoding-Parameter (Hardware oder Software)
+        command.extend(encoding_params['output_params'])
+
+        # Zusätzliche Parameter für Kompatibilität
+        command.extend([
             "-tag:v", v_params['vtag'],
             "-pix_fmt", v_params['pix_fmt'],
             "-r", v_params['fps'],
@@ -424,11 +478,14 @@ class VideoProcessor:
             "-t", str(dauer),
             "-shortest",
             "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-preset", "fast",
-            "-crf", "18",
-        ]
+            "-map", "1:a:0"
+        ])
 
+        # Preset und CRF nur bei Software-Encoding
+        if not self.hw_accel_enabled:
+            command.extend(["-preset", "fast", "-crf", "18"])
+
+        # Color Space Parameter
         if v_params.get('color_range'):
             command.extend(["-color_range", v_params['color_range']])
         if v_params.get('colorspace'):
@@ -438,6 +495,7 @@ class VideoProcessor:
         if v_params.get('color_trc'):
             command.extend(["-color_trc", v_params['color_trc']])
 
+        # Profile und Level (nur für h264/hevc)
         if v_params.get('profile') and v_params['vcodec'] in ['h264', 'hevc']:
             profile_str = str(v_params['profile']).lower().replace(" ", "")
             command.extend(["-profile:v", profile_str])

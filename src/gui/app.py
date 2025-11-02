@@ -126,6 +126,9 @@ class VideoGeneratorApp:
         # Foto-Tab Inhalt
         self.photo_preview = PhotoPreview(self.foto_tab, self)
 
+        # Event-Binding für Tab-Wechsel: Focus auf Photo Preview setzen
+        self.preview_notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
         # Server-Upload Frame mit Status-Anzeige
         self.upload_frame = tk.Frame(self.right_frame)
 
@@ -320,6 +323,22 @@ class VideoGeneratorApp:
         # Progress unten
         self.progress_handler.pack_status_label()
 
+        # Initialer Focus: Wenn Video-Tab aktiv ist, kein Focus setzen
+        # Wenn Foto-Tab aktiv ist, Focus setzen
+        # Warte kurz bis alles gerendert ist
+        self.root.after(100, self._set_initial_focus)
+
+    def _set_initial_focus(self):
+        """Setzt den initialen Focus basierend auf dem aktiven Tab"""
+        try:
+            selected_tab = self.preview_notebook.select()
+            tab_text = self.preview_notebook.tab(selected_tab, "text")
+
+            if tab_text == "Foto Vorschau":
+                self.photo_preview.frame.focus_set()
+        except:
+            pass  # Ignoriere Fehler beim initialen Focus-Setzen
+
     def load_settings(self):
         """Lädt die gespeicherten Einstellungen"""
         try:
@@ -360,6 +379,17 @@ class VideoGeneratorApp:
                     f"Server-Verbindung fehlgeschlagen:\n{message}\n\n"
                     "Upload wurde deaktiviert. Bitte überprüfen Sie die Einstellungen."
                 )
+
+    def _on_tab_changed(self, event):
+        """Wird aufgerufen wenn der Tab gewechselt wird"""
+        # Prüfe welcher Tab aktiv ist
+        selected_tab = self.preview_notebook.select()
+        tab_text = self.preview_notebook.tab(selected_tab, "text")
+
+        # Wenn Foto-Tab aktiv ist, setze Focus auf Photo Preview
+        if tab_text == "Foto Vorschau":
+            # Focus auf den Frame setzen, damit Pfeiltasten funktionieren
+            self.photo_preview.frame.focus_set()
 
     def on_upload_checkbox_toggle(self):
         """Wird aufgerufen wenn die Upload-Checkbox geändert wird"""

@@ -534,7 +534,14 @@ class VideoGeneratorApp:
 
         # NEU: QR-Prüfung nur starten, wenn run_qr_check True ist
         if run_qr_check:
-            # 1. Button-Zustand speichern und auf "Warten" setzen
+            # Starte QR-Analyse UND Preview-Erstellung PARALLEL!
+            print("Starte QR-Analyse und Preview-Erstellung parallel...")
+
+            # 1. Preview-Erstellung starten (läuft in eigenem Thread)
+            if self.video_preview:
+                self.video_preview.update_preview(video_paths)
+
+            # 2. QR-Analyse starten (läuft ebenfalls in eigenem Thread)
             self.run_qr_analysis(video_paths)
         else:
             # Keine QR-Prüfung, nur Vorschau aktualisieren
@@ -543,20 +550,21 @@ class VideoGeneratorApp:
                 self.video_preview.update_preview(video_paths)
 
     def run_qr_analysis(self, video_paths: list[str]):
-        self._save_button_state()
-        self._set_button_waiting()
-
-        # 2. Ladefenster anzeigen (verwendet jetzt die importierte Klasse)
+        """
+        Startet QR-Code-Analyse in separatem Thread.
+        NEU: Ändert Button-Status NICHT mehr, da Preview parallel läuft!
+        """
+        # Ladefenster anzeigen
         self.loading_window = LoadingWindow(self.root, text="Analysiere QR-Code im Video...")
 
-        # 3. Eine Queue erstellen, um das Ergebnis vom Thread zu empfangen
+        # Queue erstellen für Ergebnis-Kommunikation
         self.analysis_queue = queue.Queue()
 
         # video_paths enthält nach dem ersten update_preview bereits Working-Folder-Pfade!
         first_video_path = video_paths[0]
         print(f"QR-Analyse: {os.path.basename(first_video_path)}")
 
-        # 4. Den Analyse-Thread starten
+        # Analyse-Thread starten
         analysis_thread = threading.Thread(
             target=self._run_analysis_thread,
             args=(first_video_path, self.analysis_queue),
@@ -564,7 +572,7 @@ class VideoGeneratorApp:
         )
         analysis_thread.start()
 
-        # 5. Eine "Polling"-Funktion starten, die auf das Ergebnis wartet
+        # Polling-Funktion starten
         self.root.after(100, self._check_analysis_result, video_paths)
 
     def _run_analysis_thread(self, video_path: str, result_queue: queue.Queue):
@@ -605,7 +613,7 @@ class VideoGeneratorApp:
             elif status == "error":
                 messagebox.showerror("Analyse-Fehler",
                                      f"Ein unerwarteter Fehler bei der Videoanalyse ist aufgetreten:\n{result}")
-                self._restore_button_state()
+                # Kein _restore_button_state - Preview läuft parallel!
                 self.form_fields.update_form_layout(False, None)
 
 
@@ -619,7 +627,7 @@ class VideoGeneratorApp:
                 self.loading_window.destroy()
                 self.loading_window = None
             messagebox.showerror("Fehler", f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}")
-            self._restore_button_state()
+            # Kein _restore_button_state - Preview läuft parallel!
             self.form_fields.update_form_layout(False, None)
 
     def _process_analysis_result(self, kunde, qr_scan_success, video_paths):
@@ -657,28 +665,15 @@ class VideoGeneratorApp:
             # Formular-Layout aktualisieren
             self.form_fields.update_form_layout(qr_scan_success, kunde)
 
-            # Starten Sie die Aktualisierung der GUI-Vorschau
-            # update_preview startet einen Thread (_create_combined_preview)
-            # self.video_preview.update_preview(video_paths)
-
-            # WICHTIG: _create_combined_preview (im Thread) ruft _finalize_processing auf.
-            # Wir müssen den Button dort wiederherstellen, NICHT hier.
-            # _finalize_processing ruft _restore_button_state auf, wenn es fertig ist.
-
-            # Warten, bis der Thread in update_preview fertig ist, um den Button wiederherzustellen
-            def wait_for_preview_thread():
-                if self.video_preview.processing_thread:
-                    self.video_preview.processing_thread.join()  # Warte auf den Thread (Vorschau-Erstellung)
-
-                # Jetzt im Haupt-Thread den Button wiederherstellen
-                self.root.after(0, self._restore_button_state)
-
-            threading.Thread(target=wait_for_preview_thread, daemon=True).start()
-
+            # NEU: Preview läuft bereits parallel! Kein wait_for_preview_thread nötig.
+            # Button-Status wird von video_preview._finalize_processing wiederhergestellt
+            print("QR-Analyse abgeschlossen. Preview läuft parallel weiter.")
 
         except Exception as e:
             print(f"Fehler in _process_analysis_result: {e}")
-            self._restore_button_state()
+            # Nur wenn Preview NICHT läuft, Button wiederherstellen
+            if not (self.video_preview and self.video_preview.processing_thread):
+                self._restore_button_state()
             self.form_fields.update_form_layout(False, None)
 
     def erstelle_video(self):

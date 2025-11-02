@@ -30,8 +30,10 @@ class VideoPreview:
 
         # --- NEU: Verwaltung der temporären Kopien UND Metadaten-Cache ---
         self.temp_dir = None
-        self.video_copies_map: Dict[str, str] = {}  # Map: original_path -> copy_path
-        self.metadata_cache: Dict[str, Dict] = {}  # Map: original_path -> {duration, size, ...}
+        # WICHTIG: Cache verwendet (filename, size) als Key, NICHT den Pfad!
+        # Die gleiche Datei in verschiedenen Ordnern wird als identisch erkannt.
+        self.video_copies_map: Dict[tuple, str] = {}  # Map: (filename, size) -> copy_path
+        self.metadata_cache: Dict[tuple, Dict] = {}  # Map: (filename, size) -> {duration, ...}
         self.videos_were_reencoded = False  # Flag: Wurden Videos bereits auf Default-Format (1080p@30) kodiert?
         # ---
 
@@ -42,16 +44,63 @@ class VideoPreview:
         if self.cancellation_event.is_set():
             raise Exception("Vorschau-Erstellung vom Benutzer abgebrochen.")
 
+    def _get_file_identity(self, file_path):
+        """
+        Erstellt eine eindeutige Identität für eine Datei basierend auf Name und Größe.
+        Das ist pfad-unabhängig - die gleiche Datei in verschiedenen Ordnern
+        hat die gleiche Identität.
+
+        WICHTIG: Der Original-Pfad ist irrelevant! Nur Dateiname + Größe zählen.
+
+        Returns:
+            Tuple (filename, size) oder None bei Fehler
+        """
+        try:
+            filename = os.path.basename(file_path)
+            file_size = os.path.getsize(file_path)
+            return (filename, file_size)
+        except Exception as e:
+            print(f"  ⚠️ Fehler beim Erstellen der File-Identity für {file_path}: {e}")
+            return None
+
+    def _find_cached_copy(self, original_path):
+        """
+        Sucht eine existierende Cache-Kopie für die gegebene Datei.
+
+        WICHTIG: Verwendet Datei-Identität (Name + Größe), NICHT den Pfad!
+        Die gleiche Datei in verschiedenen Backup-Ordnern wird als identisch erkannt.
+
+        Returns:
+            copy_path wenn gefunden, sonst None
+        """
+        file_identity = self._get_file_identity(original_path)
+        if not file_identity:
+            return None
+
+        copy_path = self.video_copies_map.get(file_identity)
+
+        # Prüfe ob Kopie noch existiert
+        if copy_path and os.path.exists(copy_path):
+            return copy_path
+        elif copy_path:
+            # Kopie existiert nicht mehr - entferne aus Cache
+            print(f"  🗑️ Entferne ungültige Cache-Kopie: {os.path.basename(copy_path)}")
+            del self.video_copies_map[file_identity]
+            if file_identity in self.metadata_cache:
+                del self.metadata_cache[file_identity]
+
+        return None
+
     def _get_clip_durations_seconds(self, video_paths):
         """Ermittelt die Dauer jedes einzelnen Clips in Sekunden (aus dem Cache, wenn möglich)."""
         durations = []
         for video_path in video_paths:  # HINWEIS: video_paths ist hier eine Liste von KOPIEN
             try:
-                # Versuche, den Originalpfad aus der Kopie abzuleiten (für Cache-Lookup)
-                original_path = next((key for key, value in self.video_copies_map.items() if value == video_path), None)
+                # Suche die file-identity aus der Kopie (umgekehrter Lookup im Cache)
+                file_identity = next((key for key, value in self.video_copies_map.items() if value == video_path), None)
 
-                if original_path and original_path in self.metadata_cache:
-                    duration_str = self.metadata_cache[original_path].get("duration_sec_str", "0.0")
+                if file_identity and file_identity in self.metadata_cache:
+                    duration_str = self.metadata_cache[file_identity].get("duration_sec_str", "0.0")
                     durations.append(float(duration_str))
                 else:
                     # Fallback: ffprobe direkt auf die Kopie anwenden
@@ -217,19 +266,30 @@ class VideoPreview:
             print(f"⚠️ Re-Encoding aktiviert → Kodiere nur neue Videos, Cache bleibt erhalten")
         else:
             # Bei Stream-Copy: Behalte existierende Kopien, entferne nur nicht mehr benötigte
-            current_paths_set = set(original_paths)
-            paths_to_remove = [path for path in list(self.video_copies_map.keys()) if path not in current_paths_set]
-            for path in paths_to_remove:
+            # Erstelle Set der aktuellen file-identities
+            current_identities = set()
+            for path in original_paths:
+                file_identity = self._get_file_identity(path)
+                if file_identity:
+                    current_identities.add(file_identity)
+
+            # Finde file-identities, die nicht mehr benötigt werden
+            identities_to_remove = [identity for identity in list(self.video_copies_map.keys())
+                                    if identity not in current_identities]
+
+            for identity in identities_to_remove:
                 # Lösche Datei und Cache-Eintrag
-                if path in self.video_copies_map:
-                    old_copy = self.video_copies_map[path]
+                if identity in self.video_copies_map:
+                    old_copy = self.video_copies_map[identity]
                     if os.path.exists(old_copy):
                         try:
                             os.remove(old_copy)
                             print(f"🗑️ Entferne alte Kopie: {os.path.basename(old_copy)}")
                         except:
                             pass
-                    del self.video_copies_map[path]
+                    del self.video_copies_map[identity]
+                if identity in self.metadata_cache:
+                    del self.metadata_cache[identity]
                 if path in self.metadata_cache:
                     del self.metadata_cache[path]
 
@@ -245,14 +305,14 @@ class VideoPreview:
             # Bei Re-Encoding MIT preserve_cache: Nur neue Videos (nicht im Cache)
             clips_to_process = 0
             for original_path in original_paths:
-                if original_path not in self.video_copies_map:
+                if not self._find_cached_copy(original_path):
                     clips_to_process += 1
             print(f"📦 {clips_to_process} von {total_clips} Videos müssen neu kodiert werden ({total_clips - clips_to_process} bereits im Cache)")
         else:
             # Bei Stream-Copy: Nur neue Videos
             clips_to_process = 0
             for original_path in original_paths:
-                if original_path not in self.video_copies_map or not os.path.exists(self.video_copies_map.get(original_path, "")):
+                if not self._find_cached_copy(original_path):
                     clips_to_process += 1
 
             if clips_to_process == 0:
@@ -273,9 +333,10 @@ class VideoPreview:
 
             # OPTIMIERUNG: Prüfe ob bereits eine gültige Kopie existiert
             # Bei Stream-Copy ODER bei Re-Encoding mit preserve_cache
-            if (not needs_reencoding or preserve_cache) and original_path in self.video_copies_map:
-                existing_copy = self.video_copies_map[original_path]
-                if os.path.exists(existing_copy):
+            if not needs_reencoding or preserve_cache:
+                existing_copy = self._find_cached_copy(original_path)
+
+                if existing_copy:
                     # Kopie existiert bereits - überspringen!
                     print(f"♻️ Verwende bereits existierende Kopie: {os.path.basename(existing_copy)}")
 
@@ -283,11 +344,15 @@ class VideoPreview:
                     if existing_copy != copy_path:
                         try:
                             # Benenne um zu neuem Index-Pfad
+                            file_identity = self._get_file_identity(original_path)
                             shutil.move(existing_copy, copy_path)
-                            self.video_copies_map[original_path] = copy_path
+                            # Aktualisiere Cache mit neuem Pfad
+                            if file_identity:
+                                self.video_copies_map[file_identity] = copy_path
                             print(f"  → Umbenannt zu: {os.path.basename(copy_path)}")
-                        except:
+                        except Exception as e:
                             # Falls Umbenennung fehlschlägt, behalte alten Pfad
+                            print(f"  ⚠️ Umbenennung fehlgeschlagen: {e}")
                             copy_path = existing_copy
 
                     temp_copy_paths.append(copy_path)
@@ -299,15 +364,12 @@ class VideoPreview:
             source_path = original_path
             if not os.path.exists(original_path):
                 # Datei existiert nicht am Original-Ort, suche im Working-Folder
-                if original_path in self.video_copies_map:
-                    working_copy = self.video_copies_map[original_path]
-                    if os.path.exists(working_copy):
-                        source_path = working_copy
-                        print(f"→ Verwende Working-Folder-Kopie: {os.path.basename(working_copy)}")
-                    else:
-                        raise Exception(f"Datei nicht gefunden: {filename} (weder in Upload-Ordner noch Working-Folder)")
+                working_copy = self._find_cached_copy(original_path)
+                if working_copy and os.path.exists(working_copy):
+                    source_path = working_copy
+                    print(f"→ Verwende Working-Folder-Kopie: {os.path.basename(working_copy)}")
                 else:
-                    raise Exception(f"Datei nicht gefunden: {filename}")
+                    raise Exception(f"Datei nicht gefunden: {filename} (weder in Upload-Ordner noch Working-Folder)")
 
             if needs_reencoding:
                 # --- Fall B: Neukodierung ---
@@ -337,7 +399,11 @@ class VideoPreview:
                     raise Exception(f"Fehler beim Kopieren von {filename}")
 
             temp_copy_paths.append(copy_path)
-            self.video_copies_map[original_path] = copy_path
+
+            # Speichere im Cache mit file-identity als Key
+            file_identity = self._get_file_identity(original_path)
+            if file_identity:
+                self.video_copies_map[file_identity] = copy_path
 
             # NEU: Metadaten direkt nach Erstellung der Kopie cachen
             self._cache_metadata_for_copy(original_path, copy_path)
@@ -632,13 +698,20 @@ class VideoPreview:
             needs_reencoding = False
             temp_copy_paths = []
 
-            # Prüfe ob bereits Kopien existieren
-            all_videos_cached = all(original_path in self.video_copies_map for original_path in video_paths)
+            # Prüfe ob bereits Kopien existieren (mit file-identity-basiertem Cache)
+            all_videos_cached = True
+            cached_copy_paths = []
+
+            for original_path in video_paths:
+                copy_path = self._find_cached_copy(original_path)
+                if copy_path:
+                    cached_copy_paths.append(copy_path)
+                else:
+                    all_videos_cached = False
+                    break
 
             if all_videos_cached and self.temp_dir and os.path.exists(self.temp_dir):
                 # FALL 1: Alle Videos bereits gecacht (z.B. beim Verschieben)
-                cached_copy_paths = [self.video_copies_map[original_path] for original_path in video_paths]
-
                 # Prüfe ob alle Kopien noch existieren
                 if all(os.path.exists(copy_path) for copy_path in cached_copy_paths):
                     print(f"✅ Alle {len(cached_copy_paths)} Videos bereits im Cache")
@@ -655,9 +728,16 @@ class VideoPreview:
             if not all_videos_cached:
                 # FALL 2: Nicht alle Videos gecacht (neue Videos hinzugefügt)
 
-                # Finde neue Videos (nicht im Cache)
-                new_videos = [p for p in video_paths if p not in self.video_copies_map]
-                cached_videos = [p for p in video_paths if p in self.video_copies_map]
+                # Finde neue Videos (nicht im Cache) - mit file-identity-basiertem Cache
+                new_videos = []
+                cached_videos = []
+
+                for p in video_paths:
+                    copy_path = self._find_cached_copy(p)
+                    if copy_path:
+                        cached_videos.append(p)
+                    else:
+                        new_videos.append(p)
 
                 print(f"📊 Neue Videos: {len(new_videos)}, Gecachte: {len(cached_videos)}")
 
@@ -679,8 +759,9 @@ class VideoPreview:
                         # Jetzt baue temp_copy_paths in der richtigen Reihenfolge
                         temp_copy_paths = []
                         for p in video_paths:
-                            if p in self.video_copies_map:
-                                temp_copy_paths.append(self.video_copies_map[p])
+                            copy_path = self._find_cached_copy(p)
+                            if copy_path:
+                                temp_copy_paths.append(copy_path)
                             else:
                                 # Sollte nicht passieren, aber zur Sicherheit
                                 raise Exception(f"Video {p} nicht in Cache gefunden!")
@@ -698,7 +779,16 @@ class VideoPreview:
                             print("✅ Neue Videos kompatibel → Stream-Copy")
                             needs_reencoding = False
                             new_copied_paths = self._prepare_video_copies(new_videos, needs_reencoding=False)
-                            temp_copy_paths = [self.video_copies_map[p] for p in video_paths]
+
+                            # Baue temp_copy_paths mit file-identity-basiertem Cache
+                            temp_copy_paths = []
+                            for p in video_paths:
+                                copy_path = self._find_cached_copy(p)
+                                if copy_path:
+                                    temp_copy_paths.append(copy_path)
+                                else:
+                                    raise Exception(f"Video {p} nicht in Cache gefunden!")
+
                             self.parent.after(0, self._update_encoding_info, format_info)
                         else:
                             # Neue Videos nicht kompatibel → ALLE neu kodieren
@@ -743,7 +833,13 @@ class VideoPreview:
                     temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding=needs_reencoding)
                 else:
                     # FALL 2c: Nur gecachte Videos (sollte nicht vorkommen, wäre FALL 1)
-                    temp_copy_paths = [self.video_copies_map[p] for p in video_paths]
+                    temp_copy_paths = []
+                    for p in video_paths:
+                        copy_path = self._find_cached_copy(p)
+                        if copy_path:
+                            temp_copy_paths.append(copy_path)
+                        else:
+                            raise Exception(f"Video {p} nicht in Cache gefunden!")
                     needs_reencoding = False
 
             if self.cancellation_event.is_set():
@@ -995,11 +1091,17 @@ class VideoPreview:
     def register_new_copy(self, original_placeholder: str, new_copy_path: str):
         """
         Fügt ein neues Mapping für eine geteilte Datei hinzu.
+        Verwendet file-identity (Name + Größe) als Cache-Key.
         """
-        if original_placeholder in self.video_copies_map:
-            print(f"Warnung: Platzhalter {original_placeholder} existierte bereits. Wird überschrieben.")
+        file_identity = self._get_file_identity(original_placeholder)
+        if not file_identity:
+            print(f"⚠️ Kann neue Kopie nicht registrieren: File-Identity konnte nicht erstellt werden für {original_placeholder}")
+            return
 
-        self.video_copies_map[original_placeholder] = new_copy_path
+        if file_identity in self.video_copies_map:
+            print(f"Warnung: File-Identity {file_identity} existierte bereits. Wird überschrieben.")
+
+        self.video_copies_map[file_identity] = new_copy_path
         print(f"Neue Kopie registriert: {original_placeholder} -> {new_copy_path}")
 
     def regenerate_preview_after_cut(self, new_original_paths_list):
@@ -1225,9 +1327,15 @@ class VideoPreview:
     def _cache_metadata_for_copy(self, original_path: str, copy_path: str):
         """
         [THREAD-SAFE] Liest Metadaten von der Kopie und speichert sie im Cache.
+        Verwendet file-identity (Name + Größe) als Cache-Key.
         """
         if not os.path.exists(copy_path):
             print(f"Kann Metadaten nicht cachen: Kopie {copy_path} existiert nicht.")
+            return
+
+        file_identity = self._get_file_identity(original_path)
+        if not file_identity:
+            print(f"Kann Metadaten nicht cachen: File-Identity konnte nicht erstellt werden für {original_path}")
             return
 
         try:
@@ -1244,7 +1352,7 @@ class VideoPreview:
             # Hole Format (Auflösung und FPS)
             format_str = self._get_video_format(copy_path)
 
-            self.metadata_cache[original_path] = {
+            self.metadata_cache[file_identity] = {
                 "duration": duration_str,
                 "duration_sec_str": duration_sec_str,
                 "size": size_str,
@@ -1260,7 +1368,7 @@ class VideoPreview:
 
         except Exception as e:
             print(f"Fehler beim Cachen der Metadaten für {original_path}: {e}")
-            self.metadata_cache[original_path] = {
+            self.metadata_cache[file_identity] = {
                 "duration": "FEHLER", "size": "FEHLER", "date": "FEHLER", "timestamp": "FEHLER", "format": "FEHLER"
             }
 
@@ -1292,23 +1400,28 @@ class VideoPreview:
         self.parent.after(0, on_complete_callback)
 
     def get_copy_path(self, original_path):
-        """Gibt den Pfad der temporären Kopie für einen Originalpfad zurück."""
-        return self.video_copies_map.get(original_path)
+        """Gibt den Pfad der temporären Kopie für einen Originalpfad zurück (basierend auf file-identity)."""
+        return self._find_cached_copy(original_path)
 
     def get_cached_metadata(self, original_path: str) -> Dict:
-        """Gibt das gecachte Metadaten-Wörterbuch für einen Originalpfad zurück."""
-        return self.metadata_cache.get(original_path)
+        """Gibt das gecachte Metadaten-Wörterbuch für einen Originalpfad zurück (basierend auf file-identity)."""
+        file_identity = self._get_file_identity(original_path)
+        if file_identity:
+            return self.metadata_cache.get(file_identity)
+        return None
 
     def clear_metadata_cache(self):
         """Leert den Metadaten-Cache (z.B. wenn alle Videos entfernt werden)."""
         self.metadata_cache.clear()
 
     def remove_path_from_cache(self, original_path: str):
-        """Entfernt einen bestimmten Pfad aus Cache und Map."""
-        if original_path in self.video_copies_map:
-            del self.video_copies_map[original_path]
-        if original_path in self.metadata_cache:
-            del self.metadata_cache[original_path]
+        """Entfernt einen bestimmten Pfad aus Cache und Map (basierend auf file-identity)."""
+        file_identity = self._get_file_identity(original_path)
+        if file_identity:
+            if file_identity in self.video_copies_map:
+                del self.video_copies_map[file_identity]
+            if file_identity in self.metadata_cache:
+                del self.metadata_cache[file_identity]
 
     def get_all_copy_paths(self):
         """
@@ -1318,7 +1431,7 @@ class VideoPreview:
         if not self.last_video_paths:
             return []
 
-        paths = [self.video_copies_map.get(orig_path) for orig_path in self.last_video_paths]
+        paths = [self._find_cached_copy(orig_path) for orig_path in self.last_video_paths]
         return [p for p in paths if p and os.path.exists(p)]
 
     # --- Interne Metadaten-Helfer (laufen im Thread oder als Fallback) ---

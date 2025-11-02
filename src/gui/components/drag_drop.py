@@ -121,6 +121,9 @@ class DragDropFrame:
         # NEU: Event für Checkbox-Klicks in der Wasserzeichen-Spalte (auf Release um Doppelklicks zu vermeiden)
         self.video_tree.bind("<ButtonRelease-1>", self._on_watermark_checkbox_click)
 
+        # Rechtsklick-Event für Kontextmenü
+        self.video_tree.bind("<Button-3>", self._show_video_context_menu)
+
         # Drag & Drop für Video-Tabelle
         self.video_tree.drop_target_register(DND_FILES)
         self.video_tree.dnd_bind('<<Drop>>', self._handle_video_table_drop)
@@ -176,6 +179,9 @@ class DragDropFrame:
 
         # Doppelklick-Event für Fotos
         self.photo_tree.bind("<Double-1>", self._on_photo_double_click)
+
+        # Rechtsklick-Event für Kontextmenü
+        self.photo_tree.bind("<Button-3>", self._show_photo_context_menu)
 
         # Drag & Drop für Foto-Tabelle
         self.photo_tree.drop_target_register(DND_FILES)
@@ -802,6 +808,129 @@ class DragDropFrame:
                     subprocess.run(['xdg-open', file_path], check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
         except Exception as e:
             messagebox.showerror("Fehler", f"Datei konnte nicht geöffnet werden:\n{str(e)}")
+
+    def _show_video_context_menu(self, event):
+        """Zeigt Kontextmenü für Video-Zeile bei Rechtsklick"""
+        # Identifiziere die angeklickte Zeile
+        item = self.video_tree.identify_row(event.y)
+        if item:
+            # Wähle die Zeile aus
+            self.video_tree.selection_set(item)
+            index = self.video_tree.index(item)
+
+            if 0 <= index < len(self.video_paths):
+                video_path = self.video_paths[index]
+
+                # Erstelle Kontextmenü
+                context_menu = tk.Menu(self.video_tree, tearoff=0)
+                context_menu.add_command(label="▶ Öffnen", command=lambda: self._open_video_from_context(index))
+                context_menu.add_command(label="📁 Im Verzeichnis öffnen", command=lambda: self._open_in_directory(video_path))
+                context_menu.add_separator()
+                context_menu.add_command(label="🔍 Auf QR-Code prüfen", command=lambda: self._check_qr_from_context(index))
+                context_menu.add_command(label="✂ Schneiden", command=lambda: self._cut_video_from_context(index))
+                context_menu.add_separator()
+                context_menu.add_command(label="✕ Löschen", command=lambda: self._delete_video_from_context(index))
+
+                # Zeige Menü an Mausposition
+                try:
+                    context_menu.tk_popup(event.x_root, event.y_root)
+                finally:
+                    context_menu.grab_release()
+
+    def _show_photo_context_menu(self, event):
+        """Zeigt Kontextmenü für Foto-Zeile bei Rechtsklick"""
+        # Identifiziere die angeklickte Zeile
+        item = self.photo_tree.identify_row(event.y)
+        if item:
+            # Wähle die Zeile aus
+            self.photo_tree.selection_set(item)
+            index = self.photo_tree.index(item)
+
+            if 0 <= index < len(self.photo_paths):
+                photo_path = self.photo_paths[index]
+
+                # Erstelle Kontextmenü
+                context_menu = tk.Menu(self.photo_tree, tearoff=0)
+                context_menu.add_command(label="▶ Öffnen", command=lambda: self._open_photo_from_context(index))
+                context_menu.add_command(label="📁 Im Verzeichnis öffnen", command=lambda: self._open_in_directory(photo_path))
+                context_menu.add_separator()
+                context_menu.add_command(label="✕ Löschen", command=lambda: self._delete_photo_from_context(index))
+
+                # Zeige Menü an Mausposition
+                try:
+                    context_menu.tk_popup(event.x_root, event.y_root)
+                finally:
+                    context_menu.grab_release()
+
+    def _open_video_from_context(self, index):
+        """Öffnet Video aus Kontextmenü"""
+        if 0 <= index < len(self.video_paths):
+            video_path = self.video_paths[index]
+            # Versuche, die Kopie zu öffnen, falle zurück auf Original
+            if self.app and hasattr(self.app, 'video_preview'):
+                copy_path = self.app.video_preview.get_copy_path(video_path)
+                if copy_path and os.path.exists(copy_path):
+                    video_path = copy_path
+            self._open_file_with_default_app(video_path)
+
+    def _open_photo_from_context(self, index):
+        """Öffnet Foto aus Kontextmenü"""
+        if 0 <= index < len(self.photo_paths):
+            photo_path = self.photo_paths[index]
+            self._open_file_with_default_app(photo_path)
+
+    def _open_in_directory(self, file_path):
+        """Öffnet den Datei-Explorer und markiert die Datei"""
+        try:
+            if os.name == 'nt':  # Windows
+                subprocess.run(['explorer', '/select,', os.path.normpath(file_path)],
+                             creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+            elif os.name == 'posix':  # macOS und Linux
+                directory = os.path.dirname(file_path)
+                if platform.system() == 'Darwin':  # macOS
+                    subprocess.run(['open', '-R', file_path], creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                else:  # Linux
+                    subprocess.run(['xdg-open', directory], creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Verzeichnis konnte nicht geöffnet werden:\n{str(e)}")
+
+    def _check_qr_from_context(self, index):
+        """Führt QR-Code-Prüfung für spezifisches Video aus"""
+        if 0 <= index < len(self.video_paths):
+            video_path = self.video_paths[index]
+            if self.app:
+                # Führe QR-Analyse für dieses Video aus
+                self.app.run_qr_analysis([video_path])
+
+    def _cut_video_from_context(self, index):
+        """Öffnet Schnitt-Dialog für spezifisches Video"""
+        if 0 <= index < len(self.video_paths):
+            # Wähle das Video in der Tabelle aus
+            items = self.video_tree.get_children()
+            if index < len(items):
+                self.video_tree.selection_set(items[index])
+            # Öffne Schnitt-Dialog
+            self.open_cut_dialog()
+
+    def _delete_video_from_context(self, index):
+        """Löscht Video aus Kontextmenü"""
+        if 0 <= index < len(self.video_paths):
+            # Wähle das Video in der Tabelle aus
+            items = self.video_tree.get_children()
+            if index < len(items):
+                self.video_tree.selection_set(items[index])
+            # Rufe normale Lösch-Funktion auf
+            self.remove_selected_video()
+
+    def _delete_photo_from_context(self, index):
+        """Löscht Foto aus Kontextmenü"""
+        if 0 <= index < len(self.photo_paths):
+            # Wähle das Foto in der Tabelle aus
+            items = self.photo_tree.get_children()
+            if index < len(items):
+                self.photo_tree.selection_set(items[index])
+            # Rufe normale Lösch-Funktion auf
+            self.remove_selected_photo()
 
     def _handle_video_table_drop(self, event):
         """Verarbeitet das Ablegen von Dateien in die Video-Tabelle"""

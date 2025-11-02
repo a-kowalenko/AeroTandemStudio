@@ -552,10 +552,14 @@ class VideoGeneratorApp:
         # 3. Eine Queue erstellen, um das Ergebnis vom Thread zu empfangen
         self.analysis_queue = queue.Queue()
 
+        # video_paths enthält nach dem ersten update_preview bereits Working-Folder-Pfade!
+        first_video_path = video_paths[0]
+        print(f"QR-Analyse: {os.path.basename(first_video_path)}")
+
         # 4. Den Analyse-Thread starten
         analysis_thread = threading.Thread(
             target=self._run_analysis_thread,
-            args=(video_paths[0], self.analysis_queue),
+            args=(first_video_path, self.analysis_queue),
             daemon=True
         )
         analysis_thread.start()
@@ -907,38 +911,27 @@ class VideoGeneratorApp:
 
     # --- NEUE METHODEN FÜR DEN SCHNEIDE-DIALOG ---
 
-    def request_cut_dialog(self, original_video_path: str):
-        """Wird von drag_drop.py aufgerufen, um den Schneide-Dialog zu öffnen."""
+    def request_cut_dialog(self, video_path: str, index: int):
+        """
+        Wird von drag_drop.py aufgerufen, um den Schneide-Dialog zu öffnen.
+
+        video_path ist nach dem ersten update_preview bereits ein Working-Folder-Pfad!
+        """
         if self.video_cutter_dialog is not None:
             print("Ein Schneide-Dialog ist bereits geöffnet.")
             self.video_cutter_dialog.lift()
             return
 
-        if not self.video_preview:
-            print("Fehler: video_preview ist nicht initialisiert.")
-            return
-
-        # 1. Finde den Pfad zur *Kopie* des Videos
-        copy_path = self.video_preview.get_copy_path(original_video_path)
-
-        if not copy_path or not os.path.exists(copy_path):
+        if not os.path.exists(video_path):
             messagebox.showerror("Fehler",
-                                 f"Konnte die temporäre Videokopie für '{os.path.basename(original_video_path)}' nicht finden.\n"
-                                 "Bitte erstellen Sie die Vorschau neu (z.B. durch Hinzufügen/Entfernen eines Clips).")
+                                 f"Video '{os.path.basename(video_path)}' konnte nicht gefunden werden.")
             return
 
-        # 2. Finde den Index des Clips (für späteres Splitten)
-        try:
-            index = self.drag_drop.get_video_paths().index(original_video_path)
-        except ValueError:
-            print(f"Fehler: Konnte Index für {original_video_path} nicht finden.")
-            index = -1  # Fallback
-
-        # 3. Dialog erstellen
+        # Dialog erstellen - video_path ist bereits der Working-Folder-Pfad!
         self.video_cutter_dialog = VideoCutterDialog(
             self.root,
-            video_path=copy_path,
-            on_complete_callback=lambda result: self.on_cut_complete(original_video_path, index, result)
+            video_path=video_path,
+            on_complete_callback=lambda result: self.on_cut_complete(video_path, index, result)
         )
 
         # 4. Callback binden, um Referenz zu löschen, wenn Dialog geschlossen wird

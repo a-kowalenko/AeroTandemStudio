@@ -362,15 +362,48 @@ class DragDropFrame:
         return cleaned_paths
 
     def add_files(self, new_videos, new_photos):
-        """Fügt neue Videos und Fotos hinzu und aktualisiert die Tabellen"""
+        """
+        Importiert neue Videos und Fotos.
+
+        WICHTIG: Videos werden SOFORT in den Working-Folder kopiert (="Import")!
+        video_paths enthält danach NUR Working-Folder-Pfade.
+        """
         new_videos_added = False
         new_photos_added = False
 
-        # Videos hinzufügen (ohne Duplikate)
-        for video_path in new_videos:
-            if video_path not in self.video_paths:
-                self.video_paths.append(video_path)
-                new_videos_added = True
+        # Videos IMPORTIEREN (in Working-Folder kopieren)
+        if new_videos and self.app and hasattr(self.app, 'video_preview'):
+            print(f"\n📥 Importiere {len(new_videos)} Video(s) in Working-Folder...")
+
+            # Stelle sicher, dass Working-Folder existiert
+            if not self.app.video_preview.temp_dir:
+                self.app.video_preview._create_temp_directory()
+
+            imported_paths = []
+            for video_path in new_videos:
+                # Importiere Video (kopiere in Working-Folder)
+                imported_path = self._import_video(video_path)
+                if imported_path:
+                    # Prüfe auf Duplikate (basierend auf Dateinamen)
+                    filename = os.path.basename(imported_path)
+                    is_duplicate = any(os.path.basename(p) == filename for p in self.video_paths)
+
+                    if not is_duplicate:
+                        imported_paths.append(imported_path)
+                        new_videos_added = True
+                    else:
+                        print(f"  ⚠️ Überspringe Duplikat: {filename}")
+                        # Lösche die Kopie wieder
+                        try:
+                            os.remove(imported_path)
+                        except:
+                            pass
+
+            # Füge importierte Pfade zu video_paths hinzu
+            self.video_paths.extend(imported_paths)
+
+            if imported_paths:
+                print(f"✅ {len(imported_paths)} Video(s) erfolgreich importiert")
 
         # Fotos hinzufügen (ohne Duplikate)
         for photo_path in new_photos:
@@ -388,6 +421,37 @@ class DragDropFrame:
         # Foto-Vorschau aktualisieren
         if new_photos_added:
             self._update_photo_preview()
+
+    def _import_video(self, source_path):
+        """
+        Importiert ein Video in den Working-Folder.
+
+        Returns:
+            Working-Folder-Pfad oder None bei Fehler
+        """
+        try:
+            import shutil
+
+            temp_dir = self.app.video_preview.temp_dir
+            if not temp_dir:
+                print(f"  ⚠️ Working-Folder nicht verfügbar")
+                return None
+
+            filename = os.path.basename(source_path)
+            # Erstelle eindeutigen Pfad mit Index
+            index = len(self.video_paths)
+            safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+            dest_path = os.path.join(temp_dir, f"{index:03d}_{safe_filename}")
+
+            # Kopiere Datei
+            print(f"  📋 {filename} → Working-Folder")
+            shutil.copy2(source_path, dest_path)
+
+            return dest_path
+
+        except Exception as e:
+            print(f"  ❌ Fehler beim Importieren von {os.path.basename(source_path)}: {e}")
+            return None
 
         # App über *alle* neuen Dateien benachrichtigen
         if new_videos_added or new_photos_added:
@@ -738,6 +802,7 @@ class DragDropFrame:
         """Prüft ob Fotos vorhanden sind"""
         return len(self.photo_paths) > 0
 
+
     def reset(self):
         """Setzt die Komponente zurück"""
         self.clear_all()
@@ -758,10 +823,11 @@ class DragDropFrame:
             return
 
         index = self.video_tree.index(selection[0])
-        original_path = self.video_paths[index]
+        # video_paths enthält nach update_preview Working-Folder-Pfade!
+        video_path = self.video_paths[index]
 
         # Rufe die Methode in app.py auf
-        self.app.request_cut_dialog(original_path)
+        self.app.request_cut_dialog(video_path, index)
 
     def set_cut_button_enabled(self, enabled: bool):
         """Sperrt/Entsperrt den Schneiden-Button basierend auf Vorschau-Status."""
@@ -773,18 +839,13 @@ class DragDropFrame:
                 self.cut_button.config(text="✂ Schneiden (Vorschau wird erstellt...)", fg="gray")
 
     def _on_video_double_click(self, event):
-        """Öffnet das ausgewählte Video beim Doppelklick"""
+        """Öffnet das ausgewählte Video beim Doppelklick - video_paths enthält Working-Folder-Pfade"""
         selection = self.video_tree.selection()
         if selection:
             index = self.video_tree.index(selection[0])
             if 0 <= index < len(self.video_paths):
-                # NEU: Versuche, die Kopie zu öffnen, falle zurück auf Original
+                # video_paths enthält nach dem ersten update_preview Working-Folder-Pfade!
                 video_path = self.video_paths[index]
-                if self.app and hasattr(self.app, 'video_preview'):
-                    copy_path = self.app.video_preview.get_copy_path(video_path)
-                    if copy_path and os.path.exists(copy_path):
-                        video_path = copy_path
-
                 self._open_file_with_default_app(video_path)
 
     def _on_photo_double_click(self, event):
@@ -819,11 +880,12 @@ class DragDropFrame:
             index = self.video_tree.index(item)
 
             if 0 <= index < len(self.video_paths):
+                # video_paths enthält nach update_preview Working-Folder-Pfade!
                 video_path = self.video_paths[index]
 
                 # Erstelle Kontextmenü
                 context_menu = tk.Menu(self.video_tree, tearoff=0)
-                context_menu.add_command(label="▶ Öffnen", command=lambda: self._open_video_from_context(index))
+                context_menu.add_command(label="▶ Öffnen", command=lambda: self._open_file_with_default_app(video_path))
                 context_menu.add_command(label="📁 Im Verzeichnis öffnen", command=lambda: self._open_in_directory(video_path))
                 context_menu.add_separator()
                 context_menu.add_command(label="🔍 Auf QR-Code prüfen", command=lambda: self._check_qr_from_context(index))
@@ -851,7 +913,7 @@ class DragDropFrame:
 
                 # Erstelle Kontextmenü
                 context_menu = tk.Menu(self.photo_tree, tearoff=0)
-                context_menu.add_command(label="▶ Öffnen", command=lambda: self._open_photo_from_context(index))
+                context_menu.add_command(label="▶ Öffnen", command=lambda: self._open_file_with_default_app(photo_path))
                 context_menu.add_command(label="📁 Im Verzeichnis öffnen", command=lambda: self._open_in_directory(photo_path))
                 context_menu.add_separator()
                 context_menu.add_command(label="✕ Löschen", command=lambda: self._delete_photo_from_context(index))
@@ -862,22 +924,6 @@ class DragDropFrame:
                 finally:
                     context_menu.grab_release()
 
-    def _open_video_from_context(self, index):
-        """Öffnet Video aus Kontextmenü"""
-        if 0 <= index < len(self.video_paths):
-            video_path = self.video_paths[index]
-            # Versuche, die Kopie zu öffnen, falle zurück auf Original
-            if self.app and hasattr(self.app, 'video_preview'):
-                copy_path = self.app.video_preview.get_copy_path(video_path)
-                if copy_path and os.path.exists(copy_path):
-                    video_path = copy_path
-            self._open_file_with_default_app(video_path)
-
-    def _open_photo_from_context(self, index):
-        """Öffnet Foto aus Kontextmenü"""
-        if 0 <= index < len(self.photo_paths):
-            photo_path = self.photo_paths[index]
-            self._open_file_with_default_app(photo_path)
 
     def _open_in_directory(self, file_path):
         """Öffnet den Datei-Explorer und markiert die Datei"""
@@ -895,11 +941,13 @@ class DragDropFrame:
             messagebox.showerror("Fehler", f"Verzeichnis konnte nicht geöffnet werden:\n{str(e)}")
 
     def _check_qr_from_context(self, index):
-        """Führt QR-Code-Prüfung für spezifisches Video aus"""
+        """Führt QR-Code-Prüfung für spezifisches Video aus - video_paths enthält Working-Folder-Pfade"""
         if 0 <= index < len(self.video_paths):
+            # video_paths enthält nach update_preview Working-Folder-Pfade!
             video_path = self.video_paths[index]
+
             if self.app:
-                # Führe QR-Analyse für dieses Video aus
+                # Führe QR-Analyse aus
                 self.app.run_qr_analysis([video_path])
 
     def _cut_video_from_context(self, index):

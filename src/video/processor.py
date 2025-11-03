@@ -948,6 +948,7 @@ class VideoProcessor:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
+            bufsize=1,  # Line buffered
             creationflags=SUBPROCESS_CREATE_NO_WINDOW
         )
 
@@ -958,24 +959,45 @@ class VideoProcessor:
         current_time_sec = 0.0
         fps = 0.0
 
+        # Sammle stderr in separatem Thread um Deadlock zu vermeiden
+        stderr_lines = []
+        def read_stderr():
+            try:
+                for line in process.stderr:
+                    stderr_lines.append(line)
+            except:
+                pass
+
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stderr_thread.start()
+
         try:
             while True:
                 self._check_for_cancellation()
 
+                # Non-blocking read mit Timeout
                 line = process.stdout.readline()
                 if not line:
-                    break
+                    # Prüfe ob Prozess beendet ist
+                    if process.poll() is not None:
+                        break
+                    # Kurze Pause um CPU nicht zu belasten
+                    time.sleep(0.01)
+                    continue
 
                 line = line.strip()
 
                 # Parse FFmpeg Progress-Ausgabe
                 if line.startswith('out_time_ms='):
-                    # Zeit in Mikrosekunden
-                    time_ms = int(line.split('=')[1])
-                    current_time_sec = time_ms / 1000000.0
+                    try:
+                        time_ms_str = line.split('=')[1].strip()
+                        time_ms = int(time_ms_str)
+                        current_time_sec = time_ms / 1000000.0
+                    except (ValueError, IndexError):
+                        pass
 
                 elif line.startswith('fps='):
-                    fps_str = line.split('=')[1]
+                    fps_str = line.split('=')[1].strip()
                     try:
                         fps = float(fps_str)
                     except ValueError:
@@ -1024,15 +1046,27 @@ class VideoProcessor:
                                 task_id=task_id
                             )
 
-            # Warte auf Prozessende
-            process.wait()
+            # Warte auf Prozessende mit Timeout
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                print("⚠️ FFmpeg antwortet nicht - beende Prozess...")
+                process.kill()
+                process.wait()
+
+            # Warte auf stderr-Thread
+            stderr_thread.join(timeout=2)
 
             # Prüfe Return Code
             if process.returncode != 0:
-                stderr_output = process.stderr.read()
+                stderr_output = ''.join(stderr_lines)
                 if self.cancel_event.is_set():
                     raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
-                print(f"FFmpeg Fehler: {stderr_output}")
+
+                # Zeige nur relevante stderr-Zeilen (letzte 20)
+                stderr_relevant = '\n'.join(stderr_lines[-20:]) if stderr_lines else "Kein stderr verfügbar"
+                print(f"FFmpeg Fehler (Code {process.returncode}):")
+                print(stderr_relevant)
                 raise subprocess.CalledProcessError(process.returncode, command, stderr=stderr_output)
 
             # Finale 100% Update
@@ -1051,14 +1085,24 @@ class VideoProcessor:
 
         except CancellationError:
             # Beende FFmpeg-Prozess bei Abbruch
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
             raise
         except Exception as e:
             # Beende FFmpeg-Prozess bei Fehler
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise
             process.terminate()
             raise
 

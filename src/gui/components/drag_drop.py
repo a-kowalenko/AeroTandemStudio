@@ -1144,11 +1144,11 @@ class DragDropFrame:
             return
 
         column = self.video_tree.identify_column(event.x)
-        # Spalte 8 ist die Wasserzeichen-Spalte (0-indiziert: 7, aber +1 für tree_id)
-        # Spalten: tree_id (#0), Nr, Dateiname, Format, Dauer, Größe, Datum, Uhrzeit, Wasserzeichen
-        # Index:    0        1     2           3       4      5      6      7        8
+        # Spalte 9 ist die Wasserzeichen-Spalte (0-indiziert: 8, aber +1 für tree_id)
+        # Spalten: tree_id (#0), Nr, Dateiname, Format, Dauer, Größe, Datum, Uhrzeit, Progress, WM
+        # Index:    0           1    2          3       4      5      6      7        8         9
 
-        if column != "#8":
+        if column != "#9":
             return
 
         # Finde die Reihe

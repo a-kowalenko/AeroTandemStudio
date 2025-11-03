@@ -3,6 +3,7 @@ from tkinter import messagebox, ttk, filedialog
 import webbrowser
 
 from src.utils.constants import APP_VERSION, PAYPAL_LOGO_PATH
+from src.gui.components.circular_spinner import CircularSpinner
 
 
 class SettingsDialog:
@@ -262,13 +263,8 @@ class SettingsDialog:
         )
         self.hw_accel_checkbox.pack(side="left")
 
-        # Spinner (zunächst versteckt)
-        self.hw_spinner_label = tk.Label(
-            hw_container,
-            text="⏳",
-            font=("Arial", 12),
-            fg="#2196F3"
-        )
+        # CircularSpinner für Hardware-Erkennung (zunächst versteckt)
+        self.hw_spinner = CircularSpinner(hw_container, size=20, line_width=3, color="#007ACC", speed=8)
         # Wird nur angezeigt während Hardware erkannt wird
 
         # Info-Label für erkannte Hardware
@@ -289,8 +285,9 @@ class SettingsDialog:
         is_enabled = self.hardware_acceleration_var.get()
 
         if is_enabled:
-            # Zeige Spinner sofort
-            self.hw_spinner_label.pack(side="left", padx=(5, 0))
+            # Zeige und starte Spinner sofort
+            self.hw_spinner.pack(side="left", padx=(5, 0))
+            self.hw_spinner.start()
             self.hw_info_label.config(text="Erkenne Hardware...", fg="gray")
 
             # Verhindere mehrfache gleichzeitige Erkennung
@@ -317,19 +314,22 @@ class SettingsDialog:
             threading.Thread(target=detect_hardware_async, daemon=True).start()
         else:
             # Hardware-Beschleunigung deaktiviert
-            self.hw_spinner_label.pack_forget()
+            self.hw_spinner.stop()
+            self.hw_spinner.pack_forget()
             self.hw_info_label.config(text="Hardware-Beschleunigung deaktiviert (Software-Encoding)", fg="gray")
             self.hw_detection_running = False
 
     def _update_hw_info_success(self, hw_info_text):
         """Aktualisiert die Hardware-Info nach erfolgreicher Erkennung (im Haupt-Thread)"""
-        self.hw_spinner_label.pack_forget()
+        self.hw_spinner.stop()
+        self.hw_spinner.pack_forget()
         self.hw_info_label.config(text=f"✓ {hw_info_text}", fg="green")
         self.hw_detection_running = False
 
     def _update_hw_info_error(self, error_msg):
         """Aktualisiert die Hardware-Info bei Fehler (im Haupt-Thread)"""
-        self.hw_spinner_label.pack_forget()
+        self.hw_spinner.stop()
+        self.hw_spinner.pack_forget()
         self.hw_info_label.config(text=f"⚠ Fehler bei Hardware-Erkennung: {error_msg}", fg="orange")
         self.hw_detection_running = False
 

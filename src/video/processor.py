@@ -385,7 +385,9 @@ class VideoProcessor:
     def _create_video_with_watermark(self, input_video_path, output_path, video_params):
         """
         Erstellt eine Video-Version mit Wasserzeichen über dem gesamten Video.
-        NEU: Nutzt Hardware-Beschleunigung wenn verfügbar.
+        NEU: Nutzt Hardware-Encoding wenn verfügbar, aber Software-Decoding für Filter-Kompatibilität.
+
+        WICHTIG: overlay-Filter benötigt Software-Frames (yuv420p), daher KEIN Hardware-Decoding!
         """
 
         # Pfad zum Wasserzeichen-Bild
@@ -414,14 +416,15 @@ class VideoProcessor:
         # Baue FFmpeg-Befehl
         command = ["ffmpeg", "-y"]
 
-        # Input-Parameter (Hardware-Decoder wenn verfügbar)
-        command.extend(encoding_params['input_params'])
+        # WICHTIG: KEIN Hardware-Decoding verwenden!
+        # overlay-Filter benötigt Software-Frames (yuv420p), Hardware-Frames (qsv) sind inkompatibel
+        # Nur die Input-Dateien, OHNE hwaccel-Parameter
         command.extend(["-i", input_video_path, "-i", wasserzeichen_path])
 
         # Filter
         command.extend(["-filter_complex", watermark_filter])
 
-        # Output-Parameter
+        # Output-Parameter: Hardware-Encoder wenn verfügbar, sonst Software
         command.extend(encoding_params['output_params'])
 
         # Für Wasserzeichen-Version: schnellere Einstellungen wenn Software-Encoding
@@ -430,6 +433,9 @@ class VideoProcessor:
                 "-preset", "ultrafast",     # Schnellstes Preset
                 "-crf", "28",               # Höheres CRF = schneller + kleinere Datei
             ])
+        else:
+            # Bei Hardware-Encoding: Schnelle Qualitätseinstellungen
+            print(f"  → Nutze Hardware-Encoder für Wasserzeichen: {encoding_params['encoder']}")
 
         command.extend([
             "-movflags", "+faststart",

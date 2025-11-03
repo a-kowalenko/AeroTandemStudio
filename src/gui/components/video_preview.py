@@ -9,6 +9,7 @@ import sys
 import shutil
 import time
 from .progress_indicator import ProgressHandler
+from .circular_spinner import CircularSpinner
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.hardware_acceleration import HardwareAccelerationDetector
 from typing import List, Dict, Callable  # NEU
@@ -313,15 +314,11 @@ class VideoPreview:
         # OPTIMIERUNG: Behalte existierende Kopien NUR wenn KEIN Re-Encoding nötig ODER preserve_cache=True
         if needs_reencoding and not preserve_cache:
             # Bei Re-Encoding müssen ALLE Videos neu kodiert werden
-            # Entferne ALLE alten Kopien (könnten unterschiedliche Formate haben)
-            print("⚠️ Re-Encoding aktiviert → Cache wird geleert, ALLE Videos werden neu kodiert")
-            if self.video_copies_map:
-                for path, copy_path in list(self.video_copies_map.items()):
-                    if os.path.exists(copy_path):
-                        try:
-                            os.remove(copy_path)
-                        except:
-                            pass
+            # WICHTIG: Dateien NICHT löschen! Sie werden als Source benötigt und danach überschrieben.
+            print("⚠️ Re-Encoding aktiviert → ALLE Videos werden neu kodiert (Format-Unterschiede)")
+
+            # Leere nur die Caches, aber NICHT die Dateien!
+            # Die Dateien werden während des Re-Encodings überschrieben
             self.video_copies_map.clear()
             self.metadata_cache.clear()
         elif needs_reencoding and preserve_cache:
@@ -353,8 +350,6 @@ class VideoPreview:
                     del self.video_copies_map[identity]
                 if identity in self.metadata_cache:
                     del self.metadata_cache[identity]
-                if path in self.metadata_cache:
-                    del self.metadata_cache[path]
 
         temp_copy_paths = []
         total_clips = len(original_paths)
@@ -385,6 +380,9 @@ class VideoPreview:
 
         self.parent.after(0, self.progress_handler.pack_progress_bar)
         self.parent.after(0, self.progress_handler.update_progress, 0, total_clips)
+
+        # NEU: ETA-Tracking für Re-Encoding
+        encoding_times = []  # Speichert Kodierzeiten pro Video
 
         for i, original_path in enumerate(original_paths):
             self._check_for_cancellation()
@@ -435,12 +433,29 @@ class VideoPreview:
                     raise Exception(f"Datei nicht gefunden: {filename} (weder in Upload-Ordner noch Working-Folder)")
 
             if needs_reencoding:
-                # --- Fall B: Neukodierung ---
-                status_msg = f"Kodiere Clip {i + 1}/{total_clips} (1080p@30)..."
+                # --- Fall B: Neukodierung mit ETA ---
+                start_time = time.time()
+
+                # Berechne ETA basierend auf bisherigen Kodierzeiten
+                eta_str = ""
+                if encoding_times:
+                    avg_time_per_video = sum(encoding_times) / len(encoding_times)
+                    remaining_videos = total_clips - i
+                    eta_seconds = avg_time_per_video * remaining_videos
+                    eta_minutes = int(eta_seconds // 60)
+                    eta_secs = int(eta_seconds % 60)
+                    eta_str = f" (ETA: ~{eta_minutes}:{eta_secs:02d})"
+
+                status_msg = f"Kodiere Clip {i + 1}/{total_clips}{eta_str}..."
                 self.parent.after(0, lambda msg=status_msg: self.status_label.config(text=msg, fg="orange"))
 
                 try:
                     self._reencode_single_clip(source_path, copy_path)
+
+                    # Speichere Kodierzeit für ETA-Berechnung
+                    encoding_time = time.time() - start_time
+                    encoding_times.append(encoding_time)
+
                 except Exception as e:
                     if self.cancellation_event.is_set():
                         print("Neukodierung abgebrochen.")
@@ -1156,34 +1171,67 @@ class VideoPreview:
             return None
 
     def _check_video_formats(self, video_paths):
+        """Prüft ob Videos kompatible Formate haben - mit UI-Feedback und Spinner"""
         if len(video_paths) <= 1:
             return {"compatible": True, "details": "Nur ein Video - kompatibel"}
+
+        total = len(video_paths)
         formats = []
-        for video_path in video_paths:
-            try:
-                self._check_for_cancellation()  # Prüfe vor jedem blockierenden Aufruf
-                result = subprocess.run(['ffprobe', '-v', 'quiet', '-print_format', 'json',
-                                         '-show_format', '-show_streams', video_path],
-                                        capture_output=True, text=True, timeout=10,
-                                        creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                if result.returncode == 0:
-                    info = json.loads(result.stdout)
-                    video_stream = next((s for s in info.get('streams', []) if s.get('codec_type') == 'video'), None)
-                    if video_stream:
-                        formats.append({'codec_name': video_stream.get('codec_name', 'unknown'),
-                                        'width': video_stream.get('width', 0), 'height': video_stream.get('height', 0),
-                                        'r_frame_rate': video_stream.get('r_frame_rate', '0/0'),
-                                        'pix_fmt': video_stream.get('pix_fmt', 'unknown')})
+
+        # NEU: Erstelle Spinner für Format-Check
+        format_check_spinner = None
+
+        def show_spinner():
+            nonlocal format_check_spinner
+            format_check_spinner = CircularSpinner(self.progress_frame, size=40, line_width=4, color="#007ACC")
+            format_check_spinner.pack(pady=5)
+            format_check_spinner.start()
+
+        def hide_spinner():
+            nonlocal format_check_spinner
+            if format_check_spinner:
+                format_check_spinner.stop()
+                format_check_spinner.canvas.destroy()
+                format_check_spinner = None
+
+        # Zeige Spinner im Haupt-Thread
+        self.parent.after(0, show_spinner)
+
+        try:
+            for i, video_path in enumerate(video_paths):
+                # UI-Update: Zeige Fortschritt mit Spinner
+                progress_text = f"Prüfe Format {i + 1}/{total}..."
+                self.parent.after(0, lambda t=progress_text: self.status_label.config(text=t, fg="blue"))
+
+                try:
+                    self._check_for_cancellation()  # Prüfe vor jedem blockierenden Aufruf
+                    result = subprocess.run(['ffprobe', '-v', 'quiet', '-print_format', 'json',
+                                             '-show_format', '-show_streams', video_path],
+                                            capture_output=True, text=True, timeout=10,
+                                            creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                    if result.returncode == 0:
+                        info = json.loads(result.stdout)
+                        video_stream = next((s for s in info.get('streams', []) if s.get('codec_type') == 'video'), None)
+                        if video_stream:
+                            formats.append({'codec_name': video_stream.get('codec_name', 'unknown'),
+                                            'width': video_stream.get('width', 0), 'height': video_stream.get('height', 0),
+                                            'r_frame_rate': video_stream.get('r_frame_rate', '0/0'),
+                                            'pix_fmt': video_stream.get('pix_fmt', 'unknown')})
+                        else:
+                            formats.append({'error': 'No video stream'})
                     else:
-                        formats.append({'error': 'No video stream'})
-                else:
-                    formats.append({'error': 'FFprobe failed'})
-            except Exception as e:
-                if "abgebrochen" in str(e): raise  # Abbruch weiterleiten
-                formats.append({'error': str(e)})
+                        formats.append({'error': 'FFprobe failed'})
+                except Exception as e:
+                    if "abgebrochen" in str(e): raise  # Abbruch weiterleiten
+                    formats.append({'error': str(e)})
+
+        finally:
+            # Verstecke Spinner nach Format-Check
+            self.parent.after(0, hide_spinner)
+
         first_format = next((f for f in formats if 'error' not in f), None)
         if not first_format: return {"compatible": False, "details": "No valid video streams found."}
-        is_compatible = True;
+        is_compatible = True
         diffs = []
         for i, fmt in enumerate(formats):
             if 'error' in fmt:

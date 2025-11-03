@@ -4,7 +4,6 @@ Erkennt automatisch verfügbare Hardware und gibt optimierte FFmpeg-Parameter zu
 """
 import subprocess
 import platform
-import os
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 
 
@@ -48,8 +47,8 @@ class HardwareAccelerationDetector:
         """Erkennt Hardware-Beschleunigung unter Windows"""
         # Priorität: NVIDIA NVENC > AMD AMF > Intel Quick Sync
 
-        # 1. Prüfe NVIDIA NVENC
-        if self._check_nvenc_available():
+        # 1. Prüfe NVIDIA NVENC (nur wenn NVIDIA GPU vorhanden)
+        if self._has_nvidia_gpu() and self._check_nvenc_available():
             return {
                 'available': True,
                 'type': 'nvidia',
@@ -62,8 +61,8 @@ class HardwareAccelerationDetector:
                 'extra_params': ['-preset', 'p4', '-tune', 'hq']
             }
 
-        # 2. Prüfe AMD AMF
-        if self._check_amf_available():
+        # 2. Prüfe AMD AMF (nur wenn AMD GPU vorhanden)
+        if self._has_amd_gpu() and self._check_amf_available():
             return {
                 'available': True,
                 'type': 'amd',
@@ -75,8 +74,8 @@ class HardwareAccelerationDetector:
                 'extra_params': ['-usage', 'transcoding', '-quality', 'speed']
             }
 
-        # 3. Prüfe Intel Quick Sync
-        if self._check_qsv_available():
+        # 3. Prüfe Intel Quick Sync (nur wenn Intel GPU vorhanden)
+        if self._has_intel_gpu() and self._check_qsv_available():
             return {
                 'available': True,
                 'type': 'intel',
@@ -86,10 +85,84 @@ class HardwareAccelerationDetector:
                 'decoder_hevc': 'hevc_qsv',
                 'hwaccel': 'qsv',
                 'device': None,
-                'extra_params': ['-preset', 'medium', '-look_ahead', '1']
+                # Für QSV: Verwende ICQ (Intelligent Constant Quality) für beste Qualität ohne Bitrate
+                # global_quality 23 entspricht ungefähr CRF 23 bei libx264
+                'extra_params': ['-global_quality', '23', '-preset', 'medium']
             }
 
         return {'available': False, 'type': None}
+
+    def _has_nvidia_gpu(self):
+        """Prüft ob eine NVIDIA GPU im System vorhanden ist"""
+        try:
+            # Methode 1: nvidia-smi verwenden
+            result = subprocess.run(
+                ['nvidia-smi', '-L'],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                creationflags=SUBPROCESS_CREATE_NO_WINDOW
+            )
+            if result.returncode == 0 and 'GPU' in result.stdout:
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # Methode 2: WMIC verwenden (Windows Management Instrumentation)
+        try:
+            result = subprocess.run(
+                ['wmic', 'path', 'win32_VideoController', 'get', 'name'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=SUBPROCESS_CREATE_NO_WINDOW
+            )
+            if result.returncode == 0:
+                output = result.stdout.lower()
+                if 'nvidia' in output or 'geforce' in output or 'quadro' in output or 'rtx' in output:
+                    return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        return False
+
+    def _has_amd_gpu(self):
+        """Prüft ob eine AMD GPU im System vorhanden ist"""
+        try:
+            result = subprocess.run(
+                ['wmic', 'path', 'win32_VideoController', 'get', 'name'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=SUBPROCESS_CREATE_NO_WINDOW
+            )
+            if result.returncode == 0:
+                output = result.stdout.lower()
+                if 'amd' in output or 'radeon' in output or 'ati' in output:
+                    return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        return False
+
+    def _has_intel_gpu(self):
+        """Prüft ob eine Intel GPU im System vorhanden ist"""
+        try:
+            result = subprocess.run(
+                ['wmic', 'path', 'win32_VideoController', 'get', 'name'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=SUBPROCESS_CREATE_NO_WINDOW
+            )
+            if result.returncode == 0:
+                output = result.stdout.lower()
+                if 'intel' in output or 'uhd graphics' in output or 'iris' in output or 'hd graphics' in output:
+                    return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        return False
 
     def _detect_macos_hardware(self):
         """Erkennt Hardware-Beschleunigung unter macOS (VideoToolbox)"""
@@ -111,8 +184,8 @@ class HardwareAccelerationDetector:
         """Erkennt Hardware-Beschleunigung unter Linux"""
         # Priorität: NVIDIA NVENC > VAAPI
 
-        # 1. Prüfe NVIDIA NVENC
-        if self._check_nvenc_available():
+        # 1. Prüfe NVIDIA NVENC (nur wenn NVIDIA GPU vorhanden)
+        if self._has_nvidia_gpu_linux() and self._check_nvenc_available():
             return {
                 'available': True,
                 'type': 'nvidia',
@@ -140,6 +213,38 @@ class HardwareAccelerationDetector:
 
         return {'available': False, 'type': None}
 
+    def _has_nvidia_gpu_linux(self):
+        """Prüft ob eine NVIDIA GPU unter Linux vorhanden ist"""
+        try:
+            # nvidia-smi verwenden
+            result = subprocess.run(
+                ['nvidia-smi', '-L'],
+                capture_output=True,
+                text=True,
+                timeout=3
+            )
+            if result.returncode == 0 and 'GPU' in result.stdout:
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # lspci verwenden
+        try:
+            result = subprocess.run(
+                ['lspci'],
+                capture_output=True,
+                text=True,
+                timeout=3
+            )
+            if result.returncode == 0:
+                output = result.stdout.lower()
+                if 'nvidia' in output and ('vga' in output or '3d' in output):
+                    return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        return False
+
     def _check_nvenc_available(self):
         """Prüft ob NVIDIA NVENC verfügbar ist und funktionsfähig"""
         try:
@@ -166,14 +271,21 @@ class HardwareAccelerationDetector:
                 creationflags=SUBPROCESS_CREATE_NO_WINDOW
             )
 
-            # Prüfe auf Treiber-Fehler
+            # Prüfe auf Treiber-Fehler oder fehlende Hardware
             if test_result.returncode != 0:
                 stderr = test_result.stderr.lower()
-                if 'driver does not support' in stderr or 'nvenc api version' in stderr:
-                    print("⚠️ NVENC gefunden, aber Treiber zu alt oder nicht kompatibel")
-                    print("   Hinweis: Aktualisieren Sie Ihren NVIDIA-Treiber auf Version 570.0+")
+                error_indicators = [
+                    'driver does not support',
+                    'nvenc api version',
+                    'cannot load',
+                    'no nvenc capable devices found',
+                    'no device available',
+                    'failed loading nvcuda.dll'
+                ]
+                if any(err in stderr for err in error_indicators):
+                    print("⚠️ NVENC gefunden, aber nicht funktionsfähig")
+                    print(f"   Fehler: {test_result.stderr[:200]}")
                     return False
-                # Andere Fehler ignorieren (könnten false positives sein)
 
             return True
 
@@ -231,8 +343,9 @@ class HardwareAccelerationDetector:
             return False
 
     def _check_qsv_available(self):
-        """Prüft ob Intel Quick Sync verfügbar ist"""
+        """Prüft ob Intel Quick Sync verfügbar ist und funktionsfähig"""
         try:
+            # Prüfe ob Encoder in FFmpeg verfügbar ist
             result = subprocess.run(
                 ['ffmpeg', '-hide_banner', '-encoders'],
                 capture_output=True,
@@ -240,7 +353,35 @@ class HardwareAccelerationDetector:
                 timeout=5,
                 creationflags=SUBPROCESS_CREATE_NO_WINDOW
             )
-            return 'h264_qsv' in result.stdout
+
+            if 'h264_qsv' not in result.stdout:
+                return False
+
+            # Zusätzlicher Test: Versuche tatsächlich den Encoder zu initialisieren
+            test_result = subprocess.run(
+                ['ffmpeg', '-f', 'lavfi', '-i', 'nullsrc=s=256x256:d=0.1',
+                 '-c:v', 'h264_qsv', '-f', 'null', '-'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=SUBPROCESS_CREATE_NO_WINDOW
+            )
+
+            # Prüfe auf Encoder-Fehler
+            if test_result.returncode != 0:
+                stderr = test_result.stderr.lower()
+                qsv_errors = [
+                    'failed to initialize',
+                    'no device found',
+                    'cannot load',
+                    'not available'
+                ]
+                if any(err in stderr for err in qsv_errors):
+                    print("⚠️ QSV Encoder gefunden, aber nicht funktionsfähig")
+                    return False
+
+            return True
+
         except:
             return False
 
@@ -262,6 +403,7 @@ class HardwareAccelerationDetector:
         """Prüft ob VAAPI (Linux) verfügbar ist"""
         try:
             # Prüfe ob /dev/dri/renderD128 existiert
+            import os
             if not os.path.exists('/dev/dri/renderD128'):
                 return False
 
@@ -269,8 +411,7 @@ class HardwareAccelerationDetector:
                 ['ffmpeg', '-hide_banner', '-encoders'],
                 capture_output=True,
                 text=True,
-                timeout=5,
-                creationflags=SUBPROCESS_CREATE_NO_WINDOW
+                timeout=5
             )
             return 'h264_vaapi' in result.stdout
         except:
@@ -354,4 +495,3 @@ class HardwareAccelerationDetector:
 
         hw_name = hw_names.get(hw_info['type'], hw_info['type'])
         return f"{hw_name} (Encoder: {hw_info['encoder']})"
-

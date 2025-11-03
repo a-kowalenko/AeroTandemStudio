@@ -588,9 +588,8 @@ class VideoPreview:
 
     def _reencode_single_clip(self, input_path, output_path):
         """
-        Neukodiert eine einzelne Videodatei auf 1080p@30fps. (Blockierend)
-        Fehlertolerantes Encoding für korrupte/beschädigte Videos.
-        OPTIMIERT für Geschwindigkeit mit Hardware-Beschleunigung wenn verfügbar.
+        Kodiert ein einzelnes Video neu auf das Ziel-Format.
+        WICHTIG: Blockiert während des Re-Encodings.
         """
         target_params = {
             'width': 1920, 'height': 1080, 'fps': 30, 'pix_fmt': 'yuv420p',
@@ -606,16 +605,44 @@ class VideoPreview:
         # FEHLERTOLERANZ: Ignoriere Dekodier-Fehler
         cmd.extend(["-err_detect", "ignore_err", "-fflags", "+genpts+igndts"])
 
-        # Hardware-Decoder wenn verfügbar (Input)
-        cmd.extend(encoding_params['input_params'])
+        # Hardware-spezifische Konfiguration
+        hw_info = self.hw_detector.detect_hardware()
+        hw_type = hw_info.get('type') if hw_info.get('available') else None
+        use_hw_filters = self.hw_accel_enabled and hw_type in ['intel', 'nvidia']
+
+        # WICHTIG: Bei QSV KEIN Hardware-Decoding verwenden, wenn Software-Filter benutzt werden
+        # Hardware-Decoding führt zu Pixel-Format-Inkompatibilität mit Software-Filtern
+        if self.hw_accel_enabled and not use_hw_filters:
+            # Deaktiviere Hardware-Decoding, behalte aber Hardware-Encoding
+            # Dies ist ein Kompromiss: Decoding in Software, Encoding in Hardware
+            pass
+        elif use_hw_filters and hw_type == 'intel':
+            # Bei Intel QSV: Hardware-Decoding NUR mit Hardware-Filtern
+            cmd.extend(["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"])
+        elif use_hw_filters and hw_type == 'nvidia':
+            # Bei NVIDIA: CUDA Hardware-Decoding
+            cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
+        # Für andere Hardware (AMD) oder wenn HW-Filter nicht verwendet werden: kein HW-Decoding
 
         # Input
         cmd.extend(["-i", input_path])
 
-        # Filter-Chain für Skalierung und FPS
-        cmd.extend([
-            "-vf", f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']}"
-        ])
+        # Filter-Chain basierend auf Hardware-Typ
+        if use_hw_filters and hw_type == 'intel':
+            # Intel Quick Sync: Verwende vpp_qsv (Video Processing Pipeline)
+            # vpp_qsv kann Skalierung, FPS-Konvertierung und Format-Konvertierung in Hardware machen
+            # WICHTIG: vpp_qsv erwartet framerate als Integer, nicht als Rational
+            filter_str = f"vpp_qsv=w={tp['width']}:h={tp['height']}:framerate={tp['fps']},hwdownload,format=nv12,format=yuv420p"
+            cmd.extend(["-vf", filter_str])
+        elif use_hw_filters and hw_type == 'nvidia':
+            # NVIDIA CUDA: Verwende scale_cuda
+            filter_str = f"scale_cuda={tp['width']}:{tp['height']},fps={tp['fps']},hwdownload,format=nv12,format=yuv420p"
+            cmd.extend(["-vf", filter_str])
+        else:
+            # Software-Filter (Standard)
+            cmd.extend([
+                "-vf", f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']}"
+            ])
 
         # Video-Encoder (Hardware oder Software)
         cmd.extend(encoding_params['output_params'])
@@ -632,6 +659,8 @@ class VideoPreview:
             # Bei Hardware-Encoding: Optimierte Qualitätseinstellungen
             # (preset und tune sind bereits in encoding_params enthalten)
             print(f"  → Nutze Hardware-Encoder: {encoding_params['encoder']}")
+            if use_hw_filters:
+                print(f"  → Nutze Hardware-Filter: {hw_type}")
 
         # Audio-Encoding
         cmd.extend([

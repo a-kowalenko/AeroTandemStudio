@@ -616,6 +616,30 @@ class VideoGeneratorApp:
         # Polling-Funktion starten
         self.root.after(100, self._check_analysis_result, video_paths)
 
+    def run_photo_qr_analysis(self, photo_path: str):
+        """
+        Startet QR-Code-Analyse für ein Foto in separatem Thread.
+        Verwendet das gleiche Loading Window wie bei Videos.
+        """
+        # Ladefenster anzeigen
+        self.loading_window = LoadingWindow(self.root, text="Analysiere QR-Code im Foto...")
+
+        # Queue erstellen für Ergebnis-Kommunikation
+        self.analysis_queue = queue.Queue()
+
+        print(f"QR-Analyse Foto: {os.path.basename(photo_path)}")
+
+        # Analyse-Thread starten
+        analysis_thread = threading.Thread(
+            target=self._run_photo_analysis_thread,
+            args=(photo_path, self.analysis_queue),
+            daemon=True
+        )
+        analysis_thread.start()
+
+        # Polling-Funktion starten
+        self.root.after(100, self._check_photo_analysis_result, photo_path)
+
     def _run_analysis_thread(self, video_path: str, result_queue: queue.Queue):
         """
         Diese Funktion läuft im separaten Thread.
@@ -629,6 +653,21 @@ class VideoGeneratorApp:
 
         except Exception as e:
             print(f"Fehler im Analyse-Thread: {e}")
+            result_queue.put(("error", e))
+
+    def _run_photo_analysis_thread(self, photo_path: str, result_queue: queue.Queue):
+        """
+        Diese Funktion läuft im separaten Thread für Foto-QR-Code-Analyse.
+        Sie führt die blockierende Analyse aus und legt das Ergebnis in die Queue.
+        """
+        try:
+            from src.video.qr_analyser import analysiere_foto
+
+            kunde, qr_scan_success = analysiere_foto(photo_path)
+            result_queue.put(("success", (kunde, qr_scan_success, photo_path)))
+
+        except Exception as e:
+            print(f"Fehler im Foto-Analyse-Thread: {e}")
             result_queue.put(("error", e))
 
     def _check_analysis_result(self, video_paths: List[str]):
@@ -669,6 +708,43 @@ class VideoGeneratorApp:
                 self.loading_window = None
             messagebox.showerror("Fehler", f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}")
             # Kein _restore_button_state - Preview läuft parallel!
+            self.form_fields.update_form_layout(False, None)
+
+    def _check_photo_analysis_result(self, photo_path: str):
+        """
+        Überprüft alle 100ms, ob ein Ergebnis der Foto-QR-Analyse in der Queue liegt.
+        Diese Funktion läuft im Haupt-Thread und kann die GUI sicher aktualisieren.
+        """
+        try:
+            # Versuchen, ein Ergebnis zu holen, ohne zu blockieren
+            status, result = self.analysis_queue.get_nowait()
+
+            # --- Ergebnis ist da ---
+
+            # 1. Ladefenster schließen
+            if self.loading_window:
+                self.loading_window.destroy()
+                self.loading_window = None
+
+            # 2. Ergebnis verarbeiten
+            if status == "success":
+                kunde, qr_scan_success, source_path = result
+                self._process_photo_analysis_result(kunde, qr_scan_success, source_path)
+            elif status == "error":
+                messagebox.showerror("Analyse-Fehler",
+                                     f"Ein unerwarteter Fehler bei der Foto-Analyse ist aufgetreten:\n{result}")
+                self.form_fields.update_form_layout(False, None)
+
+        except queue.Empty:
+            # Wenn die Queue leer ist, erneut in 100ms prüfen
+            self.root.after(100, self._check_photo_analysis_result, photo_path)
+
+        except Exception as e:
+            # Allgemeiner Fehler beim Abrufen
+            if self.loading_window:
+                self.loading_window.destroy()
+                self.loading_window = None
+            messagebox.showerror("Fehler", f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}")
             self.form_fields.update_form_layout(False, None)
 
     def _process_analysis_result(self, kunde, qr_scan_success, video_paths):
@@ -715,6 +791,34 @@ class VideoGeneratorApp:
             # Nur wenn Preview NICHT läuft, Button wiederherstellen
             if not (self.video_preview and self.video_preview.processing_thread):
                 self._restore_button_state()
+            self.form_fields.update_form_layout(False, None)
+
+    def _process_photo_analysis_result(self, kunde, qr_scan_success, photo_path):
+        """
+        Verarbeitet das erfolgreiche Foto-QR-Code-Analyseergebnis (im Haupt-Thread).
+        """
+        try:
+            if qr_scan_success and kunde:
+                print(f"QR-Code im Foto gescannt: Kunde ID {kunde.kunde_id}, Email: {kunde.email}, "
+                      f"Name: {kunde.vorname} {kunde.nachname}")
+
+                # Formular automatisch füllen
+                self.form_fields.update_form_layout(qr_scan_success, kunde)
+
+            elif qr_scan_success and not kunde:
+                messagebox.showwarning("Ungültiger QR-Code",
+                                      f"Ein QR-Code wurde im Foto erkannt, aber die Daten sind ungültig.")
+                self.form_fields.update_form_layout(False, None)
+
+            else:
+                messagebox.showwarning(
+                    "Kein QR-Code gefunden",
+                    f"Kein gültiger QR-Code im Foto gefunden:\n{os.path.basename(photo_path)}"
+                )
+                self.form_fields.update_form_layout(False, None)
+
+        except Exception as e:
+            print(f"Fehler in _process_photo_analysis_result: {e}")
             self.form_fields.update_form_layout(False, None)
 
     def erstelle_video(self):

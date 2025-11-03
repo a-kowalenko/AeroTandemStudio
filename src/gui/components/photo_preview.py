@@ -34,6 +34,8 @@ class PhotoPreview:
         self.thumbnail_canvas_window = None
         self.info_labels = {}
         self.delete_button = None
+        self.clear_selection_button = None
+        self.qr_scan_button = None
 
         # Drag-Scrolling-Variablen
         self.drag_start_x = 0
@@ -190,9 +192,15 @@ class PhotoPreview:
         self.info_labels["total_size"] = tk.Label(right_info_frame, text="0 MB", font=("Arial", 8), anchor="w")
         self.info_labels["total_size"].grid(row=2, column=1, sticky="w")
 
-        # Löschen-Button und "Auswahl aufheben" Button nebeneinander
+        # Löschen-Button, "Auswahl aufheben" und QR-Code-Scan Button
+        button_frame = tk.Frame(right_info_frame)
+        button_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        button_frame.columnconfigure(0, weight=1)
+        button_frame.columnconfigure(1, weight=1)
+        button_frame.columnconfigure(2, weight=0)  # QR-Button hat feste Breite
+
         self.delete_button = tk.Button(
-            right_info_frame,
+            button_frame,
             text="Ausgewähltes Foto löschen",
             command=self._delete_current_photo,
             bg="#f44336",
@@ -200,11 +208,11 @@ class PhotoPreview:
             font=("Arial", 9, "bold"),
             state="disabled"
         )
-        self.delete_button.grid(row=3, column=0, sticky="ew", pady=(10, 0), padx=(0, 5))
+        self.delete_button.grid(row=0, column=0, sticky="ew", padx=(0, 5))
 
         # "Auswahl aufheben" Button
         self.clear_selection_button = tk.Button(
-            right_info_frame,
+            button_frame,
             text="Auswahl aufheben",
             command=self._clear_all_selections,
             bg="#999999",
@@ -212,7 +220,20 @@ class PhotoPreview:
             font=("Arial", 9),
             state="disabled"
         )
-        self.clear_selection_button.grid(row=3, column=1, sticky="ew", pady=(10, 0), padx=(5, 0))
+        self.clear_selection_button.grid(row=0, column=1, sticky="ew", padx=(5, 5))
+
+        # QR-Code-Scan Button
+        self.qr_scan_button = tk.Button(
+            button_frame,
+            text="🔍",  # QR-Code ähnliches Symbol (Box mit Kreuz)
+            command=self._scan_current_photo_qr,
+            bg="#2196F3",
+            fg="white",
+            font=("Arial", 9),
+            width=3,
+            state="disabled"
+        )
+        self.qr_scan_button.grid(row=0, column=2, sticky="ew", padx=(5, 0))
 
     def set_photos(self, photo_paths):
         """Setzt die anzuzeigenden Fotos"""
@@ -947,7 +968,7 @@ class PhotoPreview:
         self.info_labels["total_size"].config(text=f"{total_size_mb:.2f} MB")
 
     def _update_delete_button(self):
-        """Aktualisiert den Status und Text des Löschen-Buttons und des Clear-Selection-Buttons"""
+        """Aktualisiert den Status und Text des Löschen-Buttons, Clear-Selection-Buttons und QR-Scan-Buttons"""
         # Bestimme welche Fotos als markiert gelten
         if self.explicitly_selected:
             effective_selection = self.selected_photos
@@ -970,6 +991,13 @@ class PhotoPreview:
         else:
             self.clear_selection_button.config(state="disabled")
 
+        # QR-Scan-Button aktivieren wenn genau EIN Foto angezeigt wird
+        # (auch wenn mehrere ausgewählt sind, wird nur das aktuelle gescannt)
+        if self.photo_paths and 0 <= self.current_photo_index < len(self.photo_paths):
+            self.qr_scan_button.config(state="normal")
+        else:
+            self.qr_scan_button.config(state="disabled")
+
     def _clear_all_selections(self):
         """Hebt alle expliziten Markierungen auf"""
         self.selected_photos.clear()
@@ -979,6 +1007,20 @@ class PhotoPreview:
 
         self._update_thumbnails()
         self._update_delete_button()
+
+    def _scan_current_photo_qr(self):
+        """Scannt das aktuelle Foto nach QR-Code"""
+        if self.current_photo_index < 0 or self.current_photo_index >= len(self.photo_paths):
+            return
+
+        photo_path = self.photo_paths[self.current_photo_index]
+
+        # Nutze die App-Methode mit Loading Window und Thread
+        if self.app and hasattr(self.app, 'run_photo_qr_analysis'):
+            self.app.run_photo_qr_analysis(photo_path)
+        else:
+            from tkinter import messagebox
+            messagebox.showerror("Fehler", "QR-Code-Scanner nicht verfügbar")
 
     def _delete_current_photo(self):
         """Löscht die aktuell ausgewählten Fotos (Mehrfachauswahl-fähig)"""

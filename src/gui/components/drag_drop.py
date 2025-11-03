@@ -1031,6 +1031,9 @@ class DragDropFrame:
                 context_menu.add_command(label="▶ Öffnen", command=lambda: self._open_file_with_default_app(photo_path))
                 context_menu.add_command(label="📁 Im Verzeichnis öffnen", command=lambda: self._open_in_directory(photo_path))
                 context_menu.add_separator()
+                context_menu.add_command(label="🔍 Auf QR-Code prüfen",
+                                         command=lambda: self._scan_photo_qr_code(photo_path))
+                context_menu.add_separator()
                 context_menu.add_command(label="✕ Löschen", command=lambda: self._delete_photo_from_context(index))
 
                 # Zeige Menü an Mausposition
@@ -1094,6 +1097,15 @@ class DragDropFrame:
                 self.photo_tree.selection_set(items[index])
             # Rufe normale Lösch-Funktion auf
             self.remove_selected_photo()
+
+    def _scan_photo_qr_code(self, photo_path):
+        """Scannt ein Foto nach QR-Code und füllt das Formular"""
+        # Nutze die App-Methode mit Loading Window und Thread
+        if self.app and hasattr(self.app, 'run_photo_qr_analysis'):
+            self.app.run_photo_qr_analysis(photo_path)
+        else:
+            from tkinter import messagebox
+            messagebox.showerror("Fehler", "QR-Code-Scanner nicht verfügbar")
 
     def _handle_video_table_drop(self, event):
         """Verarbeitet das Ablegen von Dateien in die Video-Tabelle"""

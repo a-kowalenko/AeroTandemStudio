@@ -958,21 +958,12 @@ class VideoPreview:
         # Hardware-spezifische Konfiguration
         hw_info = self.hw_detector.detect_hardware()
         hw_type = hw_info.get('type') if hw_info.get('available') else None
-        use_hw_filters = self.hw_accel_enabled and hw_type in ['intel', 'nvidia']
+        # NEU: use_hw_filters = False, weil wir Software-Filter für Aspect-Ratio nutzen
+        # Nur das Encoding läuft in Hardware, nicht die Filter
+        use_hw_filters = False  # Deaktiviert wegen Aspect-Ratio-Problemen
 
-        # WICHTIG: Bei QSV KEIN Hardware-Decoding verwenden, wenn Software-Filter benutzt werden
-        # Hardware-Decoding führt zu Pixel-Format-Inkompatibilität mit Software-Filtern
-        if self.hw_accel_enabled and not use_hw_filters:
-            # Deaktiviere Hardware-Decoding, behalte aber Hardware-Encoding
-            # Dies ist ein Kompromiss: Decoding in Software, Encoding in Hardware
-            pass
-        elif use_hw_filters and hw_type == 'intel':
-            # Bei Intel QSV: Hardware-Decoding NUR mit Hardware-Filtern
-            cmd.extend(["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"])
-        elif use_hw_filters and hw_type == 'nvidia':
-            # Bei NVIDIA: CUDA Hardware-Decoding
-            cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
-        # Für andere Hardware (AMD) oder wenn HW-Filter nicht verwendet werden: kein HW-Decoding
+        # Kein Hardware-Decoding, da wir Software-Filter verwenden
+        # Dies verhindert Pixel-Format-Inkompatibilitäten
 
         # Input
         cmd.extend(["-i", input_path])
@@ -980,13 +971,25 @@ class VideoPreview:
         # Filter-Chain basierend auf Hardware-Typ
         if use_hw_filters and hw_type == 'intel':
             # Intel Quick Sync: Verwende vpp_qsv (Video Processing Pipeline)
-            # vpp_qsv kann Skalierung, FPS-Konvertierung und Format-Konvertierung in Hardware machen
-            # WICHTIG: vpp_qsv erwartet framerate als Integer, nicht als Rational
-            filter_str = f"vpp_qsv=w={tp['width']}:h={tp['height']}:framerate={tp['fps']},hwdownload,format=nv12,format=yuv420p"
+            # WICHTIG: vpp_qsv hat KEIN force_original_aspect_ratio!
+            # Lösung: Erst mit Software-Scale auf richtige Größe MIT Aspect Ratio,
+            # dann mit vpp_qsv nur FPS-Konvertierung und Format
+            # Alternative: Nutze Software-Filter für Scaling, nur Hardware für Encoding
+            filter_str = (
+                f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
+                f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"fps={tp['fps']},format=nv12,hwupload=extra_hw_frames=64,format=qsv"
+            )
             cmd.extend(["-vf", filter_str])
         elif use_hw_filters and hw_type == 'nvidia':
-            # NVIDIA CUDA: Verwende scale_cuda
-            filter_str = f"scale_cuda={tp['width']}:{tp['height']},fps={tp['fps']},hwdownload,format=nv12,format=yuv420p"
+            # NVIDIA CUDA: scale_cuda unterstützt force_original_aspect_ratio nicht direkt
+            # Lösung: Berechne Scaling manuell oder nutze Software-Filter
+            # Für Konsistenz: Software-Scale + Hardware-Upload
+            filter_str = (
+                f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
+                f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"fps={tp['fps']},format=nv12,hwupload"
+            )
             cmd.extend(["-vf", filter_str])
         else:
             # Software-Filter (Standard)

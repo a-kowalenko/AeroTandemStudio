@@ -130,42 +130,74 @@ class VideoGeneratorApp:
         self.preview_notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         # Server-Upload Frame mit Status-Anzeige
+        # Neues Layout: Progress ganz rechts oben, darunter Checkboxen links und Button rechts
         self.upload_frame = tk.Frame(self.right_frame)
 
-        # Checkbox für Server-Upload
+        # Obere Zeile: Progress Handler ganz rechts
+        progress_row = tk.Frame(self.upload_frame)
+        progress_row.pack(fill="x", side="top")
+
+        # Progress Handler (wird hier initialisiert, aber später gepackt)
+        self.progress_handler = ProgressHandler(self.root, progress_row)
+
+        # Untere Zeile: Checkboxen links, Button rechts
+        controls_row = tk.Frame(self.upload_frame)
+        controls_row.pack(fill="x", side="top", pady=(5, 0))
+
+        # Linke Seite: Frame für Checkboxen (untereinander)
+        checkboxes_frame = tk.Frame(controls_row)
+        checkboxes_frame.pack(side="left", fill="both", expand=True)
+
+        # Erste Zeile: Server-Upload Checkbox und Status
+        upload_row = tk.Frame(checkboxes_frame)
+        upload_row.pack(fill="x", pady=(0, 3))
+
         self.upload_to_server_var = tk.BooleanVar()
         self.upload_checkbox = tk.Checkbutton(
-            self.upload_frame,
+            upload_row,
             text="Auf Server laden",
             variable=self.upload_to_server_var,
-            font=("Arial", 12),
+            font=("Arial", 11),
             command=self.on_upload_checkbox_toggle
         )
-        self.upload_checkbox.pack(side="left", padx=(0, 5))
+        self.upload_checkbox.pack(side="left")
 
         # Server Status Label
         self.server_status_label = tk.Label(
-            self.upload_frame,
+            upload_row,
             text="Prüfe...",
-            font=("Arial", 10, "bold"),
+            font=("Arial", 9, "bold"),
             fg="orange"
         )
-        self.server_status_label.pack(side="left")
+        self.server_status_label.pack(side="left", padx=(5, 0))
 
-        # Erstellen-Button
+        # Zweite Zeile: Auto-Clear Checkbox
+        autoclear_row = tk.Frame(checkboxes_frame)
+        autoclear_row.pack(fill="x")
+
+        self.auto_clear_files_var = tk.BooleanVar()
+        self.auto_clear_checkbox = tk.Checkbutton(
+            autoclear_row,
+            text="Nach Erstellen zurücksetzen",
+            variable=self.auto_clear_files_var,
+            font=("Arial", 11),
+            command=self._on_auto_clear_toggle
+        )
+        self.auto_clear_checkbox.pack(side="left")
+
+        # Rechte Seite: Erstellen-Button (kleiner, kompakter)
         self.erstellen_button = tk.Button(
-            self.right_frame,
+            controls_row,
             text="Erstellen",
-            font=("Arial", 14, "bold"),
+            font=("Arial", 12, "bold"),
             command=self.erstelle_video,
             bg="#4CAF50",
             fg="white",
-            width=20,
+            width=36,
             height=2
         )
+        self.erstellen_button.pack(side="right", padx=(10, 0))
 
-        # Progress Handler (unten über beiden Spalten)
-        self.progress_handler = ProgressHandler(self.root, self.upload_frame)
 
         self.pack_components()
         self.load_settings()
@@ -327,11 +359,13 @@ class VideoGeneratorApp:
         # Foto-Tab Inhalt packen
         self.photo_preview.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # Upload-Frame und Button bleiben außerhalb der Tabs
-        self.upload_frame.pack(pady=0, fill="x", side="top")
-        self.erstellen_button.pack(pady=10, fill="x", side="top")
+        # Upload-Frame (enthält jetzt Progress oben rechts, Checkboxen und Button)
+        self.upload_frame.pack(pady=5, fill="x", side="top")
 
-        # Progress unten
+        # Progress Bar NICHT hier packen - wird nur während Erstellung angezeigt
+        # self.progress_handler.pack_progress_bar_right()
+
+        # Status-Label ganz unten
         self.progress_handler.pack_status_label()
 
         # Initialer Focus: Wenn Video-Tab aktiv ist, kein Focus setzen
@@ -355,8 +389,10 @@ class VideoGeneratorApp:
         try:
             settings = self.config.get_settings()
             self.upload_to_server_var.set(settings.get("upload_to_server", False))
+            self.auto_clear_files_var.set(settings.get("auto_clear_files_after_creation", False))
         except:
             self.upload_to_server_var.set(False)
+            self.auto_clear_files_var.set(False)
 
     def test_server_connection_async(self):
         """Testet die Server-Verbindung asynchron"""
@@ -417,6 +453,17 @@ class VideoGeneratorApp:
             )
             # Starte erneuten Verbindungstest
             self.test_server_connection_async()
+
+    def _on_auto_clear_toggle(self):
+        """Wird aufgerufen wenn die Auto-Clear-Checkbox geändert wird"""
+        # Speichere die Einstellung in der Config
+        try:
+            settings = self.config.get_settings()
+            settings["auto_clear_files_after_creation"] = self.auto_clear_files_var.get()
+            self.config.save_settings(settings)
+            print(f"Auto-Clear Einstellung gespeichert: {self.auto_clear_files_var.get()}")
+        except Exception as e:
+            print(f"Fehler beim Speichern der Auto-Clear Einstellung: {e}")
 
     def ensure_dependencies(self):
         """Stellt sicher, dass FFmpeg installiert ist"""
@@ -972,6 +1019,11 @@ class VideoGeneratorApp:
         if status_type == "success":
             self.root.after(0, lambda: messagebox.showinfo("Fertig", message))
             self.root.after(0, self.progress_handler.set_status, "Status: Fertig.")
+
+            # NEU: Auto-Clear nach erfolgreichem Erstellen
+            if self.auto_clear_files_var.get():
+                self.root.after(0, self._clear_all_files_after_success)
+
         elif status_type == "error":
             self.root.after(0, lambda: messagebox.showerror("Fehler", message))
             self.root.after(0, self.progress_handler.set_status, "Status: Fehler aufgetreten.")
@@ -982,6 +1034,44 @@ class VideoGeneratorApp:
             return
 
         self.root.after(0, self._switch_to_create_mode)
+
+    def _clear_all_files_after_success(self):
+        """Löscht alle importierten Videos und Fotos nach erfolgreichem Erstellen"""
+        try:
+            print("🗑️ Auto-Clear: Lösche alle importierten Dateien...")
+
+            # Lösche alle Videos
+            if self.drag_drop.video_paths:
+                video_count = len(self.drag_drop.video_paths)
+                self.drag_drop.clear_videos()
+                print(f"   ✓ {video_count} Video(s) gelöscht")
+
+            # Lösche alle Fotos
+            if self.drag_drop.photo_paths:
+                photo_count = len(self.drag_drop.photo_paths)
+                self.drag_drop.clear_photos()
+                print(f"   ✓ {photo_count} Foto(s) gelöscht")
+
+            # Setze drop_label zurück
+            if hasattr(self, 'drag_drop') and self.drag_drop:
+                self.drag_drop.drop_label.config(
+                    text="Videos (.mp4) und Fotos (.jpg, .png) hierher ziehen",
+                    fg="black"
+                )
+                print(f"   ✓ Drop-Label zurückgesetzt")
+
+            # Aktualisiere Video Preview
+            if hasattr(self, 'video_preview') and self.video_preview:
+                self.video_preview.clear_preview()
+
+            # Aktualisiere Photo Preview
+            if hasattr(self, 'photo_preview') and self.photo_preview:
+                self.photo_preview.set_photos([])
+
+            print("✅ Auto-Clear abgeschlossen")
+
+        except Exception as e:
+            print(f"⚠️ Fehler beim Auto-Clear: {e}")
 
     def on_files_added(self, has_videos, has_photos):
         """Wird von DragDropFrame aufgerufen, um FormFields zu aktualisieren."""
@@ -1033,9 +1123,8 @@ class VideoGeneratorApp:
         # Aktiviere den Abbrechen-Button nach 500ms
         self.root.after(500, enable_cancel_button)
 
-        self.progress_handler.progress_bar.pack(side="right", padx=(0, 5), pady=5)
-        self.progress_handler.eta_label.pack(side="right", pady=5)
-
+        # Zeige Progress-Elemente rechts oben
+        self.progress_handler.pack_progress_bar_right()
         self.progress_handler.progress_bar['value'] = 0
 
     def _switch_to_create_mode(self):

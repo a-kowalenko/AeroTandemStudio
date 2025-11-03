@@ -24,6 +24,12 @@ class ProgressHandler:
         self.eta_label.pack(pady=2)
         self.encoding_details_label.pack(pady=2)  # NEU
 
+    def pack_progress_bar_right(self):
+        """Packt die Progress-Bar-Elemente rechts ausgerichtet"""
+        self.progress_bar.pack(side=tk.RIGHT, padx=(10, 0))
+        self.eta_label.pack(side=tk.RIGHT, padx=(5, 0))
+        self.encoding_details_label.pack(side=tk.RIGHT, padx=(5, 0))
+
     def pack_status_label(self):
         self.status_label.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
 
@@ -93,7 +99,10 @@ class ProgressHandler:
         self.progress_bar.pack_forget()
         self.eta_label.pack_forget()
         self.encoding_details_label.pack_forget()  # NEU
-        self.status_label.config(text="Status: Bereit.")
+        self.progress_bar['value'] = 0
+        self.eta_label.config(text="")
+        self.encoding_details_label.config(text="")  # NEU
 
     def set_status(self, text):
         self.status_label.config(text=text)
+

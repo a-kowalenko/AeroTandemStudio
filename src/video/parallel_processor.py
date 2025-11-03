@@ -4,7 +4,6 @@ Ermöglicht gleichzeitiges Encoding mehrerer Videos für bessere Performance auf
 """
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import os
 
 
 class ParallelVideoProcessor:
@@ -15,6 +14,7 @@ class ParallelVideoProcessor:
     - Mehrere Videos werden gleichzeitig enkodiert
     - Optimale Auslastung von Multi-Core-CPUs
     - Besonders effektiv bei Hardware-Beschleunigung
+    - Unterstützt Live-Fortschrittsanzeige für parallele Tasks
     """
 
     def __init__(self, hw_accel_enabled=False):
@@ -55,6 +55,9 @@ class ParallelVideoProcessor:
 
         Returns:
             Liste der Ergebnisse in der Reihenfolge der Fertigstellung
+
+        Note:
+            Die task_function sollte task_id als kwarg akzeptieren für Fortschritts-Tracking
         """
         results = []
 
@@ -62,7 +65,10 @@ class ParallelVideoProcessor:
             # Starte alle Tasks
             futures = {}
             for i, (task_func, args, kwargs) in enumerate(video_tasks):
-                future = executor.submit(task_func, *args, **kwargs)
+                # Füge task_id zu kwargs hinzu für Fortschritts-Tracking
+                kwargs_with_id = kwargs.copy()
+                kwargs_with_id['task_id'] = i + 1
+                future = executor.submit(task_func, *args, **kwargs_with_id)
                 futures[future] = i
 
             # Sammle Ergebnisse in der Reihenfolge ihrer Fertigstellung

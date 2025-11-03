@@ -24,6 +24,7 @@ class VideoPreview:
         self.app = app_instance
         self.frame = tk.Frame(parent)
         self.combined_video_path = None
+        self.encoding_progress_callback = None  # NEU: Callback für Live-Encoding-Fortschritt
 
         # Hardware-Beschleunigung initialisieren
         self.hw_detector = HardwareAccelerationDetector()
@@ -475,8 +476,8 @@ class VideoPreview:
             # Erstelle Tasks für parallele Verarbeitung
             tasks = []
             for i, original_path, source_path, copy_path, filename in videos_to_process:
-                def reencode_task(src=source_path, dst=copy_path):
-                    self._reencode_single_clip(src, dst)
+                def reencode_task(src=source_path, dst=copy_path, task_id=None):
+                    self._reencode_single_clip(src, dst, task_id)
                 tasks.append((reencode_task, (), {}))
 
             # Führe parallele Verarbeitung aus
@@ -694,7 +695,192 @@ class VideoPreview:
             print(f"    Konnte Thumbnail-Check nicht durchführen: {e}")
             return False  # Im Zweifelsfall ohne Thumbnail-Entfernung kopieren
 
-    def _reencode_single_clip(self, input_path, output_path):
+    def _run_ffmpeg_with_progress(self, command, total_duration=None, task_name="Encoding", task_id=None):
+        """
+        Führt FFmpeg-Befehl aus und liest den Fortschritt live aus.
+
+        WICHTIG: Nutzt separaten Thread für stderr um Deadlocks zu vermeiden.
+
+        Args:
+            command: FFmpeg-Befehl als Liste
+            total_duration: Gesamtdauer des Videos in Sekunden (für Fortschrittsberechnung)
+            task_name: Name der Aufgabe für Status-Updates
+            task_id: Optional ID für parallele Tasks
+
+        Returns:
+            True bei Erfolg, wirft Exception bei Fehler
+        """
+        # Füge Progress-Ausgabe zu FFmpeg-Befehl hinzu
+        progress_command = command.copy()
+        # Füge -progress pipe:1 vor dem Output-File ein (letztes Element)
+        output_file = progress_command[-1]
+        progress_command = progress_command[:-1] + ['-progress', 'pipe:1'] + [output_file]
+
+        # Starte FFmpeg-Prozess
+        process = subprocess.Popen(
+            progress_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1,  # Line buffered
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+        )
+
+        start_time = time.time()
+        last_update_time = start_time
+
+        # Lese Fortschritt aus stdout
+        current_time_sec = 0.0
+        fps = 0.0
+
+        # Sammle stderr in separatem Thread um Deadlock zu vermeiden
+        stderr_lines = []
+        def read_stderr():
+            try:
+                for line in process.stderr:
+                    stderr_lines.append(line)
+            except:
+                pass
+
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stderr_thread.start()
+
+        try:
+            while True:
+                self._check_for_cancellation()
+
+                # Non-blocking read mit Timeout
+                line = process.stdout.readline()
+                if not line:
+                    # Prüfe ob Prozess beendet ist
+                    if process.poll() is not None:
+                        break
+                    # Kurze Pause um CPU nicht zu belasten
+                    time.sleep(0.01)
+                    continue
+
+                line = line.strip()
+
+                # Parse FFmpeg Progress-Ausgabe
+                if line.startswith('out_time_ms='):
+                    try:
+                        time_ms_str = line.split('=')[1].strip()
+                        time_ms = int(time_ms_str)
+                        current_time_sec = time_ms / 1000000.0
+                    except (ValueError, IndexError):
+                        pass
+
+                elif line.startswith('fps='):
+                    fps_str = line.split('=')[1].strip()
+                    try:
+                        fps = float(fps_str)
+                    except ValueError:
+                        pass
+
+                # Update nur alle 0.5 Sekunden um UI nicht zu überlasten
+                current_update_time = time.time()
+                if current_update_time - last_update_time >= 0.5:
+                    last_update_time = current_update_time
+
+                    # Stelle sicher, dass total_duration ein numerischer Wert ist
+                    if total_duration is not None and isinstance(total_duration, (int, float)) and total_duration > 0:
+                        progress_percent = min((current_time_sec / total_duration) * 100, 100)
+
+                        # Berechne ETA
+                        elapsed_time = current_update_time - start_time
+                        if current_time_sec > 0 and elapsed_time > 0:
+                            encoding_speed = current_time_sec / elapsed_time
+                            remaining_time = (total_duration - current_time_sec) / encoding_speed if encoding_speed > 0 else 0
+
+                            # Formatiere ETA
+                            eta_minutes = int(remaining_time // 60)
+                            eta_seconds = int(remaining_time % 60)
+                            eta_str = f"{eta_minutes}:{eta_seconds:02d}"
+
+                            # Sende Update an UI (Thread-sicher)
+                            if self.progress_handler:
+                                self.parent.after(0, self.progress_handler.update_encoding_progress,
+                                                task_name, progress_percent, fps, eta_str,
+                                                current_time_sec, total_duration, task_id)
+                    else:
+                        # Kein total_duration - zeige nur Zeit und FPS
+                        if self.progress_handler:
+                            self.parent.after(0, self.progress_handler.update_encoding_progress,
+                                            task_name, None, fps, None,
+                                            current_time_sec, None, task_id)
+
+            # Warte auf Prozessende mit Timeout
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                print("⚠️ FFmpeg antwortet nicht - beende Prozess...")
+                process.kill()
+                process.wait()
+
+            # Warte auf stderr-Thread
+            stderr_thread.join(timeout=2)
+
+            # Prüfe Return Code
+            if process.returncode != 0:
+                stderr_output = ''.join(stderr_lines)
+                if self.cancellation_event.is_set():
+                    raise Exception("Encoding vom Benutzer abgebrochen.")
+
+                # Zeige nur relevante stderr-Zeilen (letzte 20)
+                stderr_relevant = '\n'.join(stderr_lines[-20:]) if stderr_lines else "Kein stderr verfügbar"
+                print(f"FFmpeg Fehler (Code {process.returncode}):")
+                print(stderr_relevant)
+                raise subprocess.CalledProcessError(process.returncode, command, stderr=stderr_output)
+
+            # Finale 100% Update (nur wenn total_duration gültig ist)
+            if self.progress_handler and total_duration is not None and isinstance(total_duration, (int, float)):
+                self.parent.after(0, self.progress_handler.update_encoding_progress,
+                                task_name, 100, fps, "0:00",
+                                total_duration, total_duration, task_id)
+
+            return True
+
+        except Exception as e:
+            # Beende FFmpeg-Prozess bei Fehler
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise
+
+    def _get_video_duration_seconds(self, video_path):
+        """
+        Ermittelt die Dauer eines Videos in Sekunden mit ffprobe.
+
+        Args:
+            video_path: Pfad zur Videodatei
+
+        Returns:
+            Dauer in Sekunden als float, oder None bei Fehler
+        """
+        try:
+            command = [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                video_path
+            ]
+            result = subprocess.run(command, capture_output=True, text=True,
+                                  timeout=10, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+            if result.returncode == 0 and result.stdout.strip():
+                duration_str = result.stdout.strip()
+                return float(duration_str)
+            else:
+                return None
+        except (ValueError, subprocess.TimeoutExpired) as e:
+            print(f"Warnung: Konnte Videodauer nicht ermitteln für {video_path}: {e}")
+            return None
+
+    def _reencode_single_clip(self, input_path, output_path, task_id=None):
         """
         Kodiert ein einzelnes Video neu auf das Ziel-Format.
         WICHTIG: Blockiert während des Re-Encodings.
@@ -790,122 +976,42 @@ class VideoPreview:
         hw_status = "HW-Beschleunigung" if self.hw_accel_enabled else "Software"
         print(f"Starte Re-Encoding ({hw_status}): {os.path.basename(input_path)} → 1080p@30fps")
 
-        # WICHTIG: Bei paralleler Verarbeitung NICHT self.ffmpeg_process verwenden!
-        # Das würde zu Race Conditions führen, wo Threads sich gegenseitig den Prozess überschreiben
-        # Verwende stattdessen eine lokale Variable
-        ffmpeg_process = subprocess.Popen(
-            cmd,
-            stderr=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            universal_newlines=True,
-            encoding='utf-8',
-            errors='replace',
-            creationflags=SUBPROCESS_CREATE_NO_WINDOW
-        )
+        # Hole Videodauer für Fortschrittsanzeige
+        total_duration = self._get_video_duration_seconds(input_path)
+        if total_duration is None:
+            print(f"Warnung: Konnte Videodauer nicht ermitteln - kein ETA verfügbar")
 
-        # Warte mit Timeout und hole Output
-        # communicate() liest automatisch und verhindert Pipe-Buffer-Overflow
+        # Task Name basierend auf task_id
+        task_name = f"Re-Encoding {os.path.basename(input_path)[:20]}"
+        if task_id:
+            task_name = f"[Task {task_id}] " + task_name
+
+        # Verwende neue Methode mit Live-Fortschritt
         try:
-            # Verwende einen Thread um Abbruch zu ermöglichen
-            import threading
+            self._run_ffmpeg_with_progress(cmd, total_duration, task_name, task_id)
+            print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+            return  # Erfolg!
+        except subprocess.CalledProcessError as e:
+            # Hole stderr aus dem Fehler
+            stderr_text = e.stderr if hasattr(e, 'stderr') else "Kein stderr verfügbar"
 
-            result_holder = {'stdout': None, 'stderr': None, 'done': False}
+            # ZUSÄTZLICHE ÜBERPRÜFUNG: Wenn Output-Datei existiert und vernünftige Größe hat,
+            # betrachte als Erfolg
+            output_exists = os.path.exists(output_path)
+            output_size = os.path.getsize(output_path) if output_exists else 0
+            output_valid = output_exists and output_size > 10240
 
-            def communicate_thread():
-                try:
-                    stdout, stderr = ffmpeg_process.communicate(timeout=300)  # 5 Min Timeout
-                    result_holder['stdout'] = stdout
-                    result_holder['stderr'] = stderr
-                    result_holder['done'] = True
-                except subprocess.TimeoutExpired:
-                    print("⚠️ FFmpeg Timeout (>5 Min), terminiere Prozess...")
-                    ffmpeg_process.kill()
-                    stdout, stderr = ffmpeg_process.communicate()
-                    result_holder['stdout'] = stdout
-                    result_holder['stderr'] = stderr
-                    result_holder['done'] = True
-                except Exception as e:
-                    print(f"❌ Fehler in communicate_thread: {e}")
-                    # Versuche trotzdem stderr zu holen
-                    try:
-                        if ffmpeg_process and ffmpeg_process.poll() is not None:
-                            # Prozess ist beendet, hole Output
-                            result_holder['stderr'] = ffmpeg_process.stderr.read() if ffmpeg_process.stderr else ""
-                            result_holder['stdout'] = ffmpeg_process.stdout.read() if ffmpeg_process.stdout else ""
-                    except:
-                        pass
-                    result_holder['done'] = True
-
-            comm_thread = threading.Thread(target=communicate_thread, daemon=True)
-            comm_thread.start()
-
-            # Warte auf Thread, aber prüfe Abbruch-Signal
-            while not result_holder['done']:
-                if self.cancellation_event.is_set():
-                    print(f"Abbruch-Signal empfangen. Terminiere FFmpeg für: {input_path}")
-                    ffmpeg_process.terminate()
-                    time.sleep(0.5)
-                    if ffmpeg_process.poll() is None:
-                        ffmpeg_process.kill()
-                    comm_thread.join(timeout=2)
-                    raise Exception("Neukodierung vom Benutzer abgebrochen.")
-                time.sleep(0.1)
-
-            comm_thread.join(timeout=1)
-
-        except Exception as e:
-            if "abgebrochen" in str(e):
-                raise
-            print(f"Fehler beim Warten auf FFmpeg: {e}")
-            if ffmpeg_process:
-                ffmpeg_process.kill()
-            raise
-
-        # Hole returncode sicher (kann None sein!)
-        returncode = ffmpeg_process.returncode if ffmpeg_process else -1
-
-        # Hole stderr aus dem result_holder
-        stderr_text = result_holder.get('stderr', '') or ''
-
-        # DEBUG: Zeige was wir haben
-        print(f"DEBUG: returncode={returncode}, stderr_length={len(stderr_text) if stderr_text else 0}")
-
-        # WICHTIG: returncode kann None sein, wenn der Prozess noch läuft oder ein Fehler auftrat
-        if returncode is None:
-            print(f"⚠️ WARNUNG: FFmpeg returncode ist None - Prozess möglicherweise nicht korrekt beendet")
-            returncode = -1  # Behandle als Fehler
-
-        # ZUSÄTZLICHE ÜBERPRÜFUNG: Wenn Output-Datei existiert und vernünftige Größe hat,
-        # betrachte als Erfolg, auch wenn returncode != 0
-        # (kann bei paralleler Verarbeitung durch Race Conditions passieren)
-        output_exists = os.path.exists(output_path)
-        output_size = os.path.getsize(output_path) if output_exists else 0
-
-        # Prüfe ob Output valid ist (>10 KB = mindestens ein paar Frames)
-        output_valid = output_exists and output_size > 10240
-
-        if returncode != 0:
-            # Prüfe ob trotz Fehlercode eine valide Ausgabe existiert
             if output_valid:
-                print(f"⚠️ FFmpeg beendet mit Code {returncode}, aber Output-Datei ist valid ({output_size} bytes)")
-                print(f"→ Betrachte als Erfolg (möglicherweise Race Condition bei paralleler Verarbeitung)")
+                print(f"⚠️ FFmpeg beendet mit Fehler, aber Output-Datei ist valid ({output_size} bytes)")
+                print(f"→ Betrachte als Erfolg")
                 print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
                 return  # Erfolg!
 
-            # Zeige die letzten Zeilen des stderr-Outputs für Debugging
-            if stderr_text and len(stderr_text) > 0:
-                last_lines = '\n'.join(stderr_text.split('\n')[-30:])
-            else:
-                last_lines = "⚠️ Kein stderr Output verfügbar - möglicherweise wurde communicate() nicht erfolgreich ausgeführt"
-
+            # Echter Fehler - zeige Details
             print(f"\n{'='*60}")
             print(f"FFmpeg Fehler bei: {os.path.basename(input_path)}")
             print(f"{'='*60}")
-            # Nur unsigned wenn returncode nicht None
-            unsigned_code = returncode & 0xFFFFFFFF if returncode is not None else "N/A"
-            print(f"Returncode: {returncode} (unsigned: {unsigned_code})")
-            print(f"\nLetzter FFmpeg Output:")
-            print(last_lines)
+            print(f"Fehler: {stderr_text[:500]}")  # Zeige ersten Teil
             print(f"{'='*60}\n")
 
             # WICHTIG: Prüfe auf Hardware-Encoder-Fehler und versuche Fallback
@@ -920,11 +1026,10 @@ class VideoPreview:
                     "Cannot load nvcuda.dll",
                     "amf encoder error",
                     "qsv encoder error",
-                    "Unable to parse option",           # AMD AMF: Parameter-Fehler
-                    "Error setting option",             # AMD AMF: Option ungültig
-                    "Undefined constant",               # AMD AMF: Ungültiger Wert
-                    "Error opening output file",        # Allgemein: Output-Fehler nach Encoder-Init
-                    "hwaccel initialisation returned error"  # Allgemein: HW-Accel Init fehlgeschlagen
+                    "Unable to parse option",
+                    "Error setting option",
+                    "Undefined constant",
+                    "hwaccel initialisation returned error"
                 ]
 
                 if any(indicator in stderr_text for indicator in hw_error_indicators):
@@ -937,55 +1042,20 @@ class VideoPreview:
 
                     try:
                         # Rekursiver Aufruf mit Software-Encoding
-                        self._reencode_single_clip(input_path, output_path)
+                        self._reencode_single_clip(input_path, output_path, task_id)
                         print(f"✅ Software-Encoding erfolgreich als Fallback")
-
-                        # Warnung für zukünftige Encodings
-                        print(f"⚠️ HINWEIS: Hardware-Beschleunigung fehlgeschlagen!")
-                        if "nvenc" in stderr_text and "driver" in stderr_text.lower():
-                            print(f"   → Bitte aktualisieren Sie Ihren NVIDIA-Treiber auf Version 570.0 oder neuer")
-                            print(f"   → Download: https://www.nvidia.com/download/index.aspx")
-                        elif "amf" in stderr_text.lower() or "h264_amf" in stderr_text:
-                            print(f"   → AMD AMF: Möglicherweise sind die FFmpeg AMF-Parameter nicht kompatibel")
-                            print(f"   → Oder: Aktualisieren Sie Ihren AMD-Treiber auf die neueste Version")
-                            print(f"   → Download: https://www.amd.com/en/support")
-                        elif "qsv" in stderr_text.lower():
-                            print(f"   → Intel Quick Sync: Stellen Sie sicher, dass QSV in Ihrem System aktiviert ist")
-                            print(f"   → Eventuell: Aktualisieren Sie Ihren Intel-Grafiktreiber")
-                        print(f"   → Die App verwendet nun Software-Encoding (langsamer, aber funktioniert)")
-
-                        return  # Erfolgreicher Fallback, beende Methode
-
-                    except Exception as fallback_error:
-                        print(f"❌ Auch Software-Encoding fehlgeschlagen: {fallback_error}")
-                        # Stelle ursprünglichen Zustand wieder her
-                        self.hw_accel_enabled = original_hw_state
-                        # Fahre mit normaler Fehlerbehandlung fort
+                        return  # Erfolgreicher Fallback
                     finally:
-                        # Stelle ursprünglichen Zustand wieder her für nächstes Video
+                        # Stelle Hardware-Zustand wieder her
                         self.hw_accel_enabled = original_hw_state
 
-            # Gebe detaillierte Fehlermeldung
-            error_msg = f"FFmpeg-Fehler (Code {returncode}) bei der Neukodierung von {input_path}"
-
-            # Analysiere Fehler
-            if stderr_text:
-                if "Invalid" in stderr_text or "does not contain" in stderr_text:
-                    error_msg += "\n→ Mögliches Problem: Video-/Audio-Stream fehlt oder ist ungültig"
-                elif "Conversion failed" in stderr_text:
-                    error_msg += "\n→ Mögliches Problem: Filter-Chain oder Codec-Fehler"
-                elif "No such filter" in stderr_text:
-                    error_msg += "\n→ Mögliches Problem: FFmpeg-Filter nicht verfügbar"
-                elif "height not divisible" in stderr_text or "width not divisible" in stderr_text:
-                    error_msg += "\n→ Mögliches Problem: Auflösung nicht durch 2 teilbar"
-                elif "Unknown encoder" in stderr_text:
-                    error_msg += "\n→ Mögliches Problem: Codec nicht verfügbar in dieser FFmpeg-Build"
-            else:
-                error_msg += "\n→ Kein FFmpeg-Output verfügbar (Pipe-Problem?)"
-
-            raise Exception(error_msg)
-
-        print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+            # Kein Fallback möglich - werfe Fehler
+            raise Exception(f"Re-Encoding fehlgeschlagen: {os.path.basename(input_path)}")
+        except Exception as e:
+            if "abgebrochen" in str(e) or "abort" in str(e).lower():
+                raise  # Nutzer-Abbruch weiterreichen
+            print(f"Fehler beim Re-Encoding: {e}")
+            raise
 
     def _create_combined_preview(self, video_paths):
         """

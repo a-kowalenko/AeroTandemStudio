@@ -37,7 +37,6 @@ class CircularSpinner:
             {'extent': 160, 'width': self.line_width - 3, 'color': self.base_color},
         ]
 
-        center = self.size / 2
         radius = (self.size - self.line_width) / 2
 
         for layer in gradient_layers:

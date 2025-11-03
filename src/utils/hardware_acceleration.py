@@ -106,6 +106,7 @@ class HardwareAccelerationDetector:
             if result.returncode == 0 and 'GPU' in result.stdout:
                 return True
         except (FileNotFoundError, subprocess.TimeoutExpired):
+            # nvidia-smi not found or timed out: expected if no NVIDIA GPU or driver; try next detection method
             pass
 
         # Methode 2: WMIC verwenden (Windows Management Instrumentation)
@@ -141,6 +142,7 @@ class HardwareAccelerationDetector:
                 if 'amd' in output or 'radeon' in output or 'ati' in output:
                     return True
         except (FileNotFoundError, subprocess.TimeoutExpired):
+            # If WMIC is not available or times out, assume AMD GPU is not present.
             pass
 
         return False
@@ -160,6 +162,7 @@ class HardwareAccelerationDetector:
                 if 'intel' in output or 'uhd graphics' in output or 'iris' in output or 'hd graphics' in output:
                     return True
         except (FileNotFoundError, subprocess.TimeoutExpired):
+            # If WMIC is not available or times out, assume no Intel GPU is present.
             pass
 
         return False
@@ -241,6 +244,8 @@ class HardwareAccelerationDetector:
                 if 'nvidia' in output and ('vga' in output or '3d' in output):
                     return True
         except (FileNotFoundError, subprocess.TimeoutExpired):
+            # It's safe to ignore these exceptions: if lspci is not available or times out,
+            # we simply assume no NVIDIA GPU is present and return False.
             pass
 
         return False
@@ -339,7 +344,7 @@ class HardwareAccelerationDetector:
 
             return True
 
-        except:
+        except Exception:
             return False
 
     def _check_qsv_available(self):
@@ -396,7 +401,7 @@ class HardwareAccelerationDetector:
                 creationflags=SUBPROCESS_CREATE_NO_WINDOW
             )
             return 'h264_videotoolbox' in result.stdout
-        except:
+        except Exception:
             return False
 
     def _check_vaapi_available(self):
@@ -414,7 +419,7 @@ class HardwareAccelerationDetector:
                 timeout=5
             )
             return 'h264_vaapi' in result.stdout
-        except:
+        except Exception:
             return False
 
     def get_encoding_params(self, codec='h264', enable_hw_accel=True):

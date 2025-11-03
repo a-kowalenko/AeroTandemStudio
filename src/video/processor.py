@@ -7,7 +7,6 @@ import subprocess
 from dataclasses import asdict, is_dataclass
 from datetime import date
 import multiprocessing
-import re
 import time
 
 from .logger import CancellableProgressBarLogger, CancellationError
@@ -965,7 +964,8 @@ class VideoProcessor:
             try:
                 for line in process.stderr:
                     stderr_lines.append(line)
-            except:
+            except Exception:
+                # Ignore exceptions (e.g., when process terminates and closes the pipe)
                 pass
 
         stderr_thread = threading.Thread(target=read_stderr, daemon=True)
@@ -1001,6 +1001,7 @@ class VideoProcessor:
                     try:
                         fps = float(fps_str)
                     except ValueError:
+                        # Ignore malformed fps values; continue processing.
                         pass
 
                 # Update nur alle 0.5 Sekunden um UI nicht zu überlasten
@@ -1102,7 +1103,5 @@ class VideoProcessor:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-            raise
-            process.terminate()
             raise
 

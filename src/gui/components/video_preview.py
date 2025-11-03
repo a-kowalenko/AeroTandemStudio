@@ -794,9 +794,13 @@ class VideoPreview:
             try:
                 for line in process.stderr:
                     stderr_lines.append(line)
-            except:
+            except Exception as ex:
+                # It's possible for the pipe to close unexpectedly if the process ends.
+                # We ignore these errors to avoid crashing the background thread.
+                # If needed, log unexpected exceptions for debugging.
+                # import logging
+                # logging.exception("Exception in read_stderr thread")
                 pass
-
         stderr_thread = threading.Thread(target=read_stderr, daemon=True)
         stderr_thread.start()
 
@@ -823,6 +827,7 @@ class VideoPreview:
                         time_ms = int(time_ms_str)
                         current_time_sec = time_ms / 1000000.0
                     except (ValueError, IndexError):
+                        # Ignore malformed FFmpeg progress lines; these are expected occasionally.
                         pass
 
                 elif line.startswith('fps='):
@@ -830,6 +835,7 @@ class VideoPreview:
                     try:
                         fps = float(fps_str)
                     except ValueError:
+                        # Ignore malformed fps values; not critical for progress update
                         pass
 
                 # Update nur alle 0.5 Sekunden um UI nicht zu überlasten
@@ -1525,7 +1531,7 @@ class VideoPreview:
                     try:
                         total_duration_s += float(metadata.get("duration_sec_str", "0.0"))
                         total_bytes += metadata.get("size_bytes", 0)
-                    except:
+                    except Exception:
                         pass  # Ignoriere fehlerhafte Cache-Einträge
 
         minutes, seconds = divmod(total_duration_s, 60)
@@ -1666,7 +1672,7 @@ class VideoPreview:
                     try:
                         total_duration_s += float(metadata.get("duration_sec_str", "0.0"))
                         total_bytes += metadata.get("size_bytes", 0)
-                    except:
+                    except Exception:
                         pass
 
         minutes, seconds = divmod(total_duration_s, 60)

@@ -20,7 +20,7 @@ class SettingsDialog:
         """Zeigt den Einstellungs-Dialog"""
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("Einstellungen")
-        self.dialog.geometry("550x580")  # Größe angepasst
+        self.dialog.geometry("550x650")  # Größe angepasst
         self.dialog.resizable(False, False)
         self.dialog.transient(self.parent)
 
@@ -66,7 +66,7 @@ class SettingsDialog:
         parent_height = self.parent.winfo_height()
 
         # Dialog-Dimensionen (fest definiert)
-        w, h = 550, 580
+        w, h = 550, 650
 
         x = parent_x + (parent_width - w) // 2
         y = parent_y + (parent_height - h) // 2

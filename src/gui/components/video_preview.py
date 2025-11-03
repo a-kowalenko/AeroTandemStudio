@@ -1517,13 +1517,16 @@ class VideoPreview:
 
         # Gehe über die *Originalpfade*, um den Cache zu lesen
         for original_path in self.last_video_paths:
-            metadata = self.metadata_cache.get(original_path)
-            if metadata:
-                try:
-                    total_duration_s += float(metadata.get("duration_sec_str", "0.0"))
-                    total_bytes += metadata.get("size_bytes", 0)
-                except:
-                    pass  # Ignoriere fehlerhafte Cache-Einträge
+            # BUGFIX: Verwende file_identity als Cache-Key, nicht den Pfad direkt
+            file_identity = self._get_file_identity(original_path)
+            if file_identity:
+                metadata = self.metadata_cache.get(file_identity)
+                if metadata:
+                    try:
+                        total_duration_s += float(metadata.get("duration_sec_str", "0.0"))
+                        total_bytes += metadata.get("size_bytes", 0)
+                    except:
+                        pass  # Ignoriere fehlerhafte Cache-Einträge
 
         minutes, seconds = divmod(total_duration_s, 60)
         total_duration = f"{int(minutes):02d}:{int(seconds):02d}"
@@ -1655,13 +1658,16 @@ class VideoPreview:
         total_bytes = 0
 
         for original_path in self.last_video_paths: # self.last_video_paths wurde aktualisiert
-            metadata = self.metadata_cache.get(original_path)
-            if metadata:
-                try:
-                    total_duration_s += float(metadata.get("duration_sec_str", "0.0"))
-                    total_bytes += metadata.get("size_bytes", 0)
-                except:
-                    pass
+            # BUGFIX: Verwende file_identity als Cache-Key, nicht den Pfad direkt
+            file_identity = self._get_file_identity(original_path)
+            if file_identity:
+                metadata = self.metadata_cache.get(file_identity)
+                if metadata:
+                    try:
+                        total_duration_s += float(metadata.get("duration_sec_str", "0.0"))
+                        total_bytes += metadata.get("size_bytes", 0)
+                    except:
+                        pass
 
         minutes, seconds = divmod(total_duration_s, 60)
         total_duration = f"{int(minutes):02d}:{int(seconds):02d}"

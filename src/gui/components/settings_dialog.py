@@ -41,6 +41,8 @@ class SettingsDialog:
         self.sd_auto_import_var = tk.BooleanVar()
         # Variable für Hardware-Beschleunigung
         self.hardware_acceleration_var = tk.BooleanVar()
+        # Variable für Paralleles Processing
+        self.parallel_processing_var = tk.BooleanVar()
 
         self.create_widgets()
         self.load_settings()
@@ -280,6 +282,35 @@ class SettingsDialog:
         # Flag für laufende Hardware-Erkennung
         self.hw_detection_running = False
 
+        # --- Paralleles Processing ---
+        # Separator-Linie
+        separator = ttk.Separator(advanced_frame, orient='horizontal')
+        separator.grid(row=2, column=0, sticky="ew", pady=10)
+
+        # Paralleles Processing Container
+        parallel_container = tk.Frame(advanced_frame)
+        parallel_container.grid(row=3, column=0, sticky="w", padx=5, pady=5)
+
+        # Paralleles Processing Checkbox
+        self.parallel_processing_checkbox = tk.Checkbutton(
+            parallel_container,
+            text="Paralleles Video-Processing aktivieren (Multi-Core)",
+            variable=self.parallel_processing_var,
+            font=("Arial", 10),
+            command=self.on_parallel_processing_toggle
+        )
+        self.parallel_processing_checkbox.pack(side="left")
+
+        # Info-Label für paralleles Processing
+        self.parallel_info_label = tk.Label(
+            advanced_frame,
+            text="Paralleles Processing wird beim Laden konfiguriert",
+            font=("Arial", 9),
+            fg="gray",
+            anchor="w"
+        )
+        self.parallel_info_label.grid(row=4, column=0, sticky="w", padx=20, pady=(0, 5))
+
     def on_hw_accel_toggle(self):
         """Wird aufgerufen wenn die Hardware-Beschleunigung Checkbox geändert wird"""
         is_enabled = self.hardware_acceleration_var.get()
@@ -319,6 +350,10 @@ class SettingsDialog:
             self.hw_info_label.config(text="Hardware-Beschleunigung deaktiviert (Software-Encoding)", fg="gray")
             self.hw_detection_running = False
 
+            # Aktualisiere auch die Paralleles Processing Info, falls aktiviert
+            if self.parallel_processing_var.get():
+                self._update_parallel_processing_info()
+
     def _update_hw_info_success(self, hw_info_text):
         """Aktualisiert die Hardware-Info nach erfolgreicher Erkennung (im Haupt-Thread)"""
         self.hw_spinner.stop()
@@ -326,12 +361,20 @@ class SettingsDialog:
         self.hw_info_label.config(text=f"✓ {hw_info_text}", fg="green")
         self.hw_detection_running = False
 
+        # Aktualisiere auch die Paralleles Processing Info, falls aktiviert
+        if self.parallel_processing_var.get():
+            self._update_parallel_processing_info()
+
     def _update_hw_info_error(self, error_msg):
         """Aktualisiert die Hardware-Info bei Fehler (im Haupt-Thread)"""
         self.hw_spinner.stop()
         self.hw_spinner.pack_forget()
         self.hw_info_label.config(text=f"⚠ Fehler bei Hardware-Erkennung: {error_msg}", fg="orange")
         self.hw_detection_running = False
+
+        # Aktualisiere auch die Paralleles Processing Info, falls aktiviert
+        if self.parallel_processing_var.get():
+            self._update_parallel_processing_info()
 
     def on_auto_backup_toggle(self):
         """Wird aufgerufen wenn die Auto-Backup Checkbox geändert wird"""
@@ -347,6 +390,43 @@ class SettingsDialog:
             self.sd_auto_import_checkbox.grid_forget()
             self.sd_clear_var.set(False)
             self.sd_auto_import_var.set(False)
+
+    def on_parallel_processing_toggle(self):
+        """Wird aufgerufen wenn die Paralleles Processing Checkbox geändert wird"""
+        is_enabled = self.parallel_processing_var.get()
+
+        if is_enabled:
+            self._update_parallel_processing_info()
+        else:
+            self.parallel_info_label.config(text="Paralleles Processing deaktiviert (sequenziell)", fg="gray")
+
+    def _update_parallel_processing_info(self):
+        """Aktualisiert die Paralleles Processing Info basierend auf aktuellen Einstellungen"""
+        # Zeige CPU-Info und optimale Worker-Anzahl
+        import threading
+        def detect_cpu_info_async():
+            try:
+                import multiprocessing
+                cpu_count = multiprocessing.cpu_count()
+
+                # Hole Hardware-Beschleunigung Status für Worker-Berechnung
+                hw_accel_enabled = self.hardware_acceleration_var.get()
+
+                if hw_accel_enabled:
+                    workers = min(cpu_count, 4)
+                    info_text = f"✓ {workers} Worker-Threads (Hardware-Encoding, {cpu_count} CPU-Kerne)"
+                else:
+                    workers = max(1, cpu_count // 2)
+                    info_text = f"✓ {workers} Worker-Threads (Software-Encoding, {cpu_count} CPU-Kerne)"
+
+                # Aktualisiere UI im Haupt-Thread
+                self.dialog.after(0, lambda: self.parallel_info_label.config(text=info_text, fg="green"))
+            except Exception as e:
+                error_text = f"⚠ Fehler bei CPU-Erkennung: {str(e)}"
+                self.dialog.after(0, lambda: self.parallel_info_label.config(text=error_text, fg="orange"))
+
+        # Starte Thread
+        threading.Thread(target=detect_cpu_info_async, daemon=True).start()
 
     def create_server_tab(self):
         """Erstellt den Tab 'Server'"""
@@ -465,11 +545,17 @@ class SettingsDialog:
         # Hardware-Beschleunigung
         self.hardware_acceleration_var.set(settings.get("hardware_acceleration_enabled", True))
 
+        # Paralleles Processing
+        self.parallel_processing_var.set(settings.get("parallel_processing_enabled", True))
+
         # Trigger checkbox visibility based on auto_backup setting
         self.on_auto_backup_toggle()
 
         # Trigger hardware info update
         self.on_hw_accel_toggle()
+
+        # Trigger parallel processing info update
+        self.on_parallel_processing_toggle()
 
     def save_settings(self):
         """Speichert die Einstellungen"""
@@ -489,6 +575,9 @@ class SettingsDialog:
 
         # Hardware-Beschleunigung
         hardware_acceleration_enabled = self.hardware_acceleration_var.get()
+
+        # Paralleles Processing
+        parallel_processing_enabled = self.parallel_processing_var.get()
 
         if not server_url:
             messagebox.showwarning("Fehler", "Bitte geben Sie eine Server-Adresse ein.", parent=self.dialog)
@@ -524,6 +613,9 @@ class SettingsDialog:
 
             # Hardware-Beschleunigung
             current_settings["hardware_acceleration_enabled"] = hardware_acceleration_enabled
+
+            # Paralleles Processing
+            current_settings["parallel_processing_enabled"] = parallel_processing_enabled
 
             # Speichern
             self.config.save_settings(current_settings)

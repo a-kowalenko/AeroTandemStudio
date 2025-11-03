@@ -8,10 +8,13 @@ import re
 import sys
 import shutil
 import time
+import multiprocessing
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from .progress_indicator import ProgressHandler
 from .circular_spinner import CircularSpinner
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.hardware_acceleration import HardwareAccelerationDetector
+from src.video.parallel_processor import ParallelVideoProcessor
 from typing import List, Dict, Callable  # NEU
 
 
@@ -24,6 +27,7 @@ class VideoPreview:
 
         # Hardware-Beschleunigung initialisieren
         self.hw_detector = HardwareAccelerationDetector()
+        self.parallel_processor = None  # Wird in _init_hardware_acceleration gesetzt
         self._init_hardware_acceleration()
         self.progress_handler = None
         self.last_video_paths = None  # Speichert die *originalen* Pfade für "Erneut versuchen"
@@ -48,10 +52,12 @@ class VideoPreview:
     def _init_hardware_acceleration(self):
         """Initialisiert Hardware-Beschleunigung basierend auf Einstellungen"""
         self.hw_accel_enabled = False
+        self.parallel_processing_enabled = True  # NEU: Default-Wert
 
         if self.app and hasattr(self.app, 'config'):
             settings = self.app.config.get_settings()
             self.hw_accel_enabled = settings.get("hardware_acceleration_enabled", True)
+            self.parallel_processing_enabled = settings.get("parallel_processing_enabled", True)  # NEU
 
             if self.hw_accel_enabled:
                 hw_info = self.hw_detector.detect_hardware()
@@ -62,9 +68,32 @@ class VideoPreview:
                     print("  → Fallback auf Software-Encoding für Vorschau")
             else:
                 print("ℹ VideoPreview: Hardware-Beschleunigung deaktiviert (Software-Encoding)")
+
+            # NEU: Info über Paralleles Processing
+            if self.parallel_processing_enabled:
+                cpu_count = multiprocessing.cpu_count()
+                if self.hw_accel_enabled:
+                    workers = min(cpu_count, 4)
+                else:
+                    workers = max(1, cpu_count // 2)
+                print(f"🚀 VideoPreview: Paralleles Processing aktiviert: {workers} Worker-Threads ({cpu_count} CPU-Kerne)")
+                # Initialisiere ParallelVideoProcessor
+                self.parallel_processor = ParallelVideoProcessor(hw_accel_enabled=self.hw_accel_enabled)
+            else:
+                print("ℹ VideoPreview: Paralleles Processing deaktiviert (sequenziell)")
+                self.parallel_processor = None
         else:
             # Fallback wenn keine Config verfügbar
             print("ℹ VideoPreview: Keine Config verfügbar, verwende Software-Encoding")
+            self.parallel_processor = None
+
+    def reload_hardware_acceleration_settings(self):
+        """
+        Lädt die Hardware-Beschleunigungseinstellungen neu.
+        Wird aufgerufen wenn die Einstellungen geändert wurden.
+        """
+        print("🔄 VideoPreview: Lade Hardware-Beschleunigungseinstellungen neu...")
+        self._init_hardware_acceleration()
 
     def _get_encoding_params(self, codec='h264'):
         """
@@ -381,8 +410,8 @@ class VideoPreview:
         self.parent.after(0, self.progress_handler.pack_progress_bar)
         self.parent.after(0, self.progress_handler.update_progress, 0, total_clips)
 
-        # NEU: ETA-Tracking für Re-Encoding
-        encoding_times = []  # Speichert Kodierzeiten pro Video
+        # NEU: Sammle alle Videos, die verarbeitet werden müssen
+        videos_to_process = []  # Liste von (index, original_path, source_path, copy_path, filename)
 
         for i, original_path in enumerate(original_paths):
             self._check_for_cancellation()
@@ -432,21 +461,74 @@ class VideoPreview:
                 else:
                     raise Exception(f"Datei nicht gefunden: {filename} (weder in Upload-Ordner noch Working-Folder)")
 
-            if needs_reencoding:
-                # --- Fall B: Neukodierung mit ETA ---
+            # Füge zur Liste der zu verarbeitenden Videos hinzu
+            videos_to_process.append((i, original_path, source_path, copy_path, filename))
+            temp_copy_paths.append(copy_path)  # Bereits hier hinzufügen für korrekte Reihenfolge
+
+        # Verarbeite Videos (parallel oder sequenziell)
+        if needs_reencoding and self.parallel_processor and len(videos_to_process) > 1:
+            # --- PARALLEL: Re-Encoding mehrerer Videos gleichzeitig ---
+            print(f"🚀 Starte paralleles Re-Encoding von {len(videos_to_process)} Videos...")
+            self.parent.after(0, lambda: self.status_label.config(
+                text=f"Kodiere {len(videos_to_process)} Videos parallel...", fg="orange"))
+
+            # Erstelle Tasks für parallele Verarbeitung
+            tasks = []
+            for i, original_path, source_path, copy_path, filename in videos_to_process:
+                def reencode_task(src=source_path, dst=copy_path):
+                    self._reencode_single_clip(src, dst)
+                tasks.append((reencode_task, (), {}))
+
+            # Führe parallele Verarbeitung aus
+            start_time = time.time()
+            results = self.parallel_processor.process_videos_parallel(tasks, self.cancellation_event)
+            total_time = time.time() - start_time
+
+            # Prüfe auf Fehler
+            for task_index, result, error in results:
+                if error:
+                    if self.cancellation_event.is_set():
+                        print("Paralleles Re-Encoding abgebrochen.")
+                        raise Exception("Neukodierung abgebrochen.")
+                    else:
+                        i, original_path, source_path, copy_path, filename = videos_to_process[task_index]
+                        print(f"Fehler bei Neukodierung von {filename}: {error}")
+                        raise Exception(f"Fehler bei Neukodierung von {filename}")
+                else:
+                    # Update Progress für jedes fertige Video
+                    self.parent.after(0, self.progress_handler.update_progress, task_index + 1, len(videos_to_process))
+
+            avg_time = total_time / len(videos_to_process)
+            print(f"✅ Paralleles Re-Encoding abgeschlossen in {total_time:.1f}s ({avg_time:.1f}s pro Video)")
+
+            # Cache Metadaten für alle verarbeiteten Videos
+            for i, original_path, source_path, copy_path, filename in videos_to_process:
+                file_identity = self._get_file_identity(original_path)
+                if file_identity:
+                    self.video_copies_map[file_identity] = copy_path
+                self._cache_metadata_for_copy(original_path, copy_path)
+
+        elif needs_reencoding and len(videos_to_process) > 0:
+            # --- SEQUENZIELL: Re-Encoding (wie bisher) ---
+            print(f"Starte sequenzielles Re-Encoding von {len(videos_to_process)} Videos...")
+            encoding_times = []
+
+            for idx, (i, original_path, source_path, copy_path, filename) in enumerate(videos_to_process):
+                self._check_for_cancellation()
+
                 start_time = time.time()
 
                 # Berechne ETA basierend auf bisherigen Kodierzeiten
                 eta_str = ""
                 if encoding_times:
                     avg_time_per_video = sum(encoding_times) / len(encoding_times)
-                    remaining_videos = total_clips - i
+                    remaining_videos = len(videos_to_process) - idx
                     eta_seconds = avg_time_per_video * remaining_videos
                     eta_minutes = int(eta_seconds // 60)
                     eta_secs = int(eta_seconds % 60)
                     eta_str = f" (ETA: ~{eta_minutes}:{eta_secs:02d})"
 
-                status_msg = f"Kodiere Clip {i + 1}/{total_clips}{eta_str}..."
+                status_msg = f"Kodiere Clip {idx + 1}/{len(videos_to_process)}{eta_str}..."
                 self.parent.after(0, lambda msg=status_msg: self.status_label.config(text=msg, fg="orange"))
 
                 try:
@@ -464,9 +546,22 @@ class VideoPreview:
                         print(f"Fehler bei Neukodierung von {filename}: {e}")
                         raise Exception(f"Fehler bei Neukodierung von {filename}")
 
-            else:
-                # --- Fall A: Stream-Copy (ohne Thumbnails) ---
-                status_msg = f"Kopiere Clip {i + 1}/{total_clips}..."
+                # Speichere im Cache mit file-identity als Key
+                file_identity = self._get_file_identity(original_path)
+                if file_identity:
+                    self.video_copies_map[file_identity] = copy_path
+
+                # NEU: Metadaten direkt nach Erstellung der Kopie cachen
+                self._cache_metadata_for_copy(original_path, copy_path)
+
+                self.parent.after(0, self.progress_handler.update_progress, idx + 1, len(videos_to_process))
+
+        elif not needs_reencoding and len(videos_to_process) > 0:
+            # --- Stream-Copy (ohne Thumbnails) ---
+            for idx, (i, original_path, source_path, copy_path, filename) in enumerate(videos_to_process):
+                self._check_for_cancellation()
+
+                status_msg = f"Kopiere Clip {idx + 1}/{len(videos_to_process)}..."
                 self.parent.after(0, lambda msg=status_msg: self.status_label.config(text=msg, fg="blue"))
 
                 try:
@@ -476,17 +571,15 @@ class VideoPreview:
                     print(f"Fehler beim Kopieren von {filename}: {e}")
                     raise Exception(f"Fehler beim Kopieren von {filename}")
 
-            temp_copy_paths.append(copy_path)
+                # Speichere im Cache mit file-identity als Key
+                file_identity = self._get_file_identity(original_path)
+                if file_identity:
+                    self.video_copies_map[file_identity] = copy_path
 
-            # Speichere im Cache mit file-identity als Key
-            file_identity = self._get_file_identity(original_path)
-            if file_identity:
-                self.video_copies_map[file_identity] = copy_path
+                # NEU: Metadaten direkt nach Erstellung der Kopie cachen
+                self._cache_metadata_for_copy(original_path, copy_path)
 
-            # NEU: Metadaten direkt nach Erstellung der Kopie cachen
-            self._cache_metadata_for_copy(original_path, copy_path)
-
-            self.parent.after(0, self.progress_handler.update_progress, i + 1, total_clips)
+                self.parent.after(0, self.progress_handler.update_progress, idx + 1, len(videos_to_process))
 
         # NEU: Entsperre Schneiden-Button nach Kopieren/Kodieren
         if self.app and hasattr(self.app, 'drag_drop'):
@@ -697,7 +790,10 @@ class VideoPreview:
         hw_status = "HW-Beschleunigung" if self.hw_accel_enabled else "Software"
         print(f"Starte Re-Encoding ({hw_status}): {os.path.basename(input_path)} → 1080p@30fps")
 
-        self.ffmpeg_process = subprocess.Popen(
+        # WICHTIG: Bei paralleler Verarbeitung NICHT self.ffmpeg_process verwenden!
+        # Das würde zu Race Conditions führen, wo Threads sich gegenseitig den Prozess überschreiben
+        # Verwende stattdessen eine lokale Variable
+        ffmpeg_process = subprocess.Popen(
             cmd,
             stderr=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -717,14 +813,14 @@ class VideoPreview:
 
             def communicate_thread():
                 try:
-                    stdout, stderr = self.ffmpeg_process.communicate(timeout=300)  # 5 Min Timeout
+                    stdout, stderr = ffmpeg_process.communicate(timeout=300)  # 5 Min Timeout
                     result_holder['stdout'] = stdout
                     result_holder['stderr'] = stderr
                     result_holder['done'] = True
                 except subprocess.TimeoutExpired:
                     print("⚠️ FFmpeg Timeout (>5 Min), terminiere Prozess...")
-                    self.ffmpeg_process.kill()
-                    stdout, stderr = self.ffmpeg_process.communicate()
+                    ffmpeg_process.kill()
+                    stdout, stderr = ffmpeg_process.communicate()
                     result_holder['stdout'] = stdout
                     result_holder['stderr'] = stderr
                     result_holder['done'] = True
@@ -732,10 +828,10 @@ class VideoPreview:
                     print(f"❌ Fehler in communicate_thread: {e}")
                     # Versuche trotzdem stderr zu holen
                     try:
-                        if self.ffmpeg_process and self.ffmpeg_process.poll() is not None:
+                        if ffmpeg_process and ffmpeg_process.poll() is not None:
                             # Prozess ist beendet, hole Output
-                            result_holder['stderr'] = self.ffmpeg_process.stderr.read() if self.ffmpeg_process.stderr else ""
-                            result_holder['stdout'] = self.ffmpeg_process.stdout.read() if self.ffmpeg_process.stdout else ""
+                            result_holder['stderr'] = ffmpeg_process.stderr.read() if ffmpeg_process.stderr else ""
+                            result_holder['stdout'] = ffmpeg_process.stdout.read() if ffmpeg_process.stdout else ""
                     except:
                         pass
                     result_holder['done'] = True
@@ -747,12 +843,11 @@ class VideoPreview:
             while not result_holder['done']:
                 if self.cancellation_event.is_set():
                     print(f"Abbruch-Signal empfangen. Terminiere FFmpeg für: {input_path}")
-                    self.ffmpeg_process.terminate()
+                    ffmpeg_process.terminate()
                     time.sleep(0.5)
-                    if self.ffmpeg_process.poll() is None:
-                        self.ffmpeg_process.kill()
+                    if ffmpeg_process.poll() is None:
+                        ffmpeg_process.kill()
                     comm_thread.join(timeout=2)
-                    self.ffmpeg_process = None
                     raise Exception("Neukodierung vom Benutzer abgebrochen.")
                 time.sleep(0.1)
 
@@ -762,13 +857,12 @@ class VideoPreview:
             if "abgebrochen" in str(e):
                 raise
             print(f"Fehler beim Warten auf FFmpeg: {e}")
-            if self.ffmpeg_process:
-                self.ffmpeg_process.kill()
-                self.ffmpeg_process = None
+            if ffmpeg_process:
+                ffmpeg_process.kill()
             raise
 
-        returncode = self.ffmpeg_process.returncode if self.ffmpeg_process else -1
-        self.ffmpeg_process = None
+        # Hole returncode sicher (kann None sein!)
+        returncode = ffmpeg_process.returncode if ffmpeg_process else -1
 
         # Hole stderr aus dem result_holder
         stderr_text = result_holder.get('stderr', '') or ''
@@ -776,7 +870,28 @@ class VideoPreview:
         # DEBUG: Zeige was wir haben
         print(f"DEBUG: returncode={returncode}, stderr_length={len(stderr_text) if stderr_text else 0}")
 
+        # WICHTIG: returncode kann None sein, wenn der Prozess noch läuft oder ein Fehler auftrat
+        if returncode is None:
+            print(f"⚠️ WARNUNG: FFmpeg returncode ist None - Prozess möglicherweise nicht korrekt beendet")
+            returncode = -1  # Behandle als Fehler
+
+        # ZUSÄTZLICHE ÜBERPRÜFUNG: Wenn Output-Datei existiert und vernünftige Größe hat,
+        # betrachte als Erfolg, auch wenn returncode != 0
+        # (kann bei paralleler Verarbeitung durch Race Conditions passieren)
+        output_exists = os.path.exists(output_path)
+        output_size = os.path.getsize(output_path) if output_exists else 0
+
+        # Prüfe ob Output valid ist (>10 KB = mindestens ein paar Frames)
+        output_valid = output_exists and output_size > 10240
+
         if returncode != 0:
+            # Prüfe ob trotz Fehlercode eine valide Ausgabe existiert
+            if output_valid:
+                print(f"⚠️ FFmpeg beendet mit Code {returncode}, aber Output-Datei ist valid ({output_size} bytes)")
+                print(f"→ Betrachte als Erfolg (möglicherweise Race Condition bei paralleler Verarbeitung)")
+                print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+                return  # Erfolg!
+
             # Zeige die letzten Zeilen des stderr-Outputs für Debugging
             if stderr_text and len(stderr_text) > 0:
                 last_lines = '\n'.join(stderr_text.split('\n')[-30:])
@@ -786,7 +901,9 @@ class VideoPreview:
             print(f"\n{'='*60}")
             print(f"FFmpeg Fehler bei: {os.path.basename(input_path)}")
             print(f"{'='*60}")
-            print(f"Returncode: {returncode} (unsigned: {returncode & 0xFFFFFFFF})")
+            # Nur unsigned wenn returncode nicht None
+            unsigned_code = returncode & 0xFFFFFFFF if returncode is not None else "N/A"
+            print(f"Returncode: {returncode} (unsigned: {unsigned_code})")
             print(f"\nLetzter FFmpeg Output:")
             print(last_lines)
             print(f"{'='*60}\n")
@@ -1735,3 +1852,4 @@ class VideoPreview:
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
+

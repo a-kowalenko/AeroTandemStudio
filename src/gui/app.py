@@ -293,6 +293,17 @@ class VideoGeneratorApp:
 
     def on_settings_saved(self):
         """Wird aufgerufen nachdem Settings gespeichert wurden"""
+        # WICHTIG: Config neu laden, damit Änderungen wirksam werden
+        self.config.reload_settings()
+
+        # WICHTIG: Hardware-Beschleunigung in VideoPreview neu laden
+        if hasattr(self, 'video_preview') and self.video_preview:
+            self.video_preview.reload_hardware_acceleration_settings()
+
+        # WICHTIG: Wenn ein VideoProcessor existiert, auch dort neu laden
+        if hasattr(self, 'video_processor') and self.video_processor:
+            self.video_processor.reload_hardware_acceleration_settings()
+
         # Server-Verbindung testen
         self.test_server_connection_async()
         # SD-Monitor sofort neu starten

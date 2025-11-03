@@ -49,7 +49,9 @@ class ConfigManager:
             "sd_clear_after_backup": False,
             "sd_auto_import": False,
             # Hardware-Beschleunigung
-            "hardware_acceleration_enabled": True  # Hardware-Beschleunigung standardmäßig aktiviert
+            "hardware_acceleration_enabled": True,  # Hardware-Beschleunigung standardmäßig aktiviert
+            # Paralleles Processing
+            "parallel_processing_enabled": True  # Paralleles Processing standardmäßig aktiviert
         }
 
     def save_settings(self, settings):
@@ -60,11 +62,21 @@ class ConfigManager:
 
             with open(self.CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(settings, f, indent=4, ensure_ascii=False)
+
+            # Aktualisiere den internen Cache nach dem Speichern
+            self.settings = settings.copy()
         except Exception as e:
             print(f"Fehler beim Speichern der Einstellungen: {e}")
 
     def get_settings(self):
         """Gibt die aktuellen Einstellungen zurück"""
+        # Verwende den internen Cache, lade nur beim ersten Aufruf oder wenn Cache leer
+        if not self.settings:
+            self.settings = self.load_settings()
+        return self.settings.copy()
+
+    def reload_settings(self):
+        """Lädt die Einstellungen neu aus der Datei"""
         self.settings = self.load_settings()
         return self.settings.copy()
 

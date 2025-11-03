@@ -6,9 +6,12 @@ import tempfile
 import subprocess
 from dataclasses import asdict, is_dataclass
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
 
 from .logger import CancellableProgressBarLogger, CancellationError
 from ..utils.file_utils import sanitize_filename
+from .parallel_processor import ParallelVideoProcessor
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.constants import HINTERGRUND_PATH
 from src.utils.hardware_acceleration import HardwareAccelerationDetector
@@ -30,10 +33,12 @@ class VideoProcessor:
     def _init_hardware_acceleration(self):
         """Initialisiert Hardware-Beschleunigung basierend auf Einstellungen"""
         self.hw_accel_enabled = False
+        self.parallel_processing_enabled = True  # Standard: aktiviert
 
         if self.config_manager:
             settings = self.config_manager.get_settings()
             self.hw_accel_enabled = settings.get("hardware_acceleration_enabled", True)
+            self.parallel_processing_enabled = settings.get("parallel_processing_enabled", True)
 
             if self.hw_accel_enabled:
                 hw_info = self.hw_detector.detect_hardware()
@@ -45,6 +50,17 @@ class VideoProcessor:
             else:
                 print("ℹ Hardware-Beschleunigung deaktiviert (Software-Encoding)")
 
+            # Info über Paralleles Processing
+            if self.parallel_processing_enabled:
+                cpu_count = multiprocessing.cpu_count()
+                if self.hw_accel_enabled:
+                    workers = min(cpu_count, 4)
+                else:
+                    workers = max(1, cpu_count // 2)
+                print(f"🚀 Paralleles Processing aktiviert: {workers} Worker-Threads ({cpu_count} CPU-Kerne)")
+            else:
+                print("ℹ Paralleles Processing deaktiviert (sequenziell)")
+
     def _get_encoding_params(self, codec='h264'):
         """
         Gibt Encoding-Parameter basierend auf Hardware-Beschleunigung zurück.
@@ -55,7 +71,19 @@ class VideoProcessor:
         Returns:
             Dict mit input_params, output_params und encoder
         """
-        return self.hw_detector.get_encoding_params(codec, self.hw_accel_enabled)
+        params = self.hw_detector.get_encoding_params(codec, self.hw_accel_enabled)
+
+        # Füge Thread-Steuerung basierend auf Parallel Processing Einstellung hinzu
+        if not self.hw_accel_enabled:  # Nur bei Software-Encoding relevant
+            if hasattr(self, 'parallel_processing_enabled'):
+                if self.parallel_processing_enabled:
+                    # Nutze alle verfügbaren Threads
+                    params['output_params'].extend(['-threads', '0'])
+                else:
+                    # Limitiere auf 1 Thread für echtes sequenzielles Processing
+                    params['output_params'].extend(['-threads', '1'])
+
+        return params
 
     def create_video_with_intro_only(self, payload):
         """Erstellt ein Verzeichnis, verarbeitet optional Videos und kopiert Fotos."""
@@ -185,13 +213,12 @@ class VideoProcessor:
                     temp_combined_ts_path
                 ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
-                # Schritt 6a: Längsten Clip finden und mit Wasserzeichen versehen (falls gewünscht)
-                temp_longest_clip_with_watermark_path = None
+                # Schritt 6a: Längsten Clip finden (falls Wasserzeichen gewünscht)
                 longest_clip_path = None
                 if create_watermark_version:
                     self._check_for_cancellation()
                     self._update_progress(7, TOTAL_STEPS)
-                    self._update_status("Suche Clip für Wasserzeichen und füge Wasserzeichen hinzu...")
+                    self._update_status("Suche Clip für Wasserzeichen...")
 
                     # NEU: Verwende ausgewählten Clip, wenn vorhanden; sonst finde längsten Clip
                     if watermark_clip_index is not None and 0 <= watermark_clip_index < len(video_clip_paths):
@@ -200,19 +227,6 @@ class VideoProcessor:
                     else:
                         longest_clip_path = self._find_longest_clip(video_clip_paths)
                         print(f"Verwende längsten Clip für Wasserzeichen: {longest_clip_path}")
-
-                    if longest_clip_path and os.path.exists(longest_clip_path):
-                        # Temporäre Datei für längsten Clip mit Wasserzeichen
-                        temp_longest_clip_with_watermark_path = os.path.join(tempfile.gettempdir(),
-                                                                         "longest_clip_with_watermark.mp4")
-                        temp_files.append(temp_longest_clip_with_watermark_path)
-
-                        # Wasserzeichen nur auf den längsten Clip anwenden
-                        self._create_video_with_watermark(
-                            longest_clip_path,  # Längster Clip
-                            temp_longest_clip_with_watermark_path,  # Ausgabe mit Wasserzeichen
-                            video_params
-                        )
                 else:
                     self._update_progress(7, TOTAL_STEPS)
 
@@ -230,37 +244,93 @@ class VideoProcessor:
                     full_video_output_path = None
                     self._update_status("Überspringe normale Video-Erstellung (kein Produkt gewählt)...")
 
-                # Schritt 8: .ts-Dateien zusammenfügen (nur wenn normale Version gewünscht)
-                if full_video_output_path:
+                # Schritt 8-10: Video-Erstellung (mit oder ohne Wasserzeichen)
+                # Mit paralleler Verarbeitung: Normale Version UND Wasserzeichen-Version gleichzeitig
+                if self.parallel_processor and full_video_output_path and create_watermark_version and longest_clip_path:
+                    # Beide Versionen parallel erstellen
                     self._check_for_cancellation()
                     self._update_progress(9, TOTAL_STEPS)
-                    self._update_status("Füge Videos final zusammen...")
-                    concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
-                    subprocess.run([
-                        "ffmpeg", "-y",
-                        "-i", concat_input,
-                        "-c", "copy",
-                        "-bsf:a", "aac_adtstoasc",
-                        "-movflags", "+faststart",
-                        full_video_output_path
-                    ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                else:
-                    self._update_progress(9, TOTAL_STEPS)
-                    self._update_status("Überspringe normale Video-Erstellung...")
-
-                # Schritt 8a: Wasserzeichen-Version erstellen (falls gewünscht) - NUR längster Clip ohne Intro
-                if create_watermark_version and temp_longest_clip_with_watermark_path:
-                    self._check_for_cancellation()
-                    self._update_progress(10, TOTAL_STEPS)
-                    self._update_status("Erstelle Video mit Wasserzeichen (nur längster Clip)...")
+                    self._update_status("Erstelle normale Version und Wasserzeichen-Version (parallel)...")
 
                     watermark_video_output_path = self._generate_watermark_video_path(
                         base_output_dir, base_filename
                     )
 
-                    # Kopiere den längsten Clip mit Wasserzeichen direkt (KEIN Intro!)
-                    shutil.copy2(temp_longest_clip_with_watermark_path, watermark_video_output_path)
+                    # Task 1: Normale Version zusammenfügen
+                    def create_normal_version_task():
+                        concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
+                        subprocess.run([
+                            "ffmpeg", "-y",
+                            "-i", concat_input,
+                            "-c", "copy",
+                            "-bsf:a", "aac_adtstoasc",
+                            "-movflags", "+faststart",
+                            full_video_output_path
+                        ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+                    # Task 2: Wasserzeichen-Version erstellen
+                    def create_watermark_version_task():
+                        self._create_video_with_watermark(
+                            longest_clip_path,
+                            watermark_video_output_path,
+                            video_params
+                        )
+
+                    # Beide Tasks parallel ausführen
+                    tasks = [
+                        (create_normal_version_task, (), {}),
+                        (create_watermark_version_task, (), {})
+                    ]
+
+                    results = self.parallel_processor.process_videos_parallel(tasks, self.cancel_event)
+
+                    # Prüfe auf Fehler
+                    for task_index, result, error in results:
+                        if error:
+                            raise error
+
+                    self._update_progress(10, TOTAL_STEPS)
+
+                elif full_video_output_path or (create_watermark_version and longest_clip_path):
+                    # Sequenzielle Verarbeitung (wie bisher)
+                    if full_video_output_path:
+                        self._check_for_cancellation()
+                        self._update_progress(9, TOTAL_STEPS)
+                        self._update_status("Füge Videos final zusammen...")
+                        concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
+                        subprocess.run([
+                            "ffmpeg", "-y",
+                            "-i", concat_input,
+                            "-c", "copy",
+                            "-bsf:a", "aac_adtstoasc",
+                            "-movflags", "+faststart",
+                            full_video_output_path
+                        ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                    else:
+                        self._update_progress(9, TOTAL_STEPS)
+                        self._update_status("Überspringe normale Video-Erstellung...")
+
+                    # Wasserzeichen-Version erstellen (falls gewünscht)
+                    if create_watermark_version and longest_clip_path:
+                        self._check_for_cancellation()
+                        self._update_progress(10, TOTAL_STEPS)
+                        self._update_status("Erstelle Video mit Wasserzeichen (nur längster Clip)...")
+
+                        watermark_video_output_path = self._generate_watermark_video_path(
+                            base_output_dir, base_filename
+                        )
+
+                        # Wasserzeichen direkt auf finalen Pfad anwenden
+                        self._create_video_with_watermark(
+                            longest_clip_path,
+                            watermark_video_output_path,
+                            video_params
+                        )
+                    else:
+                        self._update_progress(10, TOTAL_STEPS)
                 else:
+                    # Weder normale noch Wasserzeichen-Version
+                    self._update_progress(9, TOTAL_STEPS)
                     self._update_progress(10, TOTAL_STEPS)
 
             else:

@@ -22,7 +22,9 @@ class SettingsDialog:
         self.dialog.geometry("550x580")  # Größe angepasst
         self.dialog.resizable(False, False)
         self.dialog.transient(self.parent)
-        self.dialog.grab_set()
+
+        # WICHTIG: Verstecke Dialog zunächst, um Springen zu vermeiden
+        self.dialog.withdraw()
 
         # --- Variablen ---
         self.server_var = tk.StringVar()
@@ -39,33 +41,38 @@ class SettingsDialog:
         # Variable für Hardware-Beschleunigung
         self.hardware_acceleration_var = tk.BooleanVar()
 
-        # Zentriere den Dialog
-        self._center_dialog()
-
         self.create_widgets()
         self.load_settings()
 
-        # Fokus auf den Server-Eintrag setzen
-        self.server_entry.focus_set()
+        # Zentriere den Dialog BEVOR er sichtbar wird (optimiert)
+        self._center_dialog_fast()
 
-    def _center_dialog(self):
-        """Zentriert den Dialog über dem Parent-Fenster"""
-        self.parent.update_idletasks()
-        parent_x = self.parent.winfo_rootx()
-        parent_y = self.parent.winfo_rooty()
+        # Jetzt zeige den Dialog an (bereits zentriert)
+        self.dialog.deiconify()
+        self.dialog.grab_set()
+
+        # Fokus auf den Server-Eintrag setzen (verzögert, um schnelleres Öffnen zu ermöglichen)
+        self.dialog.after(10, lambda: self.server_entry.focus_set())
+
+    def _center_dialog_fast(self):
+        """Zentriert den Dialog über dem Parent-Fenster (optimierte Version)"""
+        # Berechne Position ohne update_idletasks (schneller)
+        parent_x = self.parent.winfo_x()
+        parent_y = self.parent.winfo_y()
         parent_width = self.parent.winfo_width()
         parent_height = self.parent.winfo_height()
 
-        # Dialog-Dimensionen aus geometry() holen
-        try:
-            w, h = map(int, self.dialog.geometry().split('x')[0].split('+')[0].split('-')[0])
-        except Exception:
-            w, h = 550, 580  # Fallback
+        # Dialog-Dimensionen (fest definiert)
+        w, h = 550, 580
 
         x = parent_x + (parent_width - w) // 2
         y = parent_y + (parent_height - h) // 2
 
-        self.dialog.geometry(f"+{x}+{y}")
+        # Verhindere negative Koordinaten
+        x = max(0, x)
+        y = max(0, y)
+
+        self.dialog.geometry(f"{w}x{h}+{x}+{y}")
 
     def create_widgets(self):
         """Erstellt die Widgets für den Dialog mit Tab-Layout"""
@@ -241,41 +248,90 @@ class SettingsDialog:
         advanced_frame.pack(fill="x", pady=(0, 10))
         advanced_frame.grid_columnconfigure(0, weight=1)
 
+        # Hardware-Beschleunigung Container
+        hw_container = tk.Frame(advanced_frame)
+        hw_container.grid(row=0, column=0, sticky="w", padx=5, pady=5)
+
         # Hardware-Beschleunigung Checkbox
         self.hw_accel_checkbox = tk.Checkbutton(
-            advanced_frame,
+            hw_container,
             text="Hardware-Beschleunigung aktivieren (empfohlen)",
             variable=self.hardware_acceleration_var,
             font=("Arial", 10),
             command=self.on_hw_accel_toggle
         )
-        self.hw_accel_checkbox.grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.hw_accel_checkbox.pack(side="left")
+
+        # Spinner (zunächst versteckt)
+        self.hw_spinner_label = tk.Label(
+            hw_container,
+            text="⏳",
+            font=("Arial", 12),
+            fg="#2196F3"
+        )
+        # Wird nur angezeigt während Hardware erkannt wird
 
         # Info-Label für erkannte Hardware
         self.hw_info_label = tk.Label(
             advanced_frame,
-            text="Erkannte Hardware wird beim Speichern angezeigt",
+            text="Erkannte Hardware wird beim Laden angezeigt",
             font=("Arial", 9),
             fg="gray",
             anchor="w"
         )
         self.hw_info_label.grid(row=1, column=0, sticky="w", padx=20, pady=(0, 5))
 
+        # Flag für laufende Hardware-Erkennung
+        self.hw_detection_running = False
+
     def on_hw_accel_toggle(self):
         """Wird aufgerufen wenn die Hardware-Beschleunigung Checkbox geändert wird"""
         is_enabled = self.hardware_acceleration_var.get()
 
         if is_enabled:
-            # Erkenne verfügbare Hardware
-            try:
-                from src.utils.hardware_acceleration import HardwareAccelerationDetector
-                detector = HardwareAccelerationDetector()
-                hw_info_text = detector.get_hardware_info_string()
-                self.hw_info_label.config(text=f"✓ {hw_info_text}", fg="green")
-            except Exception as e:
-                self.hw_info_label.config(text=f"⚠ Fehler bei Hardware-Erkennung: {str(e)}", fg="orange")
+            # Zeige Spinner sofort
+            self.hw_spinner_label.pack(side="left", padx=(5, 0))
+            self.hw_info_label.config(text="Erkenne Hardware...", fg="gray")
+
+            # Verhindere mehrfache gleichzeitige Erkennung
+            if self.hw_detection_running:
+                return
+
+            self.hw_detection_running = True
+
+            # Starte Hardware-Erkennung asynchron im Hintergrund
+            import threading
+            def detect_hardware_async():
+                try:
+                    from src.utils.hardware_acceleration import HardwareAccelerationDetector
+                    detector = HardwareAccelerationDetector()
+                    hw_info_text = detector.get_hardware_info_string()
+
+                    # Aktualisiere UI im Haupt-Thread
+                    self.dialog.after(0, self._update_hw_info_success, hw_info_text)
+                except Exception as e:
+                    # Fehler im Haupt-Thread anzeigen
+                    self.dialog.after(0, self._update_hw_info_error, str(e))
+
+            # Starte Thread
+            threading.Thread(target=detect_hardware_async, daemon=True).start()
         else:
+            # Hardware-Beschleunigung deaktiviert
+            self.hw_spinner_label.pack_forget()
             self.hw_info_label.config(text="Hardware-Beschleunigung deaktiviert (Software-Encoding)", fg="gray")
+            self.hw_detection_running = False
+
+    def _update_hw_info_success(self, hw_info_text):
+        """Aktualisiert die Hardware-Info nach erfolgreicher Erkennung (im Haupt-Thread)"""
+        self.hw_spinner_label.pack_forget()
+        self.hw_info_label.config(text=f"✓ {hw_info_text}", fg="green")
+        self.hw_detection_running = False
+
+    def _update_hw_info_error(self, error_msg):
+        """Aktualisiert die Hardware-Info bei Fehler (im Haupt-Thread)"""
+        self.hw_spinner_label.pack_forget()
+        self.hw_info_label.config(text=f"⚠ Fehler bei Hardware-Erkennung: {error_msg}", fg="orange")
+        self.hw_detection_running = False
 
     def on_auto_backup_toggle(self):
         """Wird aufgerufen wenn die Auto-Backup Checkbox geändert wird"""

@@ -126,6 +126,9 @@ class VideoGeneratorApp:
         # Foto-Tab Inhalt
         self.photo_preview = PhotoPreview(self.foto_tab, self)
 
+        # Event-Binding für Tab-Wechsel: Focus auf Photo Preview setzen
+        self.preview_notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
         # Server-Upload Frame mit Status-Anzeige
         self.upload_frame = tk.Frame(self.right_frame)
 
@@ -290,6 +293,17 @@ class VideoGeneratorApp:
 
     def on_settings_saved(self):
         """Wird aufgerufen nachdem Settings gespeichert wurden"""
+        # WICHTIG: Config neu laden, damit Änderungen wirksam werden
+        self.config.reload_settings()
+
+        # WICHTIG: Hardware-Beschleunigung in VideoPreview neu laden
+        if hasattr(self, 'video_preview') and self.video_preview:
+            self.video_preview.reload_hardware_acceleration_settings()
+
+        # WICHTIG: Wenn ein VideoProcessor existiert, auch dort neu laden
+        if hasattr(self, 'video_processor') and self.video_processor:
+            self.video_processor.reload_hardware_acceleration_settings()
+
         # Server-Verbindung testen
         self.test_server_connection_async()
         # SD-Monitor sofort neu starten
@@ -319,6 +333,22 @@ class VideoGeneratorApp:
 
         # Progress unten
         self.progress_handler.pack_status_label()
+
+        # Initialer Focus: Wenn Video-Tab aktiv ist, kein Focus setzen
+        # Wenn Foto-Tab aktiv ist, Focus setzen
+        # Warte kurz bis alles gerendert ist
+        self.root.after(100, self._set_initial_focus)
+
+    def _set_initial_focus(self):
+        """Setzt den initialen Focus basierend auf dem aktiven Tab"""
+        try:
+            selected_tab = self.preview_notebook.select()
+            tab_text = self.preview_notebook.tab(selected_tab, "text")
+
+            if tab_text == "Foto Vorschau":
+                self.photo_preview.frame.focus_set()
+        except:
+            pass  # Ignoriere Fehler beim initialen Focus-Setzen
 
     def load_settings(self):
         """Lädt die gespeicherten Einstellungen"""
@@ -360,6 +390,17 @@ class VideoGeneratorApp:
                     f"Server-Verbindung fehlgeschlagen:\n{message}\n\n"
                     "Upload wurde deaktiviert. Bitte überprüfen Sie die Einstellungen."
                 )
+
+    def _on_tab_changed(self, event):
+        """Wird aufgerufen wenn der Tab gewechselt wird"""
+        # Prüfe welcher Tab aktiv ist
+        selected_tab = self.preview_notebook.select()
+        tab_text = self.preview_notebook.tab(selected_tab, "text")
+
+        # Wenn Foto-Tab aktiv ist, setze Focus auf Photo Preview
+        if tab_text == "Foto Vorschau":
+            # Focus auf den Frame setzen, damit Pfeiltasten funktionieren
+            self.photo_preview.frame.focus_set()
 
     def on_upload_checkbox_toggle(self):
         """Wird aufgerufen wenn die Upload-Checkbox geändert wird"""
@@ -534,7 +575,14 @@ class VideoGeneratorApp:
 
         # NEU: QR-Prüfung nur starten, wenn run_qr_check True ist
         if run_qr_check:
-            # 1. Button-Zustand speichern und auf "Warten" setzen
+            # Starte QR-Analyse UND Preview-Erstellung PARALLEL!
+            print("Starte QR-Analyse und Preview-Erstellung parallel...")
+
+            # 1. Preview-Erstellung starten (läuft in eigenem Thread)
+            if self.video_preview:
+                self.video_preview.update_preview(video_paths)
+
+            # 2. QR-Analyse starten (läuft ebenfalls in eigenem Thread)
             self.run_qr_analysis(video_paths)
         else:
             # Keine QR-Prüfung, nur Vorschau aktualisieren
@@ -543,24 +591,29 @@ class VideoGeneratorApp:
                 self.video_preview.update_preview(video_paths)
 
     def run_qr_analysis(self, video_paths: list[str]):
-        self._save_button_state()
-        self._set_button_waiting()
-
-        # 2. Ladefenster anzeigen (verwendet jetzt die importierte Klasse)
+        """
+        Startet QR-Code-Analyse in separatem Thread.
+        NEU: Ändert Button-Status NICHT mehr, da Preview parallel läuft!
+        """
+        # Ladefenster anzeigen
         self.loading_window = LoadingWindow(self.root, text="Analysiere QR-Code im Video...")
 
-        # 3. Eine Queue erstellen, um das Ergebnis vom Thread zu empfangen
+        # Queue erstellen für Ergebnis-Kommunikation
         self.analysis_queue = queue.Queue()
 
-        # 4. Den Analyse-Thread starten
+        # video_paths enthält nach dem ersten update_preview bereits Working-Folder-Pfade!
+        first_video_path = video_paths[0]
+        print(f"QR-Analyse: {os.path.basename(first_video_path)}")
+
+        # Analyse-Thread starten
         analysis_thread = threading.Thread(
             target=self._run_analysis_thread,
-            args=(video_paths[0], self.analysis_queue),
+            args=(first_video_path, self.analysis_queue),
             daemon=True
         )
         analysis_thread.start()
 
-        # 5. Eine "Polling"-Funktion starten, die auf das Ergebnis wartet
+        # Polling-Funktion starten
         self.root.after(100, self._check_analysis_result, video_paths)
 
     def _run_analysis_thread(self, video_path: str, result_queue: queue.Queue):
@@ -601,7 +654,7 @@ class VideoGeneratorApp:
             elif status == "error":
                 messagebox.showerror("Analyse-Fehler",
                                      f"Ein unerwarteter Fehler bei der Videoanalyse ist aufgetreten:\n{result}")
-                self._restore_button_state()
+                # Kein _restore_button_state - Preview läuft parallel!
                 self.form_fields.update_form_layout(False, None)
 
 
@@ -615,7 +668,7 @@ class VideoGeneratorApp:
                 self.loading_window.destroy()
                 self.loading_window = None
             messagebox.showerror("Fehler", f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}")
-            self._restore_button_state()
+            # Kein _restore_button_state - Preview läuft parallel!
             self.form_fields.update_form_layout(False, None)
 
     def _process_analysis_result(self, kunde, qr_scan_success, video_paths):
@@ -653,28 +706,15 @@ class VideoGeneratorApp:
             # Formular-Layout aktualisieren
             self.form_fields.update_form_layout(qr_scan_success, kunde)
 
-            # Starten Sie die Aktualisierung der GUI-Vorschau
-            # update_preview startet einen Thread (_create_combined_preview)
-            # self.video_preview.update_preview(video_paths)
-
-            # WICHTIG: _create_combined_preview (im Thread) ruft _finalize_processing auf.
-            # Wir müssen den Button dort wiederherstellen, NICHT hier.
-            # _finalize_processing ruft _restore_button_state auf, wenn es fertig ist.
-
-            # Warten, bis der Thread in update_preview fertig ist, um den Button wiederherzustellen
-            def wait_for_preview_thread():
-                if self.video_preview.processing_thread:
-                    self.video_preview.processing_thread.join()  # Warte auf den Thread (Vorschau-Erstellung)
-
-                # Jetzt im Haupt-Thread den Button wiederherstellen
-                self.root.after(0, self._restore_button_state)
-
-            threading.Thread(target=wait_for_preview_thread, daemon=True).start()
-
+            # NEU: Preview läuft bereits parallel! Kein wait_for_preview_thread nötig.
+            # Button-Status wird von video_preview._finalize_processing wiederhergestellt
+            print("QR-Analyse abgeschlossen. Preview läuft parallel weiter.")
 
         except Exception as e:
             print(f"Fehler in _process_analysis_result: {e}")
-            self._restore_button_state()
+            # Nur wenn Preview NICHT läuft, Button wiederherstellen
+            if not (self.video_preview and self.video_preview.processing_thread):
+                self._restore_button_state()
             self.form_fields.update_form_layout(False, None)
 
     def erstelle_video(self):
@@ -790,6 +830,7 @@ class VideoGeneratorApp:
         self.video_processor = VideoProcessor(
             progress_callback=self._update_progress,
             status_callback=self._handle_status_update,
+            encoding_progress_callback=self._update_encoding_progress,  # NEU: Encoding-Fortschritt
             config_manager=self.config  # Config Manager übergeben
         )
 
@@ -815,6 +856,12 @@ class VideoGeneratorApp:
     def _update_progress(self, step, total_steps=8):
         """Callback für Fortschrittsupdates"""
         self.root.after(0, self.progress_handler.update_progress, step, total_steps)
+
+    def _update_encoding_progress(self, task_name="Encoding", progress=None, fps=0.0, eta=None,
+                                  current_time=0.0, total_time=None, task_id=None):
+        """Callback für Live-Encoding-Fortschritt"""
+        self.root.after(0, self.progress_handler.update_encoding_progress,
+                       task_name, progress, fps, eta, current_time, total_time, task_id)
 
     def _handle_status_update(self, status_type, message):
         """Callback für Statusupdates"""
@@ -907,38 +954,27 @@ class VideoGeneratorApp:
 
     # --- NEUE METHODEN FÜR DEN SCHNEIDE-DIALOG ---
 
-    def request_cut_dialog(self, original_video_path: str):
-        """Wird von drag_drop.py aufgerufen, um den Schneide-Dialog zu öffnen."""
+    def request_cut_dialog(self, video_path: str, index: int):
+        """
+        Wird von drag_drop.py aufgerufen, um den Schneide-Dialog zu öffnen.
+
+        video_path ist nach dem ersten update_preview bereits ein Working-Folder-Pfad!
+        """
         if self.video_cutter_dialog is not None:
             print("Ein Schneide-Dialog ist bereits geöffnet.")
             self.video_cutter_dialog.lift()
             return
 
-        if not self.video_preview:
-            print("Fehler: video_preview ist nicht initialisiert.")
-            return
-
-        # 1. Finde den Pfad zur *Kopie* des Videos
-        copy_path = self.video_preview.get_copy_path(original_video_path)
-
-        if not copy_path or not os.path.exists(copy_path):
+        if not os.path.exists(video_path):
             messagebox.showerror("Fehler",
-                                 f"Konnte die temporäre Videokopie für '{os.path.basename(original_video_path)}' nicht finden.\n"
-                                 "Bitte erstellen Sie die Vorschau neu (z.B. durch Hinzufügen/Entfernen eines Clips).")
+                                 f"Video '{os.path.basename(video_path)}' konnte nicht gefunden werden.")
             return
 
-        # 2. Finde den Index des Clips (für späteres Splitten)
-        try:
-            index = self.drag_drop.get_video_paths().index(original_video_path)
-        except ValueError:
-            print(f"Fehler: Konnte Index für {original_video_path} nicht finden.")
-            index = -1  # Fallback
-
-        # 3. Dialog erstellen
+        # Dialog erstellen - video_path ist bereits der Working-Folder-Pfad!
         self.video_cutter_dialog = VideoCutterDialog(
             self.root,
-            video_path=copy_path,
-            on_complete_callback=lambda result: self.on_cut_complete(original_video_path, index, result)
+            video_path=video_path,
+            on_complete_callback=lambda result: self.on_cut_complete(video_path, index, result)
         )
 
         # 4. Callback binden, um Referenz zu löschen, wenn Dialog geschlossen wird

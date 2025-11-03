@@ -8,8 +8,13 @@ import re
 import sys
 import shutil
 import time
+import multiprocessing
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from .progress_indicator import ProgressHandler
+from .circular_spinner import CircularSpinner
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
+from src.utils.hardware_acceleration import HardwareAccelerationDetector
+from src.video.parallel_processor import ParallelVideoProcessor
 from typing import List, Dict, Callable  # NEU
 
 
@@ -19,6 +24,12 @@ class VideoPreview:
         self.app = app_instance
         self.frame = tk.Frame(parent)
         self.combined_video_path = None
+        self.encoding_progress_callback = None  # NEU: Callback für Live-Encoding-Fortschritt
+
+        # Hardware-Beschleunigung initialisieren
+        self.hw_detector = HardwareAccelerationDetector()
+        self.parallel_processor = None  # Wird in _init_hardware_acceleration gesetzt
+        self._init_hardware_acceleration()
         self.progress_handler = None
         self.last_video_paths = None  # Speichert die *originalen* Pfade für "Erneut versuchen"
 
@@ -30,28 +41,160 @@ class VideoPreview:
 
         # --- NEU: Verwaltung der temporären Kopien UND Metadaten-Cache ---
         self.temp_dir = None
-        self.video_copies_map: Dict[str, str] = {}  # Map: original_path -> copy_path
-        self.metadata_cache: Dict[str, Dict] = {}  # Map: original_path -> {duration, size, ...}
+        # WICHTIG: Cache verwendet (filename, size) als Key, NICHT den Pfad!
+        # Die gleiche Datei in verschiedenen Ordnern wird als identisch erkannt.
+        self.video_copies_map: Dict[tuple, str] = {}  # Map: (filename, size) -> copy_path
+        self.metadata_cache: Dict[tuple, Dict] = {}  # Map: (filename, size) -> {duration, ...}
         self.videos_were_reencoded = False  # Flag: Wurden Videos bereits auf Default-Format (1080p@30) kodiert?
         # ---
 
         self.create_widgets()
+
+    def _init_hardware_acceleration(self):
+        """Initialisiert Hardware-Beschleunigung basierend auf Einstellungen"""
+        self.hw_accel_enabled = False
+        self.parallel_processing_enabled = True  # NEU: Default-Wert
+
+        if self.app and hasattr(self.app, 'config'):
+            settings = self.app.config.get_settings()
+            self.hw_accel_enabled = settings.get("hardware_acceleration_enabled", True)
+            self.parallel_processing_enabled = settings.get("parallel_processing_enabled", True)  # NEU
+
+            if self.hw_accel_enabled:
+                hw_info = self.hw_detector.detect_hardware()
+                if hw_info['available']:
+                    print(f"✓ VideoPreview: Hardware-Beschleunigung aktiviert: {self.hw_detector.get_hardware_info_string()}")
+                else:
+                    print("⚠ VideoPreview: Hardware-Beschleunigung aktiviert, aber keine kompatible Hardware gefunden")
+                    print("  → Fallback auf Software-Encoding für Vorschau")
+            else:
+                print("ℹ VideoPreview: Hardware-Beschleunigung deaktiviert (Software-Encoding)")
+
+            # NEU: Info über Paralleles Processing
+            if self.parallel_processing_enabled:
+                cpu_count = multiprocessing.cpu_count()
+                if self.hw_accel_enabled:
+                    workers = min(cpu_count, 4)
+                else:
+                    workers = max(1, cpu_count // 2)
+                print(f"🚀 VideoPreview: Paralleles Processing aktiviert: {workers} Worker-Threads ({cpu_count} CPU-Kerne)")
+                # Initialisiere ParallelVideoProcessor
+                self.parallel_processor = ParallelVideoProcessor(hw_accel_enabled=self.hw_accel_enabled)
+            else:
+                print("ℹ VideoPreview: Paralleles Processing deaktiviert (sequenziell)")
+                self.parallel_processor = None
+        else:
+            # Fallback wenn keine Config verfügbar
+            print("ℹ VideoPreview: Keine Config verfügbar, verwende Software-Encoding")
+            self.parallel_processor = None
+
+    def reload_hardware_acceleration_settings(self):
+        """
+        Lädt die Hardware-Beschleunigungseinstellungen neu.
+        Wird aufgerufen wenn die Einstellungen geändert wurden.
+        """
+        print("🔄 VideoPreview: Lade Hardware-Beschleunigungseinstellungen neu...")
+        self._init_hardware_acceleration()
+
+    def _get_encoding_params(self, codec='h264'):
+        """
+        Gibt Encoding-Parameter basierend auf Hardware-Beschleunigung zurück.
+
+        Args:
+            codec: 'h264' oder 'hevc'
+
+        Returns:
+            Dict mit input_params, output_params und encoder
+        """
+        return self.hw_detector.get_encoding_params(codec, self.hw_accel_enabled)
+
+    def _get_current_encoder_name(self):
+        """
+        Gibt einen lesbaren Namen des aktuell verwendeten Encoders zurück.
+
+        Returns:
+            String wie "Intel Quick Sync (h264_qsv)" oder "Software (libx264)"
+        """
+        if not self.hw_accel_enabled:
+            return "Software (libx264)"
+
+        hw_info = self.hw_detector.detect_hardware()
+        if hw_info['available']:
+            type_names = {
+                'nvidia': 'NVIDIA NVENC',
+                'amd': 'AMD AMF',
+                'intel': 'Intel Quick Sync',
+                'videotoolbox': 'Apple VideoToolbox',
+                'vaapi': 'VAAPI'
+            }
+            hw_name = type_names.get(hw_info['type'], hw_info['type'])
+            encoder = hw_info.get('encoder', 'unknown')
+            return f"{hw_name} ({encoder})"
+        else:
+            return "Software (libx264)"
 
     def _check_for_cancellation(self):
         """Prüft, ob ein Abbruch angefordert wurde und wirft ggf. eine Exception."""
         if self.cancellation_event.is_set():
             raise Exception("Vorschau-Erstellung vom Benutzer abgebrochen.")
 
+    def _get_file_identity(self, file_path):
+        """
+        Erstellt eine eindeutige Identität für eine Datei basierend auf Name und Größe.
+        Das ist pfad-unabhängig - die gleiche Datei in verschiedenen Ordnern
+        hat die gleiche Identität.
+
+        WICHTIG: Der Original-Pfad ist irrelevant! Nur Dateiname + Größe zählen.
+
+        Returns:
+            Tuple (filename, size) oder None bei Fehler
+        """
+        try:
+            filename = os.path.basename(file_path)
+            file_size = os.path.getsize(file_path)
+            return (filename, file_size)
+        except Exception as e:
+            print(f"  ⚠️ Fehler beim Erstellen der File-Identity für {file_path}: {e}")
+            return None
+
+    def _find_cached_copy(self, original_path):
+        """
+        Sucht eine existierende Cache-Kopie für die gegebene Datei.
+
+        WICHTIG: Verwendet Datei-Identität (Name + Größe), NICHT den Pfad!
+        Die gleiche Datei in verschiedenen Backup-Ordnern wird als identisch erkannt.
+
+        Returns:
+            copy_path wenn gefunden, sonst None
+        """
+        file_identity = self._get_file_identity(original_path)
+        if not file_identity:
+            return None
+
+        copy_path = self.video_copies_map.get(file_identity)
+
+        # Prüfe ob Kopie noch existiert
+        if copy_path and os.path.exists(copy_path):
+            return copy_path
+        elif copy_path:
+            # Kopie existiert nicht mehr - entferne aus Cache
+            print(f"  🗑️ Entferne ungültige Cache-Kopie: {os.path.basename(copy_path)}")
+            del self.video_copies_map[file_identity]
+            if file_identity in self.metadata_cache:
+                del self.metadata_cache[file_identity]
+
+        return None
+
     def _get_clip_durations_seconds(self, video_paths):
         """Ermittelt die Dauer jedes einzelnen Clips in Sekunden (aus dem Cache, wenn möglich)."""
         durations = []
         for video_path in video_paths:  # HINWEIS: video_paths ist hier eine Liste von KOPIEN
             try:
-                # Versuche, den Originalpfad aus der Kopie abzuleiten (für Cache-Lookup)
-                original_path = next((key for key, value in self.video_copies_map.items() if value == video_path), None)
+                # Suche die file-identity aus der Kopie (umgekehrter Lookup im Cache)
+                file_identity = next((key for key, value in self.video_copies_map.items() if value == video_path), None)
 
-                if original_path and original_path in self.metadata_cache:
-                    duration_str = self.metadata_cache[original_path].get("duration_sec_str", "0.0")
+                if file_identity and file_identity in self.metadata_cache:
+                    duration_str = self.metadata_cache[file_identity].get("duration_sec_str", "0.0")
                     durations.append(float(duration_str))
                 else:
                     # Fallback: ffprobe direkt auf die Kopie anwenden
@@ -130,9 +273,26 @@ class VideoPreview:
         self.last_video_paths = video_paths
 
         # NEU: Erstelle temp_dir nur wenn noch nicht vorhanden
-        # (verhindert unnötiges Löschen bereits kodierter Videos)
+        # WICHTIG: Wenn temp_dir existiert, NICHT neu erstellen - bereits kodierte Videos behalten!
         if not self.temp_dir or not os.path.exists(self.temp_dir):
             self._create_temp_directory()  # Erstellt auch leere Caches/Maps
+        else:
+            # temp_dir existiert bereits - behalte bereits kodierte Videos
+            # ABER: Bereinige ungültige Cache-Einträge (Dateien die nicht mehr existieren)
+            invalid_entries = []
+            for file_identity, copy_path in list(self.video_copies_map.items()):
+                if not os.path.exists(copy_path):
+                    invalid_entries.append(file_identity)
+
+            if invalid_entries:
+                print(f"🗑️ Bereinige {len(invalid_entries)} ungültige Cache-Einträge")
+                for file_identity in invalid_entries:
+                    del self.video_copies_map[file_identity]
+                    if file_identity in self.metadata_cache:
+                        del self.metadata_cache[file_identity]
+
+            print(f"♻️ Verwende bestehendes temp_dir: {self.temp_dir}")
+            print(f"   {len(self.video_copies_map)} Video(s) bereits im Cache")
 
         if not self.progress_handler:
             self.progress_handler = ProgressHandler(self.progress_frame)
@@ -201,15 +361,11 @@ class VideoPreview:
         # OPTIMIERUNG: Behalte existierende Kopien NUR wenn KEIN Re-Encoding nötig ODER preserve_cache=True
         if needs_reencoding and not preserve_cache:
             # Bei Re-Encoding müssen ALLE Videos neu kodiert werden
-            # Entferne ALLE alten Kopien (könnten unterschiedliche Formate haben)
-            print("⚠️ Re-Encoding aktiviert → Cache wird geleert, ALLE Videos werden neu kodiert")
-            if self.video_copies_map:
-                for path, copy_path in list(self.video_copies_map.items()):
-                    if os.path.exists(copy_path):
-                        try:
-                            os.remove(copy_path)
-                        except:
-                            pass
+            # WICHTIG: Dateien NICHT löschen! Sie werden als Source benötigt und danach überschrieben.
+            print("⚠️ Re-Encoding aktiviert → ALLE Videos werden neu kodiert (Format-Unterschiede)")
+
+            # Leere nur die Caches, aber NICHT die Dateien!
+            # Die Dateien werden während des Re-Encodings überschrieben
             self.video_copies_map.clear()
             self.metadata_cache.clear()
         elif needs_reencoding and preserve_cache:
@@ -217,21 +373,30 @@ class VideoPreview:
             print(f"⚠️ Re-Encoding aktiviert → Kodiere nur neue Videos, Cache bleibt erhalten")
         else:
             # Bei Stream-Copy: Behalte existierende Kopien, entferne nur nicht mehr benötigte
-            current_paths_set = set(original_paths)
-            paths_to_remove = [path for path in list(self.video_copies_map.keys()) if path not in current_paths_set]
-            for path in paths_to_remove:
+            # Erstelle Set der aktuellen file-identities
+            current_identities = set()
+            for path in original_paths:
+                file_identity = self._get_file_identity(path)
+                if file_identity:
+                    current_identities.add(file_identity)
+
+            # Finde file-identities, die nicht mehr benötigt werden
+            identities_to_remove = [identity for identity in list(self.video_copies_map.keys())
+                                    if identity not in current_identities]
+
+            for identity in identities_to_remove:
                 # Lösche Datei und Cache-Eintrag
-                if path in self.video_copies_map:
-                    old_copy = self.video_copies_map[path]
+                if identity in self.video_copies_map:
+                    old_copy = self.video_copies_map[identity]
                     if os.path.exists(old_copy):
                         try:
                             os.remove(old_copy)
                             print(f"🗑️ Entferne alte Kopie: {os.path.basename(old_copy)}")
                         except:
                             pass
-                    del self.video_copies_map[path]
-                if path in self.metadata_cache:
-                    del self.metadata_cache[path]
+                    del self.video_copies_map[identity]
+                if identity in self.metadata_cache:
+                    del self.metadata_cache[identity]
 
         temp_copy_paths = []
         total_clips = len(original_paths)
@@ -245,14 +410,14 @@ class VideoPreview:
             # Bei Re-Encoding MIT preserve_cache: Nur neue Videos (nicht im Cache)
             clips_to_process = 0
             for original_path in original_paths:
-                if original_path not in self.video_copies_map:
+                if not self._find_cached_copy(original_path):
                     clips_to_process += 1
             print(f"📦 {clips_to_process} von {total_clips} Videos müssen neu kodiert werden ({total_clips - clips_to_process} bereits im Cache)")
         else:
             # Bei Stream-Copy: Nur neue Videos
             clips_to_process = 0
             for original_path in original_paths:
-                if original_path not in self.video_copies_map or not os.path.exists(self.video_copies_map.get(original_path, "")):
+                if not self._find_cached_copy(original_path):
                     clips_to_process += 1
 
             if clips_to_process == 0:
@@ -262,6 +427,9 @@ class VideoPreview:
 
         self.parent.after(0, self.progress_handler.pack_progress_bar)
         self.parent.after(0, self.progress_handler.update_progress, 0, total_clips)
+
+        # NEU: Sammle alle Videos, die verarbeitet werden müssen
+        videos_to_process = []  # Liste von (index, original_path, source_path, copy_path, filename)
 
         for i, original_path in enumerate(original_paths):
             self._check_for_cancellation()
@@ -273,9 +441,10 @@ class VideoPreview:
 
             # OPTIMIERUNG: Prüfe ob bereits eine gültige Kopie existiert
             # Bei Stream-Copy ODER bei Re-Encoding mit preserve_cache
-            if (not needs_reencoding or preserve_cache) and original_path in self.video_copies_map:
-                existing_copy = self.video_copies_map[original_path]
-                if os.path.exists(existing_copy):
+            if not needs_reencoding or preserve_cache:
+                existing_copy = self._find_cached_copy(original_path)
+
+                if existing_copy:
                     # Kopie existiert bereits - überspringen!
                     print(f"♻️ Verwende bereits existierende Kopie: {os.path.basename(existing_copy)}")
 
@@ -283,11 +452,15 @@ class VideoPreview:
                     if existing_copy != copy_path:
                         try:
                             # Benenne um zu neuem Index-Pfad
+                            file_identity = self._get_file_identity(original_path)
                             shutil.move(existing_copy, copy_path)
-                            self.video_copies_map[original_path] = copy_path
+                            # Aktualisiere Cache mit neuem Pfad
+                            if file_identity:
+                                self.video_copies_map[file_identity] = copy_path
                             print(f"  → Umbenannt zu: {os.path.basename(copy_path)}")
-                        except:
+                        except Exception as e:
                             # Falls Umbenennung fehlschlägt, behalte alten Pfad
+                            print(f"  ⚠️ Umbenennung fehlgeschlagen: {e}")
                             copy_path = existing_copy
 
                     temp_copy_paths.append(copy_path)
@@ -299,23 +472,124 @@ class VideoPreview:
             source_path = original_path
             if not os.path.exists(original_path):
                 # Datei existiert nicht am Original-Ort, suche im Working-Folder
-                if original_path in self.video_copies_map:
-                    working_copy = self.video_copies_map[original_path]
-                    if os.path.exists(working_copy):
-                        source_path = working_copy
-                        print(f"→ Verwende Working-Folder-Kopie: {os.path.basename(working_copy)}")
-                    else:
-                        raise Exception(f"Datei nicht gefunden: {filename} (weder in Upload-Ordner noch Working-Folder)")
+                working_copy = self._find_cached_copy(original_path)
+                if working_copy and os.path.exists(working_copy):
+                    source_path = working_copy
+                    print(f"→ Verwende Working-Folder-Kopie: {os.path.basename(working_copy)}")
                 else:
-                    raise Exception(f"Datei nicht gefunden: {filename}")
+                    raise Exception(f"Datei nicht gefunden: {filename} (weder in Upload-Ordner noch Working-Folder)")
 
-            if needs_reencoding:
-                # --- Fall B: Neukodierung ---
-                status_msg = f"Kodiere Clip {i + 1}/{total_clips} (1080p@30)..."
+            # Füge zur Liste der zu verarbeitenden Videos hinzu
+            videos_to_process.append((i, original_path, source_path, copy_path, filename))
+            temp_copy_paths.append(copy_path)  # Bereits hier hinzufügen für korrekte Reihenfolge
+
+        # Verarbeite Videos (parallel oder sequenziell)
+        if needs_reencoding and self.parallel_processor and len(videos_to_process) > 1:
+            # --- PARALLEL: Re-Encoding mehrerer Videos gleichzeitig ---
+            print(f"🚀 Starte paralleles Re-Encoding von {len(videos_to_process)} Videos...")
+            self.parent.after(0, lambda: self.status_label.config(
+                text=f"Kodiere {len(videos_to_process)} Videos parallel...", fg="orange"))
+
+            # NEU: Aktiviere Progress-Modus in DragDrop-Tabelle
+            if self.app and hasattr(self.app, 'drag_drop'):
+                self.parent.after(0, self.app.drag_drop.show_progress_mode)
+
+            # Setze initialen Gesamt-Fortschritt
+            self.parent.after(0, self.progress_handler.update_progress, 0, len(videos_to_process))
+
+            # Erstelle Tasks für parallele Verarbeitung
+            tasks = []
+            for i, original_path, source_path, copy_path, filename in videos_to_process:
+                # Setze Status auf "Warte..." für alle Videos
+                if self.app and hasattr(self.app, 'drag_drop'):
+                    self.parent.after(0, self.app.drag_drop.set_video_status, i, "⏳ Warte...")
+
+                def reencode_task(src=source_path, dst=copy_path, idx=i, task_id=None):
+                    # Setze Status auf "Kodiert..." wenn Task startet
+                    if self.app and hasattr(self.app, 'drag_drop'):
+                        self.parent.after(0, self.app.drag_drop.set_video_status, idx, "🔄 Kodiert...")
+                    self._reencode_single_clip(src, dst, task_id, idx)
+                tasks.append((reencode_task, (), {}))
+
+            # Führe parallele Verarbeitung aus
+            start_time = time.time()
+
+            # Zähler für fertige Videos (thread-safe)
+            import threading
+            completed_videos = {'count': 0}
+            completed_lock = threading.Lock()
+
+            def on_video_completed(task_index):
+                """Callback wenn ein Video fertig enkodiert ist"""
+                with completed_lock:
+                    completed_videos['count'] += 1
+                    # Update Gesamt-Fortschritt in VideoPreview
+                    self.parent.after(0, self.progress_handler.update_progress,
+                                    completed_videos['count'], len(videos_to_process))
+
+            results = self.parallel_processor.process_videos_parallel(tasks, self.cancellation_event, on_video_completed)
+            total_time = time.time() - start_time
+
+            # Prüfe auf Fehler
+            for task_index, result, error in results:
+                if error:
+                    if self.cancellation_event.is_set():
+                        print("Paralleles Re-Encoding abgebrochen.")
+                        raise Exception("Neukodierung abgebrochen.")
+                    else:
+                        i, original_path, source_path, copy_path, filename = videos_to_process[task_index]
+                        print(f"Fehler bei Neukodierung von {filename}: {error}")
+                        raise Exception(f"Fehler bei Neukodierung von {filename}")
+
+            avg_time = total_time / len(videos_to_process)
+            print(f"✅ Paralleles Re-Encoding abgeschlossen in {total_time:.1f}s ({avg_time:.1f}s pro Video)")
+
+            # Cache Metadaten für alle verarbeiteten Videos
+            for i, original_path, source_path, copy_path, filename in videos_to_process:
+                file_identity = self._get_file_identity(original_path)
+                if file_identity:
+                    self.video_copies_map[file_identity] = copy_path
+                self._cache_metadata_for_copy(original_path, copy_path)
+
+        elif needs_reencoding and len(videos_to_process) > 0:
+            # --- SEQUENZIELL: Re-Encoding (wie bisher) ---
+            print(f"Starte sequenzielles Re-Encoding von {len(videos_to_process)} Videos...")
+
+            # NEU: Aktiviere Progress-Modus in DragDrop-Tabelle
+            if self.app and hasattr(self.app, 'drag_drop'):
+                self.parent.after(0, self.app.drag_drop.show_progress_mode)
+
+            encoding_times = []
+
+            for idx, (i, original_path, source_path, copy_path, filename) in enumerate(videos_to_process):
+                self._check_for_cancellation()
+
+                start_time = time.time()
+
+                # Berechne ETA basierend auf bisherigen Kodierzeiten
+                eta_str = ""
+                if encoding_times:
+                    avg_time_per_video = sum(encoding_times) / len(encoding_times)
+                    remaining_videos = len(videos_to_process) - idx
+                    eta_seconds = avg_time_per_video * remaining_videos
+                    eta_minutes = int(eta_seconds // 60)
+                    eta_secs = int(eta_seconds % 60)
+                    eta_str = f" (ETA: ~{eta_minutes}:{eta_secs:02d})"
+
+                status_msg = f"Kodiere Clip {idx + 1}/{len(videos_to_process)}{eta_str}..."
                 self.parent.after(0, lambda msg=status_msg: self.status_label.config(text=msg, fg="orange"))
 
+                # Setze Status in DragDrop-Tabelle
+                if self.app and hasattr(self.app, 'drag_drop'):
+                    self.parent.after(0, self.app.drag_drop.set_video_status, i, "🔄 Kodiert...")
+
                 try:
-                    self._reencode_single_clip(source_path, copy_path)
+                    self._reencode_single_clip(source_path, copy_path, video_index=i)
+
+                    # Speichere Kodierzeit für ETA-Berechnung
+                    encoding_time = time.time() - start_time
+                    encoding_times.append(encoding_time)
+
                 except Exception as e:
                     if self.cancellation_event.is_set():
                         print("Neukodierung abgebrochen.")
@@ -324,9 +598,22 @@ class VideoPreview:
                         print(f"Fehler bei Neukodierung von {filename}: {e}")
                         raise Exception(f"Fehler bei Neukodierung von {filename}")
 
-            else:
-                # --- Fall A: Stream-Copy (ohne Thumbnails) ---
-                status_msg = f"Kopiere Clip {i + 1}/{total_clips}..."
+                # Speichere im Cache mit file-identity als Key
+                file_identity = self._get_file_identity(original_path)
+                if file_identity:
+                    self.video_copies_map[file_identity] = copy_path
+
+                # NEU: Metadaten direkt nach Erstellung der Kopie cachen
+                self._cache_metadata_for_copy(original_path, copy_path)
+
+                self.parent.after(0, self.progress_handler.update_progress, idx + 1, len(videos_to_process))
+
+        elif not needs_reencoding and len(videos_to_process) > 0:
+            # --- Stream-Copy (ohne Thumbnails) ---
+            for idx, (i, original_path, source_path, copy_path, filename) in enumerate(videos_to_process):
+                self._check_for_cancellation()
+
+                status_msg = f"Kopiere Clip {idx + 1}/{len(videos_to_process)}..."
                 self.parent.after(0, lambda msg=status_msg: self.status_label.config(text=msg, fg="blue"))
 
                 try:
@@ -336,17 +623,22 @@ class VideoPreview:
                     print(f"Fehler beim Kopieren von {filename}: {e}")
                     raise Exception(f"Fehler beim Kopieren von {filename}")
 
-            temp_copy_paths.append(copy_path)
-            self.video_copies_map[original_path] = copy_path
+                # Speichere im Cache mit file-identity als Key
+                file_identity = self._get_file_identity(original_path)
+                if file_identity:
+                    self.video_copies_map[file_identity] = copy_path
 
-            # NEU: Metadaten direkt nach Erstellung der Kopie cachen
-            self._cache_metadata_for_copy(original_path, copy_path)
+                # NEU: Metadaten direkt nach Erstellung der Kopie cachen
+                self._cache_metadata_for_copy(original_path, copy_path)
 
-            self.parent.after(0, self.progress_handler.update_progress, i + 1, total_clips)
+                self.parent.after(0, self.progress_handler.update_progress, idx + 1, len(videos_to_process))
 
         # NEU: Entsperre Schneiden-Button nach Kopieren/Kodieren
         if self.app and hasattr(self.app, 'drag_drop'):
             self.parent.after(0, lambda: self.app.drag_drop.set_cut_button_enabled(True))
+            # Deaktiviere Progress-Modus und zeige wieder Datum/Uhrzeit
+            if needs_reencoding and len(videos_to_process) > 0:
+                self.parent.after(0, self.app.drag_drop.show_normal_mode)
 
         self.parent.after(0, self.progress_handler.reset)
         return temp_copy_paths
@@ -457,163 +749,383 @@ class VideoPreview:
             print(f"    Konnte Thumbnail-Check nicht durchführen: {e}")
             return False  # Im Zweifelsfall ohne Thumbnail-Entfernung kopieren
 
-    def _reencode_single_clip(self, input_path, output_path):
+    def _run_ffmpeg_with_progress(self, command, total_duration=None, task_name="Encoding", task_id=None, video_index=None):
         """
-        Neukodiert eine einzelne Videodatei auf 1080p@30fps. (Blockierend)
-        Fehlertolerantes Encoding für korrupte/beschädigte Videos.
-        OPTIMIERT für Geschwindigkeit - Vorschau-Qualität ist ausreichend.
+        Führt FFmpeg-Befehl aus und liest den Fortschritt live aus.
+
+        WICHTIG: Nutzt separaten Thread für stderr um Deadlocks zu vermeiden.
+
+        Args:
+            command: FFmpeg-Befehl als Liste
+            total_duration: Gesamtdauer des Videos in Sekunden (für Fortschrittsberechnung)
+            task_name: Name der Aufgabe für Status-Updates
+            task_id: Optional ID für parallele Tasks
+            video_index: Optional Index des Videos in der DragDrop-Tabelle
+
+        Returns:
+            True bei Erfolg, wirft Exception bei Fehler
+        """
+        # Füge Progress-Ausgabe zu FFmpeg-Befehl hinzu
+        progress_command = command.copy()
+        # Füge -progress pipe:1 vor dem Output-File ein (letztes Element)
+        output_file = progress_command[-1]
+        progress_command = progress_command[:-1] + ['-progress', 'pipe:1'] + [output_file]
+
+        # Starte FFmpeg-Prozess
+        process = subprocess.Popen(
+            progress_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1,  # Line buffered
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+        )
+
+        start_time = time.time()
+        last_update_time = start_time
+
+        # Lese Fortschritt aus stdout
+        current_time_sec = 0.0
+        fps = 0.0
+
+        # Sammle stderr in separatem Thread um Deadlock zu vermeiden
+        stderr_lines = []
+        def read_stderr():
+            try:
+                for line in process.stderr:
+                    stderr_lines.append(line)
+            except Exception as ex:
+                # It's possible for the pipe to close unexpectedly if the process ends.
+                # We ignore these errors to avoid crashing the background thread.
+                # If needed, log unexpected exceptions for debugging.
+                # import logging
+                # logging.exception("Exception in read_stderr thread")
+                pass
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stderr_thread.start()
+
+        try:
+            while True:
+                self._check_for_cancellation()
+
+                # Non-blocking read mit Timeout
+                line = process.stdout.readline()
+                if not line:
+                    # Prüfe ob Prozess beendet ist
+                    if process.poll() is not None:
+                        break
+                    # Kurze Pause um CPU nicht zu belasten
+                    time.sleep(0.01)
+                    continue
+
+                line = line.strip()
+
+                # Parse FFmpeg Progress-Ausgabe
+                if line.startswith('out_time_ms='):
+                    try:
+                        time_ms_str = line.split('=')[1].strip()
+                        time_ms = int(time_ms_str)
+                        current_time_sec = time_ms / 1000000.0
+                    except (ValueError, IndexError):
+                        # Ignore malformed FFmpeg progress lines; these are expected occasionally.
+                        pass
+
+                elif line.startswith('fps='):
+                    fps_str = line.split('=')[1].strip()
+                    try:
+                        fps = float(fps_str)
+                    except ValueError:
+                        # Ignore malformed fps values; not critical for progress update
+                        pass
+
+                # Update nur alle 0.5 Sekunden um UI nicht zu überlasten
+                current_update_time = time.time()
+                if current_update_time - last_update_time >= 0.5:
+                    last_update_time = current_update_time
+
+                    # Stelle sicher, dass total_duration ein numerischer Wert ist
+                    if total_duration is not None and isinstance(total_duration, (int, float)) and total_duration > 0:
+                        progress_percent = min((current_time_sec / total_duration) * 100, 100)
+
+                        # Berechne ETA
+                        elapsed_time = current_update_time - start_time
+                        if current_time_sec > 0 and elapsed_time > 0:
+                            encoding_speed = current_time_sec / elapsed_time
+                            remaining_time = (total_duration - current_time_sec) / encoding_speed if encoding_speed > 0 else 0
+
+                            # Formatiere ETA
+                            eta_minutes = int(remaining_time // 60)
+                            eta_seconds = int(remaining_time % 60)
+                            eta_str = f"{eta_minutes}:{eta_seconds:02d}"
+
+                            # Sende Update NUR an DragDrop-Tabelle für individuellen Clip-Fortschritt
+                            # VideoPreview zeigt Gesamt-Fortschritt über update_progress()
+                            if video_index is not None and self.app and hasattr(self.app, 'drag_drop'):
+                                self.parent.after(0, self.app.drag_drop.update_video_progress,
+                                                video_index, progress_percent, fps, eta_str)
+
+            # Warte auf Prozessende mit Timeout
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                print("⚠️ FFmpeg antwortet nicht - beende Prozess...")
+                process.kill()
+                process.wait()
+
+            # Warte auf stderr-Thread
+            stderr_thread.join(timeout=2)
+
+            # Prüfe Return Code
+            if process.returncode != 0:
+                stderr_output = ''.join(stderr_lines)
+                if self.cancellation_event.is_set():
+                    raise Exception("Encoding vom Benutzer abgebrochen.")
+
+                # Zeige nur relevante stderr-Zeilen (letzte 20)
+                stderr_relevant = '\n'.join(stderr_lines[-20:]) if stderr_lines else "Kein stderr verfügbar"
+                print(f"FFmpeg Fehler (Code {process.returncode}):")
+                print(stderr_relevant)
+                raise subprocess.CalledProcessError(process.returncode, command, stderr=stderr_output)
+
+            # Finaler 100% Status nur für DragDrop-Tabelle (nicht für VideoPreview ProgressHandler)
+            # VideoPreview zeigt Gesamt-Fortschritt über update_progress()
+            if video_index is not None and self.app and hasattr(self.app, 'drag_drop'):
+                if total_duration is not None and isinstance(total_duration, (int, float)):
+                    self.parent.after(0, self.app.drag_drop.update_video_progress,
+                                    video_index, 100, fps, "0:00")
+
+            return True
+
+        except Exception as e:
+            # Beende FFmpeg-Prozess bei Fehler
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise
+
+    def _get_video_duration_seconds(self, video_path):
+        """
+        Ermittelt die Dauer eines Videos in Sekunden mit ffprobe.
+
+        Args:
+            video_path: Pfad zur Videodatei
+
+        Returns:
+            Dauer in Sekunden als float, oder None bei Fehler
+        """
+        try:
+            command = [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                video_path
+            ]
+            result = subprocess.run(command, capture_output=True, text=True,
+                                  timeout=10, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+            if result.returncode == 0 and result.stdout.strip():
+                duration_str = result.stdout.strip()
+                return float(duration_str)
+            else:
+                return None
+        except (ValueError, subprocess.TimeoutExpired) as e:
+            print(f"Warnung: Konnte Videodauer nicht ermitteln für {video_path}: {e}")
+            return None
+
+    def _reencode_single_clip(self, input_path, output_path, task_id=None, video_index=None):
+        """
+        Kodiert ein einzelnes Video neu auf das Ziel-Format.
+        WICHTIG: Blockiert während des Re-Encodings.
+
+        Args:
+            input_path: Pfad zum Input-Video
+            output_path: Pfad zum Output-Video
+            task_id: Optional Task-ID für paralleles Encoding
+            video_index: Optional Index des Videos in der DragDrop-Tabelle
         """
         target_params = {
             'width': 1920, 'height': 1080, 'fps': 30, 'pix_fmt': 'yuv420p',
-            'video_codec': 'libx264', 'audio_codec': 'aac', 'audio_sample_rate': 48000, 'audio_channels': 2
+            'audio_codec': 'aac', 'audio_sample_rate': 48000, 'audio_channels': 2
         }
         tp = target_params
 
-        cmd = [
-            "ffmpeg", "-y",
-            # FEHLERTOLERANZ: Ignoriere Dekodier-Fehler in korrupten Videos
-            "-err_detect", "ignore_err",
-            "-fflags", "+genpts+igndts",
-            "-i", input_path,
-            # OPTIMIERT: Einfachere Filter-Chain (schneller)
-            "-vf", f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']}",
-            "-c:v", tp['video_codec'],
-            # SPEED-OPTIMIERUNG:
-            "-preset", "veryfast",     # veryfast statt fast = ~2x schneller
-            "-crf", "26",              # 26 statt 23 = kleinere Datei, für Vorschau OK
-            "-tune", "fastdecode",     # Optimiert für schnelles Dekodieren
-            "-x264-params", "ref=1:me=dia:subme=1:trellis=0",  # Minimale Qualitätseinstellungen für max. Speed
-            # Audio-Encoding
+        # Hole Encoding-Parameter (Hardware oder Software)
+        encoding_params = self._get_encoding_params('h264')
+
+        cmd = ["ffmpeg", "-y"]
+
+        # FEHLERTOLERANZ: Ignoriere Dekodier-Fehler
+        cmd.extend(["-err_detect", "ignore_err", "-fflags", "+genpts+igndts"])
+
+        # Hardware-spezifische Konfiguration
+        hw_info = self.hw_detector.detect_hardware()
+        hw_type = hw_info.get('type') if hw_info.get('available') else None
+        # NEU: use_hw_filters = False, weil wir Software-Filter für Aspect-Ratio nutzen
+        # Nur das Encoding läuft in Hardware, nicht die Filter
+        use_hw_filters = False  # Deaktiviert wegen Aspect-Ratio-Problemen
+
+        # Kein Hardware-Decoding, da wir Software-Filter verwenden
+        # Dies verhindert Pixel-Format-Inkompatibilitäten
+
+        # Input
+        cmd.extend(["-i", input_path])
+
+        # Filter-Chain basierend auf Hardware-Typ
+        if use_hw_filters and hw_type == 'intel':
+            # Intel Quick Sync: Verwende vpp_qsv (Video Processing Pipeline)
+            # WICHTIG: vpp_qsv hat KEIN force_original_aspect_ratio!
+            # Lösung: Erst mit Software-Scale auf richtige Größe MIT Aspect Ratio,
+            # dann mit vpp_qsv nur FPS-Konvertierung und Format
+            # Alternative: Nutze Software-Filter für Scaling, nur Hardware für Encoding
+            filter_str = (
+                f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
+                f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"fps={tp['fps']},format=nv12,hwupload=extra_hw_frames=64,format=qsv"
+            )
+            cmd.extend(["-vf", filter_str])
+        elif use_hw_filters and hw_type == 'nvidia':
+            # NVIDIA CUDA: scale_cuda unterstützt force_original_aspect_ratio nicht direkt
+            # Lösung: Berechne Scaling manuell oder nutze Software-Filter
+            # Für Konsistenz: Software-Scale + Hardware-Upload
+            filter_str = (
+                f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
+                f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"fps={tp['fps']},format=nv12,hwupload"
+            )
+            cmd.extend(["-vf", filter_str])
+        else:
+            # Software-Filter (Standard)
+            cmd.extend([
+                "-vf", f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']}"
+            ])
+
+        # Video-Encoder (Hardware oder Software)
+        cmd.extend(encoding_params['output_params'])
+
+        # Zusätzliche Parameter für Software-Encoding (wenn HW nicht aktiv)
+        if not self.hw_accel_enabled:
+            cmd.extend([
+                "-preset", "veryfast",
+                "-crf", "26",
+                "-tune", "fastdecode",
+                "-x264-params", "ref=1:me=dia:subme=1:trellis=0"
+            ])
+        else:
+            # Bei Hardware-Encoding: Optimierte Qualitätseinstellungen
+            # (preset und tune sind bereits in encoding_params enthalten)
+            print(f"  → Nutze Hardware-Encoder: {encoding_params['encoder']}")
+            if use_hw_filters:
+                print(f"  → Nutze Hardware-Filter: {hw_type}")
+
+        # Audio-Encoding
+        cmd.extend([
             "-c:a", tp['audio_codec'],
-            "-b:a", "96k",             # 96k statt 128k - ausreichend für Vorschau
+            "-b:a", "96k",
             "-ar", str(tp['audio_sample_rate']),
-            "-ac", str(tp['audio_channels']),
-            # Container-Optionen
+            "-ac", str(tp['audio_channels'])
+        ])
+
+        # Container-Optionen
+        cmd.extend([
             "-movflags", "+faststart",
             "-max_muxing_queue_size", "1024",
             "-map", "0:v:0", "-map", "0:a:0?",
             output_path
-        ]
+        ])
 
         # WICHTIG: Capture stderr für Fehlerdiagnose
-        # Auf Windows müssen wir communicate() verwenden statt manuell zu lesen
-        print(f"Starte Re-Encoding: {os.path.basename(input_path)} → 1080p@30fps")
+        hw_status = "HW-Beschleunigung" if self.hw_accel_enabled else "Software"
+        print(f"Starte Re-Encoding ({hw_status}): {os.path.basename(input_path)} → 1080p@30fps")
 
-        self.ffmpeg_process = subprocess.Popen(
-            cmd,
-            stderr=subprocess.PIPE,
-            stdout=subprocess.PIPE,  # Auch stdout capturen
-            universal_newlines=True,
-            encoding='utf-8',
-            errors='replace',
-            creationflags=SUBPROCESS_CREATE_NO_WINDOW
-        )
+        # Hole Videodauer für Fortschrittsanzeige
+        total_duration = self._get_video_duration_seconds(input_path)
+        if total_duration is None:
+            print(f"Warnung: Konnte Videodauer nicht ermitteln - kein ETA verfügbar")
 
-        # Warte mit Timeout und hole Output
-        # communicate() liest automatisch und verhindert Pipe-Buffer-Overflow
+        # Task Name basierend auf task_id
+        task_name = f"Re-Encoding {os.path.basename(input_path)[:20]}"
+        if task_id:
+            task_name = f"[Task {task_id}] " + task_name
+
+        # Verwende neue Methode mit Live-Fortschritt
         try:
-            # Verwende einen Thread um Abbruch zu ermöglichen
-            import threading
+            self._run_ffmpeg_with_progress(cmd, total_duration, task_name, task_id, video_index)
+            print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
 
-            result_holder = {'stdout': None, 'stderr': None, 'done': False}
+            # Setze Status in DragDrop-Tabelle auf "Fertig"
+            if video_index is not None and self.app and hasattr(self.app, 'drag_drop'):
+                self.parent.after(0, self.app.drag_drop.set_video_status, video_index, "✓ Fertig")
 
-            def communicate_thread():
-                try:
-                    stdout, stderr = self.ffmpeg_process.communicate(timeout=300)  # 5 Min Timeout
-                    result_holder['stdout'] = stdout
-                    result_holder['stderr'] = stderr
-                    result_holder['done'] = True
-                except subprocess.TimeoutExpired:
-                    print("⚠️ FFmpeg Timeout (>5 Min), terminiere Prozess...")
-                    self.ffmpeg_process.kill()
-                    stdout, stderr = self.ffmpeg_process.communicate()
-                    result_holder['stdout'] = stdout
-                    result_holder['stderr'] = stderr
-                    result_holder['done'] = True
-                except Exception as e:
-                    print(f"❌ Fehler in communicate_thread: {e}")
-                    # Versuche trotzdem stderr zu holen
-                    try:
-                        if self.ffmpeg_process and self.ffmpeg_process.poll() is not None:
-                            # Prozess ist beendet, hole Output
-                            result_holder['stderr'] = self.ffmpeg_process.stderr.read() if self.ffmpeg_process.stderr else ""
-                            result_holder['stdout'] = self.ffmpeg_process.stdout.read() if self.ffmpeg_process.stdout else ""
-                    except:
-                        pass
-                    result_holder['done'] = True
+            return  # Erfolg!
+        except subprocess.CalledProcessError as e:
+            # Hole stderr aus dem Fehler
+            stderr_text = e.stderr if hasattr(e, 'stderr') else "Kein stderr verfügbar"
 
-            comm_thread = threading.Thread(target=communicate_thread, daemon=True)
-            comm_thread.start()
+            # ZUSÄTZLICHE ÜBERPRÜFUNG: Wenn Output-Datei existiert und vernünftige Größe hat,
+            # betrachte als Erfolg
+            output_exists = os.path.exists(output_path)
+            output_size = os.path.getsize(output_path) if output_exists else 0
+            output_valid = output_exists and output_size > 10240
 
-            # Warte auf Thread, aber prüfe Abbruch-Signal
-            while not result_holder['done']:
-                if self.cancellation_event.is_set():
-                    print(f"Abbruch-Signal empfangen. Terminiere FFmpeg für: {input_path}")
-                    self.ffmpeg_process.terminate()
-                    time.sleep(0.5)
-                    if self.ffmpeg_process.poll() is None:
-                        self.ffmpeg_process.kill()
-                    comm_thread.join(timeout=2)
-                    self.ffmpeg_process = None
-                    raise Exception("Neukodierung vom Benutzer abgebrochen.")
-                time.sleep(0.1)
+            if output_valid:
+                print(f"⚠️ FFmpeg beendet mit Fehler, aber Output-Datei ist valid ({output_size} bytes)")
+                print(f"→ Betrachte als Erfolg")
+                print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+                return  # Erfolg!
 
-            comm_thread.join(timeout=1)
-
-        except Exception as e:
-            if "abgebrochen" in str(e):
-                raise
-            print(f"Fehler beim Warten auf FFmpeg: {e}")
-            if self.ffmpeg_process:
-                self.ffmpeg_process.kill()
-                self.ffmpeg_process = None
-            raise
-
-        returncode = self.ffmpeg_process.returncode if self.ffmpeg_process else -1
-        self.ffmpeg_process = None
-
-        # Hole stderr aus dem result_holder
-        stderr_text = result_holder.get('stderr', '') or ''
-
-        # DEBUG: Zeige was wir haben
-        print(f"DEBUG: returncode={returncode}, stderr_length={len(stderr_text) if stderr_text else 0}")
-
-        if returncode != 0:
-            # Zeige die letzten Zeilen des stderr-Outputs für Debugging
-            if stderr_text and len(stderr_text) > 0:
-                last_lines = '\n'.join(stderr_text.split('\n')[-30:])
-            else:
-                last_lines = "⚠️ Kein stderr Output verfügbar - möglicherweise wurde communicate() nicht erfolgreich ausgeführt"
-
+            # Echter Fehler - zeige Details
             print(f"\n{'='*60}")
             print(f"FFmpeg Fehler bei: {os.path.basename(input_path)}")
             print(f"{'='*60}")
-            print(f"Returncode: {returncode} (unsigned: {returncode & 0xFFFFFFFF})")
-            print(f"\nLetzter FFmpeg Output:")
-            print(last_lines)
+            print(f"Fehler: {stderr_text[:500]}")  # Zeige ersten Teil
             print(f"{'='*60}\n")
 
-            # Gebe detaillierte Fehlermeldung
-            error_msg = f"FFmpeg-Fehler (Code {returncode}) bei der Neukodierung von {input_path}"
+            # WICHTIG: Prüfe auf Hardware-Encoder-Fehler und versuche Fallback
+            if self.hw_accel_enabled and stderr_text:
+                hw_error_indicators = [
+                    "Driver does not support",
+                    "nvenc API version",
+                    "minimum required Nvidia driver",
+                    "Error while opening encoder",
+                    "Could not open encoder",
+                    "No NVENC capable devices found",
+                    "Cannot load nvcuda.dll",
+                    "amf encoder error",
+                    "qsv encoder error",
+                    "Unable to parse option",
+                    "Error setting option",
+                    "Undefined constant",
+                    "hwaccel initialisation returned error"
+                ]
 
-            # Analysiere Fehler
-            if stderr_text:
-                if "Invalid" in stderr_text or "does not contain" in stderr_text:
-                    error_msg += "\n→ Mögliches Problem: Video-/Audio-Stream fehlt oder ist ungültig"
-                elif "Conversion failed" in stderr_text:
-                    error_msg += "\n→ Mögliches Problem: Filter-Chain oder Codec-Fehler"
-                elif "No such filter" in stderr_text:
-                    error_msg += "\n→ Mögliches Problem: FFmpeg-Filter nicht verfügbar"
-                elif "height not divisible" in stderr_text or "width not divisible" in stderr_text:
-                    error_msg += "\n→ Mögliches Problem: Auflösung nicht durch 2 teilbar"
-                elif "Unknown encoder" in stderr_text:
-                    error_msg += "\n→ Mögliches Problem: Codec nicht verfügbar in dieser FFmpeg-Build"
-            else:
-                error_msg += "\n→ Kein FFmpeg-Output verfügbar (Pipe-Problem?)"
+                if any(indicator in stderr_text for indicator in hw_error_indicators):
+                    print(f"⚠️ Hardware-Encoder-Fehler erkannt!")
+                    print(f"→ Versuche Fallback auf Software-Encoding (libx264)...")
 
-            raise Exception(error_msg)
+                    # Deaktiviere Hardware-Beschleunigung temporär
+                    original_hw_state = self.hw_accel_enabled
+                    self.hw_accel_enabled = False
 
-        print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+                    try:
+                        # Rekursiver Aufruf mit Software-Encoding
+                        self._reencode_single_clip(input_path, output_path, task_id, video_index)
+                        print(f"✅ Software-Encoding erfolgreich als Fallback")
+                        return  # Erfolgreicher Fallback
+                    finally:
+                        # Stelle Hardware-Zustand wieder her
+                        self.hw_accel_enabled = original_hw_state
+
+            # Kein Fallback möglich - werfe Fehler
+            raise Exception(f"Re-Encoding fehlgeschlagen: {os.path.basename(input_path)}")
+        except Exception as e:
+            if "abgebrochen" in str(e) or "abort" in str(e).lower():
+                raise  # Nutzer-Abbruch weiterreichen
+            print(f"Fehler beim Re-Encoding: {e}")
+            raise
 
     def _create_combined_preview(self, video_paths):
         """
@@ -632,13 +1144,20 @@ class VideoPreview:
             needs_reencoding = False
             temp_copy_paths = []
 
-            # Prüfe ob bereits Kopien existieren
-            all_videos_cached = all(original_path in self.video_copies_map for original_path in video_paths)
+            # Prüfe ob bereits Kopien existieren (mit file-identity-basiertem Cache)
+            all_videos_cached = True
+            cached_copy_paths = []
+
+            for original_path in video_paths:
+                copy_path = self._find_cached_copy(original_path)
+                if copy_path:
+                    cached_copy_paths.append(copy_path)
+                else:
+                    all_videos_cached = False
+                    break
 
             if all_videos_cached and self.temp_dir and os.path.exists(self.temp_dir):
                 # FALL 1: Alle Videos bereits gecacht (z.B. beim Verschieben)
-                cached_copy_paths = [self.video_copies_map[original_path] for original_path in video_paths]
-
                 # Prüfe ob alle Kopien noch existieren
                 if all(os.path.exists(copy_path) for copy_path in cached_copy_paths):
                     print(f"✅ Alle {len(cached_copy_paths)} Videos bereits im Cache")
@@ -655,9 +1174,16 @@ class VideoPreview:
             if not all_videos_cached:
                 # FALL 2: Nicht alle Videos gecacht (neue Videos hinzugefügt)
 
-                # Finde neue Videos (nicht im Cache)
-                new_videos = [p for p in video_paths if p not in self.video_copies_map]
-                cached_videos = [p for p in video_paths if p in self.video_copies_map]
+                # Finde neue Videos (nicht im Cache) - mit file-identity-basiertem Cache
+                new_videos = []
+                cached_videos = []
+
+                for p in video_paths:
+                    copy_path = self._find_cached_copy(p)
+                    if copy_path:
+                        cached_videos.append(p)
+                    else:
+                        new_videos.append(p)
 
                 print(f"📊 Neue Videos: {len(new_videos)}, Gecachte: {len(cached_videos)}")
 
@@ -679,8 +1205,9 @@ class VideoPreview:
                         # Jetzt baue temp_copy_paths in der richtigen Reihenfolge
                         temp_copy_paths = []
                         for p in video_paths:
-                            if p in self.video_copies_map:
-                                temp_copy_paths.append(self.video_copies_map[p])
+                            copy_path = self._find_cached_copy(p)
+                            if copy_path:
+                                temp_copy_paths.append(copy_path)
                             else:
                                 # Sollte nicht passieren, aber zur Sicherheit
                                 raise Exception(f"Video {p} nicht in Cache gefunden!")
@@ -698,7 +1225,16 @@ class VideoPreview:
                             print("✅ Neue Videos kompatibel → Stream-Copy")
                             needs_reencoding = False
                             new_copied_paths = self._prepare_video_copies(new_videos, needs_reencoding=False)
-                            temp_copy_paths = [self.video_copies_map[p] for p in video_paths]
+
+                            # Baue temp_copy_paths mit file-identity-basiertem Cache
+                            temp_copy_paths = []
+                            for p in video_paths:
+                                copy_path = self._find_cached_copy(p)
+                                if copy_path:
+                                    temp_copy_paths.append(copy_path)
+                                else:
+                                    raise Exception(f"Video {p} nicht in Cache gefunden!")
+
                             self.parent.after(0, self._update_encoding_info, format_info)
                         else:
                             # Neue Videos nicht kompatibel → ALLE neu kodieren
@@ -743,7 +1279,13 @@ class VideoPreview:
                     temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding=needs_reencoding)
                 else:
                     # FALL 2c: Nur gecachte Videos (sollte nicht vorkommen, wäre FALL 1)
-                    temp_copy_paths = [self.video_copies_map[p] for p in video_paths]
+                    temp_copy_paths = []
+                    for p in video_paths:
+                        copy_path = self._find_cached_copy(p)
+                        if copy_path:
+                            temp_copy_paths.append(copy_path)
+                        else:
+                            raise Exception(f"Video {p} nicht in Cache gefunden!")
                     needs_reencoding = False
 
             if self.cancellation_event.is_set():
@@ -886,34 +1428,67 @@ class VideoPreview:
             return None
 
     def _check_video_formats(self, video_paths):
+        """Prüft ob Videos kompatible Formate haben - mit UI-Feedback und Spinner"""
         if len(video_paths) <= 1:
             return {"compatible": True, "details": "Nur ein Video - kompatibel"}
+
+        total = len(video_paths)
         formats = []
-        for video_path in video_paths:
-            try:
-                self._check_for_cancellation()  # Prüfe vor jedem blockierenden Aufruf
-                result = subprocess.run(['ffprobe', '-v', 'quiet', '-print_format', 'json',
-                                         '-show_format', '-show_streams', video_path],
-                                        capture_output=True, text=True, timeout=10,
-                                        creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                if result.returncode == 0:
-                    info = json.loads(result.stdout)
-                    video_stream = next((s for s in info.get('streams', []) if s.get('codec_type') == 'video'), None)
-                    if video_stream:
-                        formats.append({'codec_name': video_stream.get('codec_name', 'unknown'),
-                                        'width': video_stream.get('width', 0), 'height': video_stream.get('height', 0),
-                                        'r_frame_rate': video_stream.get('r_frame_rate', '0/0'),
-                                        'pix_fmt': video_stream.get('pix_fmt', 'unknown')})
+
+        # NEU: Erstelle Spinner für Format-Check
+        format_check_spinner = None
+
+        def show_spinner():
+            nonlocal format_check_spinner
+            format_check_spinner = CircularSpinner(self.progress_frame, size=40, line_width=4, color="#007ACC")
+            format_check_spinner.pack(pady=5)
+            format_check_spinner.start()
+
+        def hide_spinner():
+            nonlocal format_check_spinner
+            if format_check_spinner:
+                format_check_spinner.stop()
+                format_check_spinner.canvas.destroy()
+                format_check_spinner = None
+
+        # Zeige Spinner im Haupt-Thread
+        self.parent.after(0, show_spinner)
+
+        try:
+            for i, video_path in enumerate(video_paths):
+                # UI-Update: Zeige Fortschritt mit Spinner
+                progress_text = f"Prüfe Format {i + 1}/{total}..."
+                self.parent.after(0, lambda t=progress_text: self.status_label.config(text=t, fg="blue"))
+
+                try:
+                    self._check_for_cancellation()  # Prüfe vor jedem blockierenden Aufruf
+                    result = subprocess.run(['ffprobe', '-v', 'quiet', '-print_format', 'json',
+                                             '-show_format', '-show_streams', video_path],
+                                            capture_output=True, text=True, timeout=10,
+                                            creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                    if result.returncode == 0:
+                        info = json.loads(result.stdout)
+                        video_stream = next((s for s in info.get('streams', []) if s.get('codec_type') == 'video'), None)
+                        if video_stream:
+                            formats.append({'codec_name': video_stream.get('codec_name', 'unknown'),
+                                            'width': video_stream.get('width', 0), 'height': video_stream.get('height', 0),
+                                            'r_frame_rate': video_stream.get('r_frame_rate', '0/0'),
+                                            'pix_fmt': video_stream.get('pix_fmt', 'unknown')})
+                        else:
+                            formats.append({'error': 'No video stream'})
                     else:
-                        formats.append({'error': 'No video stream'})
-                else:
-                    formats.append({'error': 'FFprobe failed'})
-            except Exception as e:
-                if "abgebrochen" in str(e): raise  # Abbruch weiterleiten
-                formats.append({'error': str(e)})
+                        formats.append({'error': 'FFprobe failed'})
+                except Exception as e:
+                    if "abgebrochen" in str(e): raise  # Abbruch weiterleiten
+                    formats.append({'error': str(e)})
+
+        finally:
+            # Verstecke Spinner nach Format-Check
+            self.parent.after(0, hide_spinner)
+
         first_format = next((f for f in formats if 'error' not in f), None)
         if not first_format: return {"compatible": False, "details": "No valid video streams found."}
-        is_compatible = True;
+        is_compatible = True
         diffs = []
         for i, fmt in enumerate(formats):
             if 'error' in fmt:
@@ -929,10 +1504,12 @@ class VideoPreview:
 
     def _update_encoding_info(self, format_info):
         """Aktualisiert die Encoding-Information in der UI"""
+        encoder_name = self._get_current_encoder_name()
+
         if format_info["compatible"]:
-            self.encoding_label.config(text=f"Encoding: Kompatibel (Fall A)", fg="green")
+            self.encoding_label.config(text=f"Encoding: Kompatibel | {encoder_name}", fg="green")
         else:
-            self.encoding_label.config(text=f"Encoding: Standardisiert (Fall B)", fg="orange")
+            self.encoding_label.config(text=f"Encoding: Standardisiert | {encoder_name}", fg="orange")
 
     def _update_ui_success(self, copy_paths, was_reencoded):
         """
@@ -946,13 +1523,16 @@ class VideoPreview:
 
         # Gehe über die *Originalpfade*, um den Cache zu lesen
         for original_path in self.last_video_paths:
-            metadata = self.metadata_cache.get(original_path)
-            if metadata:
-                try:
-                    total_duration_s += float(metadata.get("duration_sec_str", "0.0"))
-                    total_bytes += metadata.get("size_bytes", 0)
-                except:
-                    pass  # Ignoriere fehlerhafte Cache-Einträge
+            # BUGFIX: Verwende file_identity als Cache-Key, nicht den Pfad direkt
+            file_identity = self._get_file_identity(original_path)
+            if file_identity:
+                metadata = self.metadata_cache.get(file_identity)
+                if metadata:
+                    try:
+                        total_duration_s += float(metadata.get("duration_sec_str", "0.0"))
+                        total_bytes += metadata.get("size_bytes", 0)
+                    except Exception:
+                        pass  # Ignoriere fehlerhafte Cache-Einträge
 
         minutes, seconds = divmod(total_duration_s, 60)
         total_duration = f"{int(minutes):02d}:{int(seconds):02d}"
@@ -962,12 +1542,15 @@ class VideoPreview:
         self.size_label.config(text=f"Dateigröße: {total_size}")
         self.clips_label.config(text=f"Anzahl Clips: {len(copy_paths)}")
 
+        # Hole Encoder-Namen
+        encoder_name = self._get_current_encoder_name()
+
         if was_reencoded:
             self.status_label.config(text="Vorschau bereit (standardisiert)", fg="green")
-            self.encoding_label.config(text="Encoding: Standardisiert (Fall B)", fg="orange")
+            self.encoding_label.config(text=f"Encoding: Standardisiert | {encoder_name}", fg="orange")
         else:
             self.status_label.config(text="Vorschau bereit (schnell)", fg="green")
-            self.encoding_label.config(text="Encoding: Direkt kombiniert (Fall A)", fg="green")
+            self.encoding_label.config(text=f"Encoding: Direkt kombiniert | {encoder_name}", fg="green")
 
         self.play_button.config(state="normal")
         self.action_button.config(state="disabled")
@@ -990,16 +1573,27 @@ class VideoPreview:
                                   command=self.retry_creation,
                                   state="normal")
         self.combined_video_path = None
-        self._cleanup_temp_copies()
+
+        # WICHTIG: Lösche temp_dir NUR wenn kein Neustart geplant ist!
+        if not self.pending_restart_callback:
+            self._cleanup_temp_copies()
+        else:
+            print("♻️ Behalte temp_dir trotz Fehler für Neustart")
 
     def register_new_copy(self, original_placeholder: str, new_copy_path: str):
         """
         Fügt ein neues Mapping für eine geteilte Datei hinzu.
+        Verwendet file-identity (Name + Größe) als Cache-Key.
         """
-        if original_placeholder in self.video_copies_map:
-            print(f"Warnung: Platzhalter {original_placeholder} existierte bereits. Wird überschrieben.")
+        file_identity = self._get_file_identity(original_placeholder)
+        if not file_identity:
+            print(f"⚠️ Kann neue Kopie nicht registrieren: File-Identity konnte nicht erstellt werden für {original_placeholder}")
+            return
 
-        self.video_copies_map[original_placeholder] = new_copy_path
+        if file_identity in self.video_copies_map:
+            print(f"Warnung: File-Identity {file_identity} existierte bereits. Wird überschrieben.")
+
+        self.video_copies_map[file_identity] = new_copy_path
         print(f"Neue Kopie registriert: {original_placeholder} -> {new_copy_path}")
 
     def regenerate_preview_after_cut(self, new_original_paths_list):
@@ -1070,13 +1664,16 @@ class VideoPreview:
         total_bytes = 0
 
         for original_path in self.last_video_paths: # self.last_video_paths wurde aktualisiert
-            metadata = self.metadata_cache.get(original_path)
-            if metadata:
-                try:
-                    total_duration_s += float(metadata.get("duration_sec_str", "0.0"))
-                    total_bytes += metadata.get("size_bytes", 0)
-                except:
-                    pass
+            # BUGFIX: Verwende file_identity als Cache-Key, nicht den Pfad direkt
+            file_identity = self._get_file_identity(original_path)
+            if file_identity:
+                metadata = self.metadata_cache.get(file_identity)
+                if metadata:
+                    try:
+                        total_duration_s += float(metadata.get("duration_sec_str", "0.0"))
+                        total_bytes += metadata.get("size_bytes", 0)
+                    except Exception:
+                        pass
 
         minutes, seconds = divmod(total_duration_s, 60)
         total_duration = f"{int(minutes):02d}:{int(seconds):02d}"
@@ -1165,7 +1762,13 @@ class VideoPreview:
                                   command=self.retry_creation,
                                   state="normal")
         self.combined_video_path = None
-        self._cleanup_temp_copies()
+
+        # WICHTIG: Lösche temp_dir NUR wenn kein Neustart geplant ist!
+        # Bei Neustart (neue Videos hinzufügen) wollen wir bereits kodierte Videos behalten
+        if not self.pending_restart_callback:
+            self._cleanup_temp_copies()
+        else:
+            print("♻️ Behalte temp_dir für Neustart (bereits kodierte Videos bleiben erhalten)")
 
     def cancel_creation(self):
         """Signals the processing thread to cancel the video creation."""
@@ -1185,6 +1788,10 @@ class VideoPreview:
         """Setzt die Vorschau zurück und löscht die temporäre Datei"""
         self.pending_restart_callback = None
         self.cancel_creation()
+
+        # NEU: Stelle Normal-Modus in DragDrop-Tabelle wieder her
+        if self.app and hasattr(self.app, 'drag_drop'):
+            self.app.drag_drop.show_normal_mode()
 
         # KORREKTUR: Zuerst Player entladen, um WinError 32 zu vermeiden
         if self.app and hasattr(self.app, 'video_player') and self.app.video_player:
@@ -1225,9 +1832,15 @@ class VideoPreview:
     def _cache_metadata_for_copy(self, original_path: str, copy_path: str):
         """
         [THREAD-SAFE] Liest Metadaten von der Kopie und speichert sie im Cache.
+        Verwendet file-identity (Name + Größe) als Cache-Key.
         """
         if not os.path.exists(copy_path):
             print(f"Kann Metadaten nicht cachen: Kopie {copy_path} existiert nicht.")
+            return
+
+        file_identity = self._get_file_identity(original_path)
+        if not file_identity:
+            print(f"Kann Metadaten nicht cachen: File-Identity konnte nicht erstellt werden für {original_path}")
             return
 
         try:
@@ -1244,7 +1857,7 @@ class VideoPreview:
             # Hole Format (Auflösung und FPS)
             format_str = self._get_video_format(copy_path)
 
-            self.metadata_cache[original_path] = {
+            self.metadata_cache[file_identity] = {
                 "duration": duration_str,
                 "duration_sec_str": duration_sec_str,
                 "size": size_str,
@@ -1260,7 +1873,7 @@ class VideoPreview:
 
         except Exception as e:
             print(f"Fehler beim Cachen der Metadaten für {original_path}: {e}")
-            self.metadata_cache[original_path] = {
+            self.metadata_cache[file_identity] = {
                 "duration": "FEHLER", "size": "FEHLER", "date": "FEHLER", "timestamp": "FEHLER", "format": "FEHLER"
             }
 
@@ -1292,23 +1905,28 @@ class VideoPreview:
         self.parent.after(0, on_complete_callback)
 
     def get_copy_path(self, original_path):
-        """Gibt den Pfad der temporären Kopie für einen Originalpfad zurück."""
-        return self.video_copies_map.get(original_path)
+        """Gibt den Pfad der temporären Kopie für einen Originalpfad zurück (basierend auf file-identity)."""
+        return self._find_cached_copy(original_path)
 
     def get_cached_metadata(self, original_path: str) -> Dict:
-        """Gibt das gecachte Metadaten-Wörterbuch für einen Originalpfad zurück."""
-        return self.metadata_cache.get(original_path)
+        """Gibt das gecachte Metadaten-Wörterbuch für einen Originalpfad zurück (basierend auf file-identity)."""
+        file_identity = self._get_file_identity(original_path)
+        if file_identity:
+            return self.metadata_cache.get(file_identity)
+        return None
 
     def clear_metadata_cache(self):
         """Leert den Metadaten-Cache (z.B. wenn alle Videos entfernt werden)."""
         self.metadata_cache.clear()
 
     def remove_path_from_cache(self, original_path: str):
-        """Entfernt einen bestimmten Pfad aus Cache und Map."""
-        if original_path in self.video_copies_map:
-            del self.video_copies_map[original_path]
-        if original_path in self.metadata_cache:
-            del self.metadata_cache[original_path]
+        """Entfernt einen bestimmten Pfad aus Cache und Map (basierend auf file-identity)."""
+        file_identity = self._get_file_identity(original_path)
+        if file_identity:
+            if file_identity in self.video_copies_map:
+                del self.video_copies_map[file_identity]
+            if file_identity in self.metadata_cache:
+                del self.metadata_cache[file_identity]
 
     def get_all_copy_paths(self):
         """
@@ -1318,7 +1936,7 @@ class VideoPreview:
         if not self.last_video_paths:
             return []
 
-        paths = [self.video_copies_map.get(orig_path) for orig_path in self.last_video_paths]
+        paths = [self._find_cached_copy(orig_path) for orig_path in self.last_video_paths]
         return [p for p in paths if p and os.path.exists(p)]
 
     # --- Interne Metadaten-Helfer (laufen im Thread oder als Fallback) ---
@@ -1395,3 +2013,4 @@ class VideoPreview:
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
+

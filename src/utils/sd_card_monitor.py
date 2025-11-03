@@ -60,7 +60,9 @@ class SDCardMonitor:
             return
 
         self.monitoring = True
-        self.known_drives = self._get_available_drives()
+        # Initialisiere nur mit bereiten Laufwerken
+        all_drives = self._get_available_drives()
+        self.known_drives = {drive for drive in all_drives if self._is_drive_ready(drive)}
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.monitor_thread.start()
         print("SD-Karten Überwachung gestartet")
@@ -102,6 +104,23 @@ class SDCardMonitor:
         except Exception:
             return False
 
+    def _is_drive_ready(self, drive):
+        """
+        Prüft ob ein Laufwerk bereit und zugreifbar ist.
+        Das ist wichtig für SD-Karten, die zwar als Laufwerk erkannt werden,
+        aber noch nicht bereit sind (z.B. Kamera muss erst in Datatransfer-Modus).
+        """
+        try:
+            # Versuche auf das Root-Verzeichnis zuzugreifen
+            drive_path = drive + "\\"
+            os.listdir(drive_path)
+            return True
+        except (OSError, PermissionError):
+            # Laufwerk existiert, ist aber nicht bereit oder nicht zugreifbar
+            return False
+        except Exception:
+            return False
+
     def _is_action_cam_sd_card(self, drive):
         """
         Prüft ob das Laufwerk eine Action-Cam SD-Karte ist
@@ -118,7 +137,12 @@ class SDCardMonitor:
         while self.monitoring:
             try:
                 current_drives = self._get_available_drives()
-                new_drives = current_drives - self.known_drives
+
+                # Filtere nur bereite Laufwerke (auf die zugegriffen werden kann)
+                ready_drives = {drive for drive in current_drives if self._is_drive_ready(drive)}
+
+                # Neue Laufwerke sind nur solche, die bereit UND noch nicht bekannt sind
+                new_drives = ready_drives - self.known_drives
 
                 # Prüfe neue Laufwerke
                 for drive in new_drives:
@@ -134,7 +158,9 @@ class SDCardMonitor:
                             time.sleep(1)
                             self._handle_new_sd_card(drive)
 
-                self.known_drives = current_drives
+                # Aktualisiere known_drives nur mit bereiten Laufwerken
+                # Laufwerke, die nicht mehr bereit sind, werden automatisch entfernt
+                self.known_drives = ready_drives
                 time.sleep(2)  # Prüfe alle 2 Sekunden
 
             except Exception as e:

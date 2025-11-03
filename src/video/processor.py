@@ -6,21 +6,89 @@ import tempfile
 import subprocess
 from dataclasses import asdict, is_dataclass
 from datetime import date
+import multiprocessing
+import time
 
 from .logger import CancellableProgressBarLogger, CancellationError
 from ..utils.file_utils import sanitize_filename
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.constants import HINTERGRUND_PATH
+from src.utils.hardware_acceleration import HardwareAccelerationDetector
 
 
 class VideoProcessor:
-    def __init__(self, progress_callback=None, status_callback=None, config_manager=None):
+    def __init__(self, progress_callback=None, status_callback=None, config_manager=None, encoding_progress_callback=None):
         self.hintergrund_path = HINTERGRUND_PATH
         self.progress_callback = progress_callback
         self.status_callback = status_callback
+        self.encoding_progress_callback = encoding_progress_callback  # NEU: Callback für Live-Encoding-Fortschritt
         self.cancel_event = threading.Event()
         self.logger = CancellableProgressBarLogger(self.cancel_event)
         self.config_manager = config_manager  # Config Manager speichern
+        self.parallel_processor = None  # Wird in _init_hardware_acceleration initialisiert (Optional[ParallelVideoProcessor])
+
+        # Hardware-Beschleunigung initialisieren
+        self.hw_detector = HardwareAccelerationDetector()
+        self._init_hardware_acceleration()
+
+    def _init_hardware_acceleration(self):
+        """Initialisiert Hardware-Beschleunigung basierend auf Einstellungen"""
+        self.hw_accel_enabled = False
+        self.parallel_processing_enabled = True  # Standard: aktiviert
+
+        if self.config_manager:
+            settings = self.config_manager.get_settings()
+            self.hw_accel_enabled = settings.get("hardware_acceleration_enabled", True)
+            self.parallel_processing_enabled = settings.get("parallel_processing_enabled", True)
+
+            if self.hw_accel_enabled:
+                hw_info = self.hw_detector.detect_hardware()
+                if hw_info['available']:
+                    print(f"✓ Hardware-Beschleunigung aktiviert: {self.hw_detector.get_hardware_info_string()}")
+                else:
+                    print("⚠ Hardware-Beschleunigung aktiviert, aber keine kompatible Hardware gefunden")
+                    print("  → Fallback auf Software-Encoding")
+            else:
+                print("ℹ Hardware-Beschleunigung deaktiviert (Software-Encoding)")
+
+            # Info über Paralleles Processing
+            if self.parallel_processing_enabled:
+                cpu_count = multiprocessing.cpu_count()
+                if self.hw_accel_enabled:
+                    workers = min(cpu_count, 4)
+                else:
+                    workers = max(1, cpu_count // 2)
+                print(f"🚀 Paralleles Processing aktiviert: {workers} Worker-Threads ({cpu_count} CPU-Kerne)")
+                # ParallelVideoProcessor importieren und initialisieren
+                from .parallel_processor import ParallelVideoProcessor
+                self.parallel_processor = ParallelVideoProcessor(self.hw_accel_enabled)
+            else:
+                print("ℹ Paralleles Processing deaktiviert (sequenziell)")
+                self.parallel_processor = None
+
+    def _get_encoding_params(self, codec='h264'):
+        """
+        Gibt Encoding-Parameter basierend auf Hardware-Beschleunigung zurück.
+
+        Args:
+            codec: 'h264' oder 'hevc'
+
+        Returns:
+            Dict mit input_params, output_params und encoder
+        """
+        params = self.hw_detector.get_encoding_params(codec, self.hw_accel_enabled)
+
+        # Füge Thread-Steuerung basierend auf Parallel Processing Einstellung hinzu
+        if not self.hw_accel_enabled:  # Nur bei Software-Encoding relevant
+            if hasattr(self, 'parallel_processing_enabled'):
+                if self.parallel_processing_enabled:
+                    # Nutze alle verfügbaren Threads
+                    params['output_params'].extend(['-threads', '0'])
+                else:
+                    # Limitiere auf 1 Thread für echtes sequenzielles Processing
+                    params['output_params'].extend(['-threads', '1'])
+
+        return params
 
     def create_video_with_intro_only(self, payload):
         """Erstellt ein Verzeichnis, verarbeitet optional Videos und kopiert Fotos."""
@@ -150,13 +218,12 @@ class VideoProcessor:
                     temp_combined_ts_path
                 ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
-                # Schritt 6a: Längsten Clip finden und mit Wasserzeichen versehen (falls gewünscht)
-                temp_longest_clip_with_watermark_path = None
+                # Schritt 6a: Längsten Clip finden (falls Wasserzeichen gewünscht)
                 longest_clip_path = None
                 if create_watermark_version:
                     self._check_for_cancellation()
                     self._update_progress(7, TOTAL_STEPS)
-                    self._update_status("Suche Clip für Wasserzeichen und füge Wasserzeichen hinzu...")
+                    self._update_status("Suche Clip für Wasserzeichen...")
 
                     # NEU: Verwende ausgewählten Clip, wenn vorhanden; sonst finde längsten Clip
                     if watermark_clip_index is not None and 0 <= watermark_clip_index < len(video_clip_paths):
@@ -165,19 +232,6 @@ class VideoProcessor:
                     else:
                         longest_clip_path = self._find_longest_clip(video_clip_paths)
                         print(f"Verwende längsten Clip für Wasserzeichen: {longest_clip_path}")
-
-                    if longest_clip_path and os.path.exists(longest_clip_path):
-                        # Temporäre Datei für längsten Clip mit Wasserzeichen
-                        temp_longest_clip_with_watermark_path = os.path.join(tempfile.gettempdir(),
-                                                                         "longest_clip_with_watermark.mp4")
-                        temp_files.append(temp_longest_clip_with_watermark_path)
-
-                        # Wasserzeichen nur auf den längsten Clip anwenden
-                        self._create_video_with_watermark(
-                            longest_clip_path,  # Längster Clip
-                            temp_longest_clip_with_watermark_path,  # Ausgabe mit Wasserzeichen
-                            video_params
-                        )
                 else:
                     self._update_progress(7, TOTAL_STEPS)
 
@@ -195,37 +249,94 @@ class VideoProcessor:
                     full_video_output_path = None
                     self._update_status("Überspringe normale Video-Erstellung (kein Produkt gewählt)...")
 
-                # Schritt 8: .ts-Dateien zusammenfügen (nur wenn normale Version gewünscht)
-                if full_video_output_path:
+                # Schritt 8-10: Video-Erstellung (mit oder ohne Wasserzeichen)
+                # Mit paralleler Verarbeitung: Normale Version UND Wasserzeichen-Version gleichzeitig
+                if self.parallel_processor and full_video_output_path and create_watermark_version and longest_clip_path:
+                    # Beide Versionen parallel erstellen
                     self._check_for_cancellation()
                     self._update_progress(9, TOTAL_STEPS)
-                    self._update_status("Füge Videos final zusammen...")
-                    concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
-                    subprocess.run([
-                        "ffmpeg", "-y",
-                        "-i", concat_input,
-                        "-c", "copy",
-                        "-bsf:a", "aac_adtstoasc",
-                        "-movflags", "+faststart",
-                        full_video_output_path
-                    ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                else:
-                    self._update_progress(9, TOTAL_STEPS)
-                    self._update_status("Überspringe normale Video-Erstellung...")
-
-                # Schritt 8a: Wasserzeichen-Version erstellen (falls gewünscht) - NUR längster Clip ohne Intro
-                if create_watermark_version and temp_longest_clip_with_watermark_path:
-                    self._check_for_cancellation()
-                    self._update_progress(10, TOTAL_STEPS)
-                    self._update_status("Erstelle Video mit Wasserzeichen (nur längster Clip)...")
+                    self._update_status("Erstelle normale Version und Wasserzeichen-Version (parallel)...")
 
                     watermark_video_output_path = self._generate_watermark_video_path(
                         base_output_dir, base_filename
                     )
 
-                    # Kopiere den längsten Clip mit Wasserzeichen direkt (KEIN Intro!)
-                    shutil.copy2(temp_longest_clip_with_watermark_path, watermark_video_output_path)
+                    # Task 1: Normale Version zusammenfügen
+                    def create_normal_version_task(task_id=None):
+                        concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
+                        subprocess.run([
+                            "ffmpeg", "-y",
+                            "-i", concat_input,
+                            "-c", "copy",
+                            "-bsf:a", "aac_adtstoasc",
+                            "-movflags", "+faststart",
+                            full_video_output_path
+                        ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+                    # Task 2: Wasserzeichen-Version erstellen
+                    def create_watermark_version_task(task_id=None):
+                        self._create_video_with_watermark(
+                            longest_clip_path,
+                            watermark_video_output_path,
+                            video_params,
+                            task_id=task_id
+                        )
+
+                    # Beide Tasks parallel ausführen
+                    tasks = [
+                        (create_normal_version_task, (), {}),
+                        (create_watermark_version_task, (), {})
+                    ]
+
+                    results = self.parallel_processor.process_videos_parallel(tasks, self.cancel_event)
+
+                    # Prüfe auf Fehler
+                    for task_index, result, error in results:
+                        if error:
+                            raise error
+
+                    self._update_progress(10, TOTAL_STEPS)
+
+                elif full_video_output_path or (create_watermark_version and longest_clip_path):
+                    # Sequenzielle Verarbeitung (wie bisher)
+                    if full_video_output_path:
+                        self._check_for_cancellation()
+                        self._update_progress(9, TOTAL_STEPS)
+                        self._update_status("Füge Videos final zusammen...")
+                        concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
+                        subprocess.run([
+                            "ffmpeg", "-y",
+                            "-i", concat_input,
+                            "-c", "copy",
+                            "-bsf:a", "aac_adtstoasc",
+                            "-movflags", "+faststart",
+                            full_video_output_path
+                        ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                    else:
+                        self._update_progress(9, TOTAL_STEPS)
+                        self._update_status("Überspringe normale Video-Erstellung...")
+
+                    # Wasserzeichen-Version erstellen (falls gewünscht)
+                    if create_watermark_version and longest_clip_path:
+                        self._check_for_cancellation()
+                        self._update_progress(10, TOTAL_STEPS)
+                        self._update_status("Erstelle Video mit Wasserzeichen (nur längster Clip)...")
+
+                        watermark_video_output_path = self._generate_watermark_video_path(
+                            base_output_dir, base_filename
+                        )
+
+                        # Wasserzeichen direkt auf finalen Pfad anwenden
+                        self._create_video_with_watermark(
+                            longest_clip_path,
+                            watermark_video_output_path,
+                            video_params
+                        )
+                    else:
+                        self._update_progress(10, TOTAL_STEPS)
                 else:
+                    # Weder normale noch Wasserzeichen-Version
+                    self._update_progress(9, TOTAL_STEPS)
                     self._update_progress(10, TOTAL_STEPS)
 
             else:
@@ -347,9 +458,12 @@ class VideoProcessor:
 
         return full_output_path
 
-    def _create_video_with_watermark(self, input_video_path, output_path, video_params):
+    def _create_video_with_watermark(self, input_video_path, output_path, video_params, task_id=None):
         """
         Erstellt eine Video-Version mit Wasserzeichen über dem gesamten Video.
+        NEU: Nutzt Hardware-Encoding wenn verfügbar, aber Software-Decoding für Filter-Kompatibilität.
+
+        WICHTIG: overlay-Filter benötigt Software-Frames (yuv420p), daher KEIN Hardware-Decoding!
         """
 
         # Pfad zum Wasserzeichen-Bild
@@ -357,6 +471,9 @@ class VideoProcessor:
 
         if not os.path.exists(wasserzeichen_path):
             raise FileNotFoundError("skydivede_wasserzeichen.png fehlt im assets/ Ordner")
+
+        # Hole Videodauer für Fortschrittsanzeige
+        total_duration = self._get_video_duration(input_video_path)
 
         # Wasserzeichen-Video in 240p erstellen
         target_width = 320
@@ -370,52 +487,78 @@ class VideoProcessor:
             f"[v][wm_scaled]overlay=(W-w)/2:(H-h)/2"
         )
 
-        # Bestimme Video-Codec basierend auf Input
+        # Hole Encoding-Parameter (mit oder ohne Hardware-Beschleunigung)
         vcodec = video_params.get('vcodec', 'h264')
-        if vcodec in ['hevc', 'h265']:
-            codec_name = 'libx265'
-        else:
-            codec_name = 'libx264'
+        codec_type = 'hevc' if vcodec in ['hevc', 'h265'] else 'h264'
+        encoding_params = self._get_encoding_params(codec_type)
 
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-i", input_video_path,
-            "-i", wasserzeichen_path,
-            "-filter_complex", watermark_filter,
-            # VIDEO-ENCODING OPTIMIERT FÜR GESCHWINDIGKEIT:
-            "-c:v", codec_name,
-            "-preset", "ultrafast",     # Schnellstes Preset (~10x schneller als medium)
-            "-crf", "28",               # Höheres CRF = schneller + kleinere Datei (für Wasserzeichen-Version OK)
-            "-tune", "fastdecode",      # Optimiert für schnelles Abspielen
+        # Baue FFmpeg-Befehl
+        command = ["ffmpeg", "-y"]
+
+        # WICHTIG: KEIN Hardware-Decoding verwenden!
+        # overlay-Filter benötigt Software-Frames (yuv420p), Hardware-Frames (qsv) sind inkompatibel
+        # Nur die Input-Dateien, OHNE hwaccel-Parameter
+        command.extend(["-i", input_video_path, "-i", wasserzeichen_path])
+
+        # Filter
+        command.extend(["-filter_complex", watermark_filter])
+
+        # Output-Parameter: Hardware-Encoder wenn verfügbar, sonst Software
+        command.extend(encoding_params['output_params'])
+
+        # Für Wasserzeichen-Version: schnellere Einstellungen wenn Software-Encoding
+        if not self.hw_accel_enabled:
+            command.extend([
+                "-preset", "ultrafast",     # Schnellstes Preset
+                "-crf", "28",               # Höheres CRF = schneller + kleinere Datei
+            ])
+        else:
+            # Bei Hardware-Encoding: Schnelle Qualitätseinstellungen
+            print(f"  → Nutze Hardware-Encoder für Wasserzeichen: {encoding_params['encoder']}")
+
+        command.extend([
             "-movflags", "+faststart",
-            # Audio entfernen (kein Sound im Wasserzeichen-Video)
-            "-an",                      # Kein Audio → noch schneller + kleinere Datei
+            "-an",  # Kein Audio
             output_path
-        ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+        ])
+
+        # Task Name basierend auf task_id
+        task_name = f"Wasserzeichen-Video (Task {task_id})" if task_id else "Wasserzeichen-Video"
+
+        # Verwende neue Methode mit Live-Fortschritt
+        self._run_ffmpeg_with_progress(command, total_duration, task_name, task_id)
 
     def _create_intro_with_silent_audio(self, output_path, dauer, v_params, drawtext_filter):
         """
         Erstellt den Intro-Clip inklusive einer passenden stillen Audiospur in einem einzigen Befehl.
-        NEU: Nutzt erweiterte Parameter für maximale Kompatibilität, speziell für 4K.
+        NEU: Nutzt erweiterte Parameter für maximale Kompatibilität und Hardware-Beschleunigung.
         """
         self._check_for_cancellation()
         print(f"Erstelle Intro mit erweiterten Parametern: {v_params}")
         video_filters = f"scale={v_params['width']}:{v_params['height']},{drawtext_filter}"
 
-        # Bestimme den richtigen Codec-Namen für die Intro-Erstellung
+        # Hole Encoding-Parameter (mit oder ohne Hardware-Beschleunigung)
         vcodec = v_params.get('vcodec', 'h264')
-        if vcodec in ['hevc', 'h265']:
-            codec_name = 'libx265'
-        else:
-            codec_name = 'libx264'
+        codec_type = 'hevc' if vcodec in ['hevc', 'h265'] else 'h264'
+        encoding_params = self._get_encoding_params(codec_type)
 
-        command = [
-            "ffmpeg", "-y",
+        command = ["ffmpeg", "-y"]
+
+        # Inputs
+        command.extend([
             "-loop", "1", "-i", self.hintergrund_path,
             "-f", "lavfi", "-i",
-            f"anullsrc=channel_layout={v_params['channel_layout']}:sample_rate={v_params['sample_rate']}",
-            "-vf", video_filters,
-            "-c:v", codec_name,  # Verwende libx265 statt 'hevc'
+            f"anullsrc=channel_layout={v_params['channel_layout']}:sample_rate={v_params['sample_rate']}"
+        ])
+
+        # Video-Filter
+        command.extend(["-vf", video_filters])
+
+        # Encoding-Parameter (Hardware oder Software)
+        command.extend(encoding_params['output_params'])
+
+        # Zusätzliche Parameter für Kompatibilität
+        command.extend([
             "-tag:v", v_params['vtag'],
             "-pix_fmt", v_params['pix_fmt'],
             "-r", v_params['fps'],
@@ -424,11 +567,14 @@ class VideoProcessor:
             "-t", str(dauer),
             "-shortest",
             "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-preset", "fast",
-            "-crf", "18",
-        ]
+            "-map", "1:a:0"
+        ])
 
+        # Preset und CRF nur bei Software-Encoding
+        if not self.hw_accel_enabled:
+            command.extend(["-preset", "fast", "-crf", "18"])
+
+        # Color Space Parameter
         if v_params.get('color_range'):
             command.extend(["-color_range", v_params['color_range']])
         if v_params.get('colorspace'):
@@ -438,6 +584,7 @@ class VideoProcessor:
         if v_params.get('color_trc'):
             command.extend(["-color_trc", v_params['color_trc']])
 
+        # Profile und Level (nur für h264/hevc)
         if v_params.get('profile') and v_params['vcodec'] in ['h264', 'hevc']:
             profile_str = str(v_params['profile']).lower().replace(" ", "")
             command.extend(["-profile:v", profile_str])
@@ -450,12 +597,20 @@ class VideoProcessor:
 
         command.append(output_path)
 
-        result = subprocess.run(command, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-        if result.returncode != 0:
+        # Konvertiere dauer zu float für Fortschrittsberechnung
+        try:
+            duration_float = float(dauer)
+        except:
+            duration_float = None
+
+        # Verwende neue Methode mit Live-Fortschritt
+        try:
+            self._run_ffmpeg_with_progress(command, duration_float, "Intro-Erstellung")
+        except subprocess.CalledProcessError as e:
             if self.cancel_event.is_set():
                 raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
-            print(f"Fehler bei Intro-Erstellung: {result.stderr}")
-            raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
+            print(f"Fehler bei Intro-Erstellung: {e.stderr if hasattr(e, 'stderr') else str(e)}")
+            raise
 
     def _copy_photos_to_output_directory(self, photo_paths, base_output_dir, kunde):
         """
@@ -728,22 +883,11 @@ class VideoProcessor:
                 continue
 
             try:
-                # Hole die Dauer des Videos mit ffprobe
-                command = [
-                    "ffprobe", "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "default=noprint_wrappers=1:nokey=1:noprint_wrappers=1",
-                    video_path
-                ]
-                result = subprocess.run(command, capture_output=True, text=True,
-                                      timeout=10, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-
-                if result.returncode == 0:
-                    duration = float(result.stdout.strip())
-                    if duration > longest_duration:
-                        longest_duration = duration
-                        longest_path = video_path
-                        print(f"Neuer längster Clip gefunden: {video_path} ({duration}s)")
+                duration = self._get_video_duration(video_path)
+                if duration > longest_duration:
+                    longest_duration = duration
+                    longest_path = video_path
+                    print(f"Neuer längster Clip gefunden: {video_path} ({duration}s)")
             except Exception as e:
                 print(f"Fehler beim Ermitteln der Dauer von {video_path}: {e}")
                 continue
@@ -751,5 +895,213 @@ class VideoProcessor:
         print(f"Längster Clip: {longest_path} (Dauer: {longest_duration}s)")
         return longest_path
 
+    def _get_video_duration(self, video_path):
+        """
+        Ermittelt die Dauer eines Videos in Sekunden mit ffprobe.
+
+        Args:
+            video_path: Pfad zur Videodatei
+
+        Returns:
+            Dauer in Sekunden als float
+        """
+        command = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path
+        ]
+        result = subprocess.run(command, capture_output=True, text=True,
+                              timeout=10, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+        if result.returncode == 0:
+            return float(result.stdout.strip())
+        else:
+            raise ValueError(f"Konnte Videodauer nicht ermitteln: {video_path}")
+
     def reset_cancel_event(self):
         self.cancel_event.clear()
+
+    def _run_ffmpeg_with_progress(self, command, total_duration=None, task_name="Encoding", task_id=None):
+        """
+        Führt FFmpeg-Befehl aus und liest den Fortschritt live aus.
+
+        Args:
+            command: FFmpeg-Befehl als Liste
+            total_duration: Gesamtdauer des Videos in Sekunden (für Fortschrittsberechnung)
+            task_name: Name der Aufgabe für Status-Updates
+            task_id: Optional ID für parallele Tasks
+
+        Returns:
+            True bei Erfolg, wirft Exception bei Fehler
+        """
+        # Füge Progress-Ausgabe zu FFmpeg-Befehl hinzu
+        progress_command = command.copy()
+        # Füge -progress pipe:1 vor dem Output-File ein (letztes Element)
+        output_file = progress_command[-1]
+        progress_command = progress_command[:-1] + ['-progress', 'pipe:1'] + [output_file]
+
+        # Starte FFmpeg-Prozess
+        process = subprocess.Popen(
+            progress_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1,  # Line buffered
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+        )
+
+        start_time = time.time()
+        last_update_time = start_time
+
+        # Lese Fortschritt aus stdout
+        current_time_sec = 0.0
+        fps = 0.0
+
+        # Sammle stderr in separatem Thread um Deadlock zu vermeiden
+        stderr_lines = []
+        def read_stderr():
+            try:
+                for line in process.stderr:
+                    stderr_lines.append(line)
+            except Exception:
+                # Ignore exceptions (e.g., when process terminates and closes the pipe)
+                pass
+
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stderr_thread.start()
+
+        try:
+            while True:
+                self._check_for_cancellation()
+
+                # Non-blocking read mit Timeout
+                line = process.stdout.readline()
+                if not line:
+                    # Prüfe ob Prozess beendet ist
+                    if process.poll() is not None:
+                        break
+                    # Kurze Pause um CPU nicht zu belasten
+                    time.sleep(0.01)
+                    continue
+
+                line = line.strip()
+
+                # Parse FFmpeg Progress-Ausgabe
+                if line.startswith('out_time_ms='):
+                    try:
+                        time_ms_str = line.split('=')[1].strip()
+                        time_ms = int(time_ms_str)
+                        current_time_sec = time_ms / 1000000.0
+                    except (ValueError, IndexError):
+                        pass
+
+                elif line.startswith('fps='):
+                    fps_str = line.split('=')[1].strip()
+                    try:
+                        fps = float(fps_str)
+                    except ValueError:
+                        # Ignore malformed fps values; continue processing.
+                        pass
+
+                # Update nur alle 0.5 Sekunden um UI nicht zu überlasten
+                current_update_time = time.time()
+                if current_update_time - last_update_time >= 0.5:
+                    last_update_time = current_update_time
+
+                    if total_duration and total_duration > 0:
+                        progress_percent = min((current_time_sec / total_duration) * 100, 100)
+
+                        # Berechne ETA
+                        elapsed_time = current_update_time - start_time
+                        if current_time_sec > 0 and elapsed_time > 0:
+                            encoding_speed = current_time_sec / elapsed_time
+                            remaining_time = (total_duration - current_time_sec) / encoding_speed if encoding_speed > 0 else 0
+
+                            # Formatiere ETA
+                            eta_minutes = int(remaining_time // 60)
+                            eta_seconds = int(remaining_time % 60)
+                            eta_str = f"{eta_minutes}:{eta_seconds:02d}"
+
+                            # Sende Update
+                            if self.encoding_progress_callback:
+                                self.encoding_progress_callback(
+                                    task_name=task_name,
+                                    progress=progress_percent,
+                                    fps=fps,
+                                    eta=eta_str,
+                                    current_time=current_time_sec,
+                                    total_time=total_duration,
+                                    task_id=task_id
+                                )
+                    else:
+                        # Kein total_duration - zeige nur Zeit und FPS
+                        if self.encoding_progress_callback:
+                            self.encoding_progress_callback(
+                                task_name=task_name,
+                                progress=None,
+                                fps=fps,
+                                eta=None,
+                                current_time=current_time_sec,
+                                total_time=None,
+                                task_id=task_id
+                            )
+
+            # Warte auf Prozessende mit Timeout
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                print("⚠️ FFmpeg antwortet nicht - beende Prozess...")
+                process.kill()
+                process.wait()
+
+            # Warte auf stderr-Thread
+            stderr_thread.join(timeout=2)
+
+            # Prüfe Return Code
+            if process.returncode != 0:
+                stderr_output = ''.join(stderr_lines)
+                if self.cancel_event.is_set():
+                    raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
+
+                # Zeige nur relevante stderr-Zeilen (letzte 20)
+                stderr_relevant = '\n'.join(stderr_lines[-20:]) if stderr_lines else "Kein stderr verfügbar"
+                print(f"FFmpeg Fehler (Code {process.returncode}):")
+                print(stderr_relevant)
+                raise subprocess.CalledProcessError(process.returncode, command, stderr=stderr_output)
+
+            # Finale 100% Update
+            if self.encoding_progress_callback and total_duration:
+                self.encoding_progress_callback(
+                    task_name=task_name,
+                    progress=100,
+                    fps=fps,
+                    eta="0:00",
+                    current_time=total_duration,
+                    total_time=total_duration,
+                    task_id=task_id
+                )
+
+            return True
+
+        except CancellationError:
+            # Beende FFmpeg-Prozess bei Abbruch
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise
+        except Exception as e:
+            # Beende FFmpeg-Prozess bei Fehler
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise
+

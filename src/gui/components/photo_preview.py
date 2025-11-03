@@ -19,6 +19,13 @@ class PhotoPreview:
         self.photo_images = {}  # Cache für geladene Bilder
         self.thumbnail_images = {}  # Cache für Thumbnails
 
+        # NEU: Mehrfachauswahl
+        self.selected_photos = set()  # Set von ausgewählten Indizes
+        self.explicitly_selected = False  # Flag: Wurde explizit markiert (Shift/Ctrl)?
+        self.last_clicked_index = None  # Für Shift+Klick Bereichsauswahl
+        self.shift_selection_start = None  # Startpunkt der Shift+Pfeiltasten-Selection
+        self.shift_direction = None  # Direction: 'left', 'right', or None
+
         # Widgets
         self.large_preview_canvas = None
         self.thumbnail_canvas = None
@@ -85,6 +92,11 @@ class PhotoPreview:
         # Tastatur-Navigation (Pfeiltasten)
         self.frame.bind("<Left>", self._on_key_left)
         self.frame.bind("<Right>", self._on_key_right)
+        # NEU: Erweiterte Tastatur-Shortcuts für Mehrfachauswahl
+        self.frame.bind("<Shift-Left>", self._on_key_shift_left)
+        self.frame.bind("<Shift-Right>", self._on_key_shift_right)
+        self.frame.bind("<Control-a>", self._on_key_select_all)
+        self.frame.bind("<Delete>", self._on_key_delete)
         # Focus setzen damit Tastatur-Events funktionieren
         self.frame.bind("<FocusIn>", lambda e: None)
         self.large_preview_canvas.bind("<Button-1>", self._on_canvas_click_focus, add="+")
@@ -178,7 +190,7 @@ class PhotoPreview:
         self.info_labels["total_size"] = tk.Label(right_info_frame, text="0 MB", font=("Arial", 8), anchor="w")
         self.info_labels["total_size"].grid(row=2, column=1, sticky="w")
 
-        # Löschen-Button unter Gesamt-Statistik
+        # Löschen-Button und "Auswahl aufheben" Button nebeneinander
         self.delete_button = tk.Button(
             right_info_frame,
             text="Ausgewähltes Foto löschen",
@@ -188,12 +200,29 @@ class PhotoPreview:
             font=("Arial", 9, "bold"),
             state="disabled"
         )
-        self.delete_button.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self.delete_button.grid(row=3, column=0, sticky="ew", pady=(10, 0), padx=(0, 5))
+
+        # "Auswahl aufheben" Button
+        self.clear_selection_button = tk.Button(
+            right_info_frame,
+            text="Auswahl aufheben",
+            command=self._clear_all_selections,
+            bg="#999999",
+            fg="white",
+            font=("Arial", 9),
+            state="disabled"
+        )
+        self.clear_selection_button.grid(row=3, column=1, sticky="ew", pady=(10, 0), padx=(5, 0))
 
     def set_photos(self, photo_paths):
         """Setzt die anzuzeigenden Fotos"""
         self.photo_paths = photo_paths
         self.current_photo_index = 0 if photo_paths else -1
+
+        # NEU: Mehrfachauswahl zurücksetzen
+        self.selected_photos.clear()
+        self.explicitly_selected = False  # Keine explizite Markierung
+        self.last_clicked_index = 0 if photo_paths else None
 
         # Cache leeren
         self.photo_images.clear()
@@ -206,7 +235,7 @@ class PhotoPreview:
         self._update_delete_button()
 
     def _update_thumbnails(self):
-        """Aktualisiert die Thumbnail-Galerie"""
+        """Aktualisiert die Thumbnail-Galerie mit Mehrfachauswahl-Unterstützung"""
         # Alte Thumbnails entfernen
         for widget in self.thumbnail_inner_frame.winfo_children():
             widget.destroy()
@@ -217,27 +246,42 @@ class PhotoPreview:
 
         # Neue Thumbnails erstellen
         for idx, photo_path in enumerate(self.photo_paths):
-            thumbnail = self._create_thumbnail(photo_path, idx)
+            is_current = idx == self.current_photo_index
+
+            # Implizite vs. explizite Markierung
+            if self.explicitly_selected:
+                # Explizite Markierung vorhanden - nur explizit markierte zeigen
+                is_selected = idx in self.selected_photos
+            else:
+                # Keine explizite Markierung - aktuelles Foto gilt als markiert
+                is_selected = is_current
+
+            # Prüfe ob mehrere Fotos markiert sind
+            if self.explicitly_selected:
+                multiple_selected = len(self.selected_photos) > 1
+            else:
+                multiple_selected = False
+
+            thumbnail = self._create_thumbnail(photo_path, idx, is_current=is_current)
             if thumbnail:
                 # Frame für Thumbnail mit Border
-                # Ausgewähltes Thumbnail hat dickeren grünen Rand
-                is_selected = idx == self.current_photo_index
-
-                if is_selected:
+                # Bestimme Rahmenfarbe basierend auf Markierung
+                # Oranger Rand nur wenn markiert UND (mehrere markiert ODER nicht aktiv)
+                if is_selected and (multiple_selected or not is_current):
+                    # Markiert mit orangem Rand: wenn mehrere markiert ODER nicht das aktive Foto
                     thumb_frame = tk.Frame(
                         self.thumbnail_inner_frame,
-                        relief="solid",
-                        borderwidth=4,
-                        bg="#4CAF50",
-                        highlightthickness=2,
-                        highlightbackground="#4CAF50"
+                        bg="white",
+                        highlightthickness=3,
+                        highlightbackground="#FF9800"  # Orange für markiert
                     )
                 else:
+                    # Nicht markiert oder nur das aktive allein markiert: Grauer Rand
                     thumb_frame = tk.Frame(
                         self.thumbnail_inner_frame,
-                        relief="solid",
-                        borderwidth=2,
-                        bg="#cccccc"
+                        bg="white",
+                        highlightthickness=2,
+                        highlightbackground="#999999"  # Grau
                     )
 
                 thumb_frame.pack(side="left", padx=5, pady=5)
@@ -247,7 +291,7 @@ class PhotoPreview:
                 thumb_label.image = thumbnail  # Referenz behalten
                 thumb_label.pack()
 
-                # Click-Event - verwende ButtonRelease statt Button-1 um Drag-Scrolling zu ermöglichen
+                # Click-Event - NEU: Mit Modifier-Keys für Mehrfachauswahl
                 thumb_label.bind("<ButtonRelease-1>", lambda e, i=idx: self._on_thumbnail_click_release(e, i))
                 thumb_frame.bind("<ButtonRelease-1>", lambda e, i=idx: self._on_thumbnail_click_release(e, i))
 
@@ -256,6 +300,9 @@ class PhotoPreview:
         bbox = self.thumbnail_canvas.bbox("all")
         if bbox:
             self.thumbnail_canvas.configure(scrollregion=bbox)
+
+        # Scrolle zum aktiven Thumbnail
+        self._scroll_to_active_thumbnail()
 
     def _on_thumbnail_drag_start(self, event):
         """Startet das Drag-Scrolling"""
@@ -312,16 +359,78 @@ class PhotoPreview:
             delta = -1 if event.delta > 0 else 1
             self.thumbnail_canvas.xview_scroll(delta, "units")
 
-    def _create_thumbnail(self, photo_path, idx):
+    def _scroll_to_active_thumbnail(self):
+        """Scrollt die Thumbnail-Leiste so, dass das aktive Thumbnail sichtbar ist"""
+        if not self.photo_paths or self.current_photo_index < 0:
+            return
+
+        # Warte bis die Widgets gerendert sind
+        self.thumbnail_inner_frame.update_idletasks()
+
+        # Hole alle Thumbnail-Widgets (Frames)
+        children = self.thumbnail_inner_frame.winfo_children()
+        if self.current_photo_index >= len(children):
+            return
+
+        # Hole das aktive Thumbnail-Frame
+        active_frame = children[self.current_photo_index]
+
+        # Hole die Position und Größe des aktiven Thumbnails relativ zum inner_frame
+        thumb_x = active_frame.winfo_x()
+        thumb_width = active_frame.winfo_width()
+        thumb_right = thumb_x + thumb_width
+
+        # Hole die Canvas-Größe und Scroll-Position
+        canvas_width = self.thumbnail_canvas.winfo_width()
+        scroll_region = self.thumbnail_canvas.cget("scrollregion")
+
+        if not scroll_region or scroll_region == "0 0 0 0":
+            return
+
+        # Parse scroll region: "x1 y1 x2 y2"
+        parts = scroll_region.split()
+        total_width = float(parts[2]) if len(parts) > 2 else canvas_width
+
+        if total_width <= canvas_width:
+            # Alles passt in den Canvas, kein Scrollen nötig
+            return
+
+        # Aktuelle Scroll-Position (0.0 bis 1.0)
+        current_view = self.thumbnail_canvas.xview()
+        view_start = current_view[0]  # Linker Rand (0.0 bis 1.0)
+        view_end = current_view[1]    # Rechter Rand (0.0 bis 1.0)
+
+        # Berechne die absoluten Pixel-Positionen des sichtbaren Bereichs
+        visible_start = view_start * total_width
+        visible_end = view_end * total_width
+
+        # Prüfe ob das aktive Thumbnail außerhalb des sichtbaren Bereichs ist
+        margin = 60  # Sicherheitsabstand in Pixeln
+
+        if thumb_x < visible_start + margin:
+            # Thumbnail ist links außerhalb - scrolle nach links
+            new_view_start = max(0.0, (thumb_x - margin) / total_width)
+            self.thumbnail_canvas.xview_moveto(new_view_start)
+        elif thumb_right > visible_end - margin:
+            # Thumbnail ist rechts außerhalb - scrolle nach rechts
+            # Berechne neue Position so, dass das Thumbnail am rechten Rand sichtbar ist
+            new_view_start = min(1.0, (thumb_right + margin - canvas_width) / total_width)
+            self.thumbnail_canvas.xview_moveto(new_view_start)
+
+    def _create_thumbnail(self, photo_path, idx, is_current=False):
         """Erstellt ein Thumbnail für ein Foto"""
-        if idx in self.thumbnail_images:
-            return self.thumbnail_images[idx]
+        # Cache-Key berücksichtigt ob aktiv oder nicht
+        cache_key = (idx, is_current)
+        if cache_key in self.thumbnail_images:
+            return self.thumbnail_images[cache_key]
 
         try:
             img = Image.open(photo_path)
-            img.thumbnail((self.thumbnail_size, self.thumbnail_size), Image.LANCZOS)
+            # Aktive Thumbnails sind größer
+            size = int(self.thumbnail_size * 1.3) if is_current else self.thumbnail_size
+            img.thumbnail((size, size), Image.LANCZOS)
             thumbnail = ImageTk.PhotoImage(img)
-            self.thumbnail_images[idx] = thumbnail
+            self.thumbnail_images[cache_key] = thumbnail
             return thumbnail
         except Exception as e:
             print(f"Fehler beim Erstellen des Thumbnails für {photo_path}: {e}")
@@ -468,23 +577,72 @@ class PhotoPreview:
             # Rechts geklickt - nächstes Foto
             self._show_next_photo()
 
-    def _on_thumbnail_click(self, index):
-        """Behandelt Klick auf ein Thumbnail"""
-        self.current_photo_index = index
-        self._update_large_preview()
+    def _on_thumbnail_click(self, index, event=None):
+        """
+        Behandelt Klick auf ein Thumbnail mit Mehrfachauswahl-Unterstützung.
+
+        - Normaler Klick: Deselektiert alle, wählt nur dieses Foto aus UND macht es aktiv
+        - Strg+Klick: Fügt Foto zur Auswahl hinzu/entfernt es (OHNE es aktiv zu machen)
+        - Shift+Klick: Wählt Bereich von letztem Klick bis hierhin aus (OHNE aktiv zu ändern)
+        """
+        if event:
+            # Prüfe Modifier-Keys
+            ctrl_pressed = (event.state & 0x0004) != 0  # Control-Key
+            shift_pressed = (event.state & 0x0001) != 0  # Shift-Key
+
+            if shift_pressed and self.last_clicked_index is not None:
+                # Shift+Klick: Bereichsauswahl
+                start = min(self.last_clicked_index, index)
+                end = max(self.last_clicked_index, index)
+
+                # Füge alle Fotos im Bereich zur Auswahl hinzu
+                for i in range(start, end + 1):
+                    self.selected_photos.add(i)
+
+                self.explicitly_selected = True  # Explizite Markierung
+                # NICHT aktiv machen - aktuelles Foto bleibt unverändert
+
+            elif ctrl_pressed:
+                # Strg+Klick: Toggle-Auswahl
+                if index in self.selected_photos:
+                    self.selected_photos.remove(index)
+                    # Wenn keine Auswahl mehr übrig ist, zurück zu impliziter Auswahl
+                    if not self.selected_photos:
+                        self.explicitly_selected = False
+                else:
+                    self.selected_photos.add(index)
+                    self.explicitly_selected = True  # Explizite Markierung
+
+                # NICHT aktiv machen - aktuelles Foto bleibt unverändert
+                self.last_clicked_index = index
+            else:
+                # Normaler Klick: Macht nur das Foto aktiv, deselektiert NICHT
+                self.current_photo_index = index  # Macht das Foto aktiv
+                self.last_clicked_index = index
+        else:
+            # Kein Event (z.B. programmatischer Aufruf)
+            self.current_photo_index = index
+            self.last_clicked_index = index
+
+        # Update UI - nur bei normalem Klick wird große Preview aktualisiert
+        if not event or (not ctrl_pressed and not shift_pressed):
+            self._update_large_preview()
         self._update_thumbnails()
         self._update_info()
+        self._update_delete_button()
 
     def _on_thumbnail_click_release(self, event, index):
         """Behandelt ButtonRelease auf ein Thumbnail - nur wenn es kein Drag war"""
         # Nur als Klick behandeln wenn nicht gedragged wurde
         if not self.is_dragging:
-            self._on_thumbnail_click(index)
+            self._on_thumbnail_click(index, event)
 
     def _show_previous_photo(self):
         """Zeigt das vorherige Foto"""
         if self.current_photo_index > 0:
+            # Nur aktuellen Index ändern, NICHT die Auswahl
             self.current_photo_index -= 1
+
             self._update_large_preview()
             self._update_thumbnails()
             self._update_info()
@@ -492,7 +650,9 @@ class PhotoPreview:
     def _show_next_photo(self):
         """Zeigt das nächste Foto"""
         if self.current_photo_index < len(self.photo_paths) - 1:
+            # Nur aktuellen Index ändern, NICHT die Auswahl
             self.current_photo_index += 1
+
             self._update_large_preview()
             self._update_thumbnails()
             self._update_info()
@@ -503,13 +663,149 @@ class PhotoPreview:
 
     def _on_key_left(self, event):
         """Behandelt linke Pfeiltaste - vorheriges Foto"""
+        # Reset Shift-Auswahl
+        self.shift_selection_start = None
+        self.shift_direction = None
+
         if self.photo_paths and self.current_photo_index > 0:
             self._show_previous_photo()
 
     def _on_key_right(self, event):
         """Behandelt rechte Pfeiltaste - nächstes Foto"""
+        # Reset Shift-Auswahl
+        self.shift_selection_start = None
+        self.shift_direction = None
+
         if self.photo_paths and self.current_photo_index < len(self.photo_paths) - 1:
             self._show_next_photo()
+
+    def _on_key_shift_left(self, event):
+        """Behandelt Shift+Links - Akkordeon-Markierung nach links"""
+        if not self.photo_paths or self.current_photo_index <= 0:
+            return
+
+        # Fall 1: Erste Shift-Taste - Starte Session
+        if self.shift_selection_start is None:
+            self.shift_selection_start = self.current_photo_index
+            self.shift_direction = 'left'
+            self.explicitly_selected = True  # Aktiviere explizite Markierung
+
+            # Markiere Start-Foto und bewege Index nach links
+            self.selected_photos.clear()
+            self.selected_photos.add(self.current_photo_index)  # Startpunkt
+            self.current_photo_index -= 1  # Bewege nach links
+            self.selected_photos.add(self.current_photo_index)  # Neues Foto
+            self.last_clicked_index = self.current_photo_index
+
+            self._update_large_preview()
+            self._update_thumbnails()
+            self._update_info()
+            self._update_delete_button()
+            return
+
+        # Fall 2: Wir waren nach rechts, jetzt nach links (Zusammenziehen)
+        if self.shift_direction == 'right':
+            # Entferne das aktuelle (rechts äußerste) Foto
+            self.selected_photos.discard(self.current_photo_index)
+            self.current_photo_index -= 1  # Gehe einen Schritt zurück
+            # Richtung bleibt 'right' - wir ziehen nur zusammen
+
+            # Prüfe ob nur noch das aktive Foto übrig ist
+            if len(self.selected_photos) == 1 and self.current_photo_index in self.selected_photos:
+                # Zurück zu impliziter Auswahl
+                self.selected_photos.clear()
+                self.explicitly_selected = False
+                self.shift_selection_start = None
+                self.shift_direction = None
+
+            self._update_large_preview()
+            self._update_thumbnails()
+            self._update_info()
+            self._update_delete_button()
+            return
+
+        # Fall 3: Weitergehen nach links (gleiche Richtung - Erweitern)
+        self.current_photo_index -= 1
+        self.selected_photos.add(self.current_photo_index)
+        self.last_clicked_index = self.current_photo_index
+
+        self._update_large_preview()
+        self._update_thumbnails()
+        self._update_info()
+        self._update_delete_button()
+
+    def _on_key_shift_right(self, event):
+        """Behandelt Shift+Rechts - Akkordeon-Markierung nach rechts"""
+        if not self.photo_paths or self.current_photo_index >= len(self.photo_paths) - 1:
+            return
+
+        # Fall 1: Erste Shift-Taste - Starte Session
+        if self.shift_selection_start is None:
+            self.shift_selection_start = self.current_photo_index
+            self.shift_direction = 'right'
+            self.explicitly_selected = True  # Aktiviere explizite Markierung
+
+            # Markiere Start-Foto und bewege Index nach rechts
+            self.selected_photos.clear()
+            self.selected_photos.add(self.current_photo_index)  # Startpunkt
+            self.current_photo_index += 1  # Bewege nach rechts
+            self.selected_photos.add(self.current_photo_index)  # Neues Foto
+            self.last_clicked_index = self.current_photo_index
+
+            self._update_large_preview()
+            self._update_thumbnails()
+            self._update_info()
+            self._update_delete_button()
+            return
+
+        # Fall 2: Wir waren nach links, jetzt nach rechts (Zusammenziehen)
+        if self.shift_direction == 'left':
+            # Entferne das aktuelle (links äußerste) Foto
+            self.selected_photos.discard(self.current_photo_index)
+            self.current_photo_index += 1  # Gehe einen Schritt zurück
+            # Richtung bleibt 'left' - wir ziehen nur zusammen
+
+            # Prüfe ob nur noch das aktive Foto übrig ist
+            if len(self.selected_photos) == 1 and self.current_photo_index in self.selected_photos:
+                # Zurück zu impliziter Auswahl
+                self.selected_photos.clear()
+                self.explicitly_selected = False
+                self.shift_selection_start = None
+                self.shift_direction = None
+
+            self._update_large_preview()
+            self._update_thumbnails()
+            self._update_info()
+            self._update_delete_button()
+            return
+
+        # Fall 3: Weitergehen nach rechts (gleiche Richtung - Erweitern)
+        self.current_photo_index += 1
+        self.selected_photos.add(self.current_photo_index)
+        self.last_clicked_index = self.current_photo_index
+
+        self._update_large_preview()
+        self._update_thumbnails()
+        self._update_info()
+        self._update_delete_button()
+
+    def _on_key_select_all(self, event):
+        """Behandelt Strg+A - Alle Fotos auswählen"""
+        if not self.photo_paths:
+            return
+
+        # Wähle alle Fotos aus
+        self.selected_photos = set(range(len(self.photo_paths)))
+        self.explicitly_selected = True  # Explizite Markierung
+        self.last_clicked_index = self.current_photo_index
+
+        self._update_thumbnails()
+        self._update_delete_button()
+
+    def _on_key_delete(self, event):
+        """Behandelt Delete-Taste - Ausgewählte Fotos löschen"""
+        if self.photo_paths and self.selected_photos:
+            self._delete_current_photo()
 
     def _open_fullscreen(self):
         """Öffnet das aktuelle Foto im Vollbild-Modus"""
@@ -651,58 +947,89 @@ class PhotoPreview:
         self.info_labels["total_size"].config(text=f"{total_size_mb:.2f} MB")
 
     def _update_delete_button(self):
-        """Aktualisiert den Status des Löschen-Buttons"""
-        if self.photo_paths and self.current_photo_index >= 0:
-            self.delete_button.config(state="normal")
+        """Aktualisiert den Status und Text des Löschen-Buttons und des Clear-Selection-Buttons"""
+        # Bestimme welche Fotos als markiert gelten
+        if self.explicitly_selected:
+            effective_selection = self.selected_photos
         else:
-            self.delete_button.config(state="disabled")
+            # Implizite Auswahl - nur aktuelles Foto
+            effective_selection = {self.current_photo_index} if self.photo_paths else set()
+
+        if self.photo_paths and effective_selection:
+            count = len(effective_selection)
+            if count == 1:
+                self.delete_button.config(text="Ausgewähltes Foto löschen", state="normal")
+            else:
+                self.delete_button.config(text=f"{count} ausgewählte Fotos löschen", state="normal")
+        else:
+            self.delete_button.config(text="Ausgewähltes Foto löschen", state="disabled")
+
+        # Clear-Selection-Button nur anzeigen wenn explizite Markierung vorhanden
+        if self.explicitly_selected and self.selected_photos:
+            self.clear_selection_button.config(state="normal")
+        else:
+            self.clear_selection_button.config(state="disabled")
+
+    def _clear_all_selections(self):
+        """Hebt alle expliziten Markierungen auf"""
+        self.selected_photos.clear()
+        self.explicitly_selected = False
+        self.shift_selection_start = None
+        self.shift_direction = None
+
+        self._update_thumbnails()
+        self._update_delete_button()
 
     def _delete_current_photo(self):
-        """Löscht das aktuell ausgewählte Foto"""
-        if not self.photo_paths or self.current_photo_index < 0:
+        """Löscht die aktuell ausgewählten Fotos (Mehrfachauswahl-fähig)"""
+        if not self.photo_paths:
             return
 
-        # Foto-Pfad merken
-        deleted_path = self.photo_paths[self.current_photo_index]
-        deleted_index = self.current_photo_index
+        # Bestimme welche Fotos zu löschen sind
+        if self.explicitly_selected and self.selected_photos:
+            indices_to_delete = sorted(self.selected_photos, reverse=True)
+        else:
+            # Implizite Auswahl - nur aktuelles Foto
+            indices_to_delete = [self.current_photo_index]
 
-        # WICHTIG: Zuerst aus Drag-Drop-Liste entfernen, dann UI aktualisieren
-        # Dies stellt sicher, dass beide Listen synchron bleiben
+        # WICHTIG: Zuerst aus Drag-Drop-Liste entfernen
         if self.app and hasattr(self.app, 'drag_drop'):
-            # Entferne aus Drag-Drop (dies aktualisiert auch photo_paths dort)
-            self.app.drag_drop.remove_photo(deleted_path, update_preview=False)
+            for idx in indices_to_delete:
+                if 0 <= idx < len(self.photo_paths):
+                    deleted_path = self.photo_paths[idx]
+                    # Entferne aus Drag-Drop (dies aktualisiert auch photo_paths dort)
+                    self.app.drag_drop.remove_photo(deleted_path, update_preview=False)
 
             # Hole die aktualisierte Liste von Drag-Drop
             self.photo_paths = self.app.drag_drop.get_photo_paths()
-
-            # Index anpassen
-            if self.current_photo_index >= len(self.photo_paths):
-                self.current_photo_index = len(self.photo_paths) - 1
-
-            # INSTANT: Gelöschtes Thumbnail sofort entfernen (visuelles Feedback)
-            self._remove_thumbnail_widget_instantly(deleted_index)
-
-            # PERFORMANCE-OPTIMIERUNG: Cache intelligent aufräumen
-            self._cleanup_cache_after_delete(deleted_index)
-
-            # Sofort große Vorschau und Info aktualisieren (schnell)
-            self._update_large_preview()
-            self._update_info()
-            self._update_delete_button()
-
-            # Thumbnails komplett neu rendern (nach kurzer Verzögerung für sauberes Layout)
-            self.frame.after(10, self._update_thumbnails)
         else:
             # Fallback: Entferne nur aus lokaler Liste
-            self.photo_paths.pop(self.current_photo_index)
-            self._remove_thumbnail_widget_instantly(deleted_index)
-            self._cleanup_cache_after_delete(deleted_index)
-            if self.current_photo_index >= len(self.photo_paths):
-                self.current_photo_index = len(self.photo_paths) - 1
-            self._update_large_preview()
-            self._update_info()
-            self._update_delete_button()
-            self.frame.after(10, self._update_thumbnails)
+            for idx in indices_to_delete:
+                if 0 <= idx < len(self.photo_paths):
+                    self.photo_paths.pop(idx)
+
+        # Cache komplett leeren (einfacher bei Mehrfachauswahl)
+        self.photo_images.clear()
+        self.thumbnail_images.clear()
+
+        # Auswahl zurücksetzen
+        self.selected_photos.clear()
+        self.explicitly_selected = False
+
+        # Neuen aktuellen Index bestimmen
+        if self.photo_paths:
+            # Wähle das erste verbleibende Foto
+            self.current_photo_index = 0
+            self.last_clicked_index = 0
+        else:
+            self.current_photo_index = -1
+            self.last_clicked_index = None
+
+        # UI komplett aktualisieren
+        self._update_thumbnails()
+        self._update_large_preview()
+        self._update_info()
+        self._update_delete_button()
 
     def _cleanup_cache_after_delete(self, deleted_index):
         """Räumt Cache intelligent auf nach dem Löschen eines Fotos"""

@@ -25,6 +25,7 @@ class DragDropFrame:
 
         self.watermark_clip_index = None  # NEU: Index des Clips für Wasserzeichen
         self.show_watermark_column = False  # NEU: Steuert Sichtbarkeit der Wasserzeichen-Spalte
+        self.is_encoding = False  # NEU: Steuert Sichtbarkeit der Progress-Spalte vs. Datum/Uhrzeit
         self.create_widgets()
 
     def create_widgets(self):
@@ -87,7 +88,7 @@ class DragDropFrame:
         # Treeview für Videos
         self.video_tree = ttk.Treeview(
             video_table_frame,
-            columns=("Nr", "Dateiname", "Format", "Dauer", "Größe", "Datum", "Uhrzeit", "WM"),
+            columns=("Nr", "Dateiname", "Format", "Dauer", "Größe", "Datum", "Uhrzeit", "Progress", "WM"),
             show="headings",
             height=6,
             yscrollcommand=video_scrollbar.set
@@ -101,6 +102,7 @@ class DragDropFrame:
         self.video_tree.heading("Größe", text="Größe")
         self.video_tree.heading("Datum", text="Datum")
         self.video_tree.heading("Uhrzeit", text="Uhrzeit")
+        self.video_tree.heading("Progress", text="Fortschritt")
         self.video_tree.heading("WM", text="💧")
 
         self.video_tree.column("Nr", width=10, anchor="center")
@@ -110,6 +112,7 @@ class DragDropFrame:
         self.video_tree.column("Größe", width=70, anchor="center")
         self.video_tree.column("Datum", width=80, anchor="center")
         self.video_tree.column("Uhrzeit", width=70, anchor="center")
+        self.video_tree.column("Progress", width=0, minwidth=0, stretch=False, anchor="w")  # Initial versteckt
         self.video_tree.column("WM", width=0, minwidth=0, stretch=False, anchor="center")  # Startet versteckt
 
         self.video_tree.pack(side=tk.LEFT, fill="both", expand=True)
@@ -120,6 +123,9 @@ class DragDropFrame:
 
         # NEU: Event für Checkbox-Klicks in der Wasserzeichen-Spalte (auf Release um Doppelklicks zu vermeiden)
         self.video_tree.bind("<ButtonRelease-1>", self._on_watermark_checkbox_click)
+
+        # Rechtsklick-Event für Kontextmenü
+        self.video_tree.bind("<Button-3>", self._show_video_context_menu)
 
         # Drag & Drop für Video-Tabelle
         self.video_tree.drop_target_register(DND_FILES)
@@ -176,6 +182,9 @@ class DragDropFrame:
 
         # Doppelklick-Event für Fotos
         self.photo_tree.bind("<Double-1>", self._on_photo_double_click)
+
+        # Rechtsklick-Event für Kontextmenü
+        self.photo_tree.bind("<Button-3>", self._show_photo_context_menu)
 
         # Drag & Drop für Foto-Tabelle
         self.photo_tree.drop_target_register(DND_FILES)
@@ -356,15 +365,48 @@ class DragDropFrame:
         return cleaned_paths
 
     def add_files(self, new_videos, new_photos):
-        """Fügt neue Videos und Fotos hinzu und aktualisiert die Tabellen"""
+        """
+        Importiert neue Videos und Fotos.
+
+        WICHTIG: Videos werden SOFORT in den Working-Folder kopiert (="Import")!
+        video_paths enthält danach NUR Working-Folder-Pfade.
+        """
         new_videos_added = False
         new_photos_added = False
 
-        # Videos hinzufügen (ohne Duplikate)
-        for video_path in new_videos:
-            if video_path not in self.video_paths:
-                self.video_paths.append(video_path)
-                new_videos_added = True
+        # Videos IMPORTIEREN (in Working-Folder kopieren)
+        if new_videos and self.app and hasattr(self.app, 'video_preview'):
+            print(f"\n📥 Importiere {len(new_videos)} Video(s) in Working-Folder...")
+
+            # Stelle sicher, dass Working-Folder existiert
+            if not self.app.video_preview.temp_dir:
+                self.app.video_preview._create_temp_directory()
+
+            imported_paths = []
+            for video_path in new_videos:
+                # Importiere Video (kopiere in Working-Folder)
+                imported_path = self._import_video(video_path)
+                if imported_path:
+                    # Prüfe auf Duplikate (basierend auf Dateinamen)
+                    filename = os.path.basename(imported_path)
+                    is_duplicate = any(os.path.basename(p) == filename for p in self.video_paths)
+
+                    if not is_duplicate:
+                        imported_paths.append(imported_path)
+                        new_videos_added = True
+                    else:
+                        print(f"  ⚠️ Überspringe Duplikat: {filename}")
+                        # Lösche die Kopie wieder
+                        try:
+                            os.remove(imported_path)
+                        except:
+                            pass
+
+            # Füge importierte Pfade zu video_paths hinzu
+            self.video_paths.extend(imported_paths)
+
+            if imported_paths:
+                print(f"✅ {len(imported_paths)} Video(s) erfolgreich importiert")
 
         # Fotos hinzufügen (ohne Duplikate)
         for photo_path in new_photos:
@@ -382,6 +424,37 @@ class DragDropFrame:
         # Foto-Vorschau aktualisieren
         if new_photos_added:
             self._update_photo_preview()
+
+    def _import_video(self, source_path):
+        """
+        Importiert ein Video in den Working-Folder.
+
+        Returns:
+            Working-Folder-Pfad oder None bei Fehler
+        """
+        try:
+            import shutil
+
+            temp_dir = self.app.video_preview.temp_dir
+            if not temp_dir:
+                print(f"  ⚠️ Working-Folder nicht verfügbar")
+                return None
+
+            filename = os.path.basename(source_path)
+            # Erstelle eindeutigen Pfad mit Index
+            index = len(self.video_paths)
+            safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+            dest_path = os.path.join(temp_dir, f"{index:03d}_{safe_filename}")
+
+            # Kopiere Datei
+            print(f"  📋 {filename} → Working-Folder")
+            shutil.copy2(source_path, dest_path)
+
+            return dest_path
+
+        except Exception as e:
+            print(f"  ❌ Fehler beim Importieren von {os.path.basename(source_path)}: {e}")
+            return None
 
         # App über *alle* neuen Dateien benachrichtigen
         if new_videos_added or new_photos_added:
@@ -484,7 +557,8 @@ class DragDropFrame:
             # NEU: Wasserzeichen-Spalte
             watermark_value = "☑" if i - 1 == self.watermark_clip_index else "☐"
 
-            self.video_tree.insert("", "end", values=(i, filename, format_str, duration, size, date, timestamp, watermark_value))
+            # Einfügen: Nr, Dateiname, Format, Dauer, Größe, Datum, Uhrzeit, Progress, WM
+            self.video_tree.insert("", "end", values=(i, filename, format_str, duration, size, date, timestamp, "", watermark_value))
 
     def _update_photo_table(self):
         """Aktualisiert die Foto-Tabelle"""
@@ -732,9 +806,121 @@ class DragDropFrame:
         """Prüft ob Fotos vorhanden sind"""
         return len(self.photo_paths) > 0
 
+
     def reset(self):
         """Setzt die Komponente zurück"""
         self.clear_all()
+
+    # NEU: Methoden für Video-Encoding-Fortschritt
+    def update_video_progress(self, video_index, progress_percent, fps=None, eta=None):
+        """
+        Aktualisiert den Fortschritt für ein bestimmtes Video in der Tabelle.
+
+        Args:
+            video_index: Index des Videos (0-basiert)
+            progress_percent: Fortschritt in Prozent (0-100)
+            fps: Optional FPS-Wert
+            eta: Optional ETA-String (z.B. "1:23")
+        """
+        if video_index < 0 or video_index >= len(self.video_paths):
+            return
+
+        # Erstelle Text-basierten Fortschrittsbalken
+        bar_length = 20
+        filled = int((progress_percent / 100) * bar_length)
+        bar = "█" * filled + "░" * (bar_length - filled)
+
+        # Baue Fortschritts-Text
+        progress_text = f"{bar} {int(progress_percent)}%"
+
+        if fps and fps > 0:
+            progress_text += f" {fps:.1f}fps"
+
+        if eta:
+            progress_text += f" {eta}"
+
+        # Hole das Item in der Treeview
+        items = self.video_tree.get_children()
+        if video_index < len(items):
+            item = items[video_index]
+            # Update nur die Progress-Spalte
+            values = list(self.video_tree.item(item)['values'])
+            values[7] = progress_text  # Progress ist Spalte 7 (0-basiert)
+            self.video_tree.item(item, values=values)
+
+    def clear_video_progress(self, video_index):
+        """Löscht den Fortschritt für ein bestimmtes Video"""
+        if video_index < 0 or video_index >= len(self.video_paths):
+            return
+
+        items = self.video_tree.get_children()
+        if video_index < len(items):
+            item = items[video_index]
+            values = list(self.video_tree.item(item)['values'])
+            values[7] = ""  # Leere Progress-Spalte
+            self.video_tree.item(item, values=values)
+
+    def set_video_status(self, video_index, status_text):
+        """
+        Setzt einen Status-Text für ein Video (z.B. "Fertig", "Fehler", "Warte...")
+
+        Args:
+            video_index: Index des Videos
+            status_text: Status-Text anzuzeigen
+        """
+        if video_index < 0 or video_index >= len(self.video_paths):
+            return
+
+        items = self.video_tree.get_children()
+        if video_index < len(items):
+            item = items[video_index]
+            values = list(self.video_tree.item(item)['values'])
+            values[7] = status_text
+            self.video_tree.item(item, values=values)
+
+    def clear_all_video_progress(self):
+        """Löscht den Fortschritt für alle Videos"""
+        for i in range(len(self.video_paths)):
+            self.clear_video_progress(i)
+
+    def show_progress_mode(self):
+        """
+        Aktiviert Progress-Modus: Zeigt Progress-Spalte, versteckt Datum/Uhrzeit
+        """
+        if self.is_encoding:
+            return  # Bereits im Progress-Modus
+
+        self.is_encoding = True
+
+        # Verstecke Datum und Uhrzeit Spalten
+        self.video_tree.column("Datum", width=0, minwidth=0, stretch=False)
+        self.video_tree.column("Uhrzeit", width=0, minwidth=0, stretch=False)
+
+        # Zeige Progress-Spalte (breiter, da mehr Platz verfügbar)
+        self.video_tree.column("Progress", width=200, minwidth=200, stretch=False)
+
+        self.video_tree.update_idletasks()
+
+    def show_normal_mode(self):
+        """
+        Aktiviert Normal-Modus: Versteckt Progress-Spalte, zeigt Datum/Uhrzeit
+        """
+        if not self.is_encoding:
+            return  # Bereits im Normal-Modus
+
+        self.is_encoding = False
+
+        # Zeige Datum und Uhrzeit Spalten wieder
+        self.video_tree.column("Datum", width=80, minwidth=80, stretch=False)
+        self.video_tree.column("Uhrzeit", width=70, minwidth=70, stretch=False)
+
+        # Verstecke Progress-Spalte
+        self.video_tree.column("Progress", width=0, minwidth=0, stretch=False)
+
+        # Lösche alle Progress-Inhalte
+        self.clear_all_video_progress()
+
+        self.video_tree.update_idletasks()
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
@@ -752,10 +938,11 @@ class DragDropFrame:
             return
 
         index = self.video_tree.index(selection[0])
-        original_path = self.video_paths[index]
+        # video_paths enthält nach update_preview Working-Folder-Pfade!
+        video_path = self.video_paths[index]
 
         # Rufe die Methode in app.py auf
-        self.app.request_cut_dialog(original_path)
+        self.app.request_cut_dialog(video_path, index)
 
     def set_cut_button_enabled(self, enabled: bool):
         """Sperrt/Entsperrt den Schneiden-Button basierend auf Vorschau-Status."""
@@ -767,18 +954,13 @@ class DragDropFrame:
                 self.cut_button.config(text="✂ Schneiden (Vorschau wird erstellt...)", fg="gray")
 
     def _on_video_double_click(self, event):
-        """Öffnet das ausgewählte Video beim Doppelklick"""
+        """Öffnet das ausgewählte Video beim Doppelklick - video_paths enthält Working-Folder-Pfade"""
         selection = self.video_tree.selection()
         if selection:
             index = self.video_tree.index(selection[0])
             if 0 <= index < len(self.video_paths):
-                # NEU: Versuche, die Kopie zu öffnen, falle zurück auf Original
+                # video_paths enthält nach dem ersten update_preview Working-Folder-Pfade!
                 video_path = self.video_paths[index]
-                if self.app and hasattr(self.app, 'video_preview'):
-                    copy_path = self.app.video_preview.get_copy_path(video_path)
-                    if copy_path and os.path.exists(copy_path):
-                        video_path = copy_path
-
                 self._open_file_with_default_app(video_path)
 
     def _on_photo_double_click(self, event):
@@ -802,6 +984,116 @@ class DragDropFrame:
                     subprocess.run(['xdg-open', file_path], check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
         except Exception as e:
             messagebox.showerror("Fehler", f"Datei konnte nicht geöffnet werden:\n{str(e)}")
+
+    def _show_video_context_menu(self, event):
+        """Zeigt Kontextmenü für Video-Zeile bei Rechtsklick"""
+        # Identifiziere die angeklickte Zeile
+        item = self.video_tree.identify_row(event.y)
+        if item:
+            # Wähle die Zeile aus
+            self.video_tree.selection_set(item)
+            index = self.video_tree.index(item)
+
+            if 0 <= index < len(self.video_paths):
+                # video_paths enthält nach update_preview Working-Folder-Pfade!
+                video_path = self.video_paths[index]
+
+                # Erstelle Kontextmenü
+                context_menu = tk.Menu(self.video_tree, tearoff=0)
+                context_menu.add_command(label="▶ Öffnen", command=lambda: self._open_file_with_default_app(video_path))
+                context_menu.add_command(label="📁 Im Verzeichnis öffnen", command=lambda: self._open_in_directory(video_path))
+                context_menu.add_separator()
+                context_menu.add_command(label="🔍 Auf QR-Code prüfen", command=lambda: self._check_qr_from_context(index))
+                context_menu.add_command(label="✂ Schneiden", command=lambda: self._cut_video_from_context(index))
+                context_menu.add_separator()
+                context_menu.add_command(label="✕ Löschen", command=lambda: self._delete_video_from_context(index))
+
+                # Zeige Menü an Mausposition
+                try:
+                    context_menu.tk_popup(event.x_root, event.y_root)
+                finally:
+                    context_menu.grab_release()
+
+    def _show_photo_context_menu(self, event):
+        """Zeigt Kontextmenü für Foto-Zeile bei Rechtsklick"""
+        # Identifiziere die angeklickte Zeile
+        item = self.photo_tree.identify_row(event.y)
+        if item:
+            # Wähle die Zeile aus
+            self.photo_tree.selection_set(item)
+            index = self.photo_tree.index(item)
+
+            if 0 <= index < len(self.photo_paths):
+                photo_path = self.photo_paths[index]
+
+                # Erstelle Kontextmenü
+                context_menu = tk.Menu(self.photo_tree, tearoff=0)
+                context_menu.add_command(label="▶ Öffnen", command=lambda: self._open_file_with_default_app(photo_path))
+                context_menu.add_command(label="📁 Im Verzeichnis öffnen", command=lambda: self._open_in_directory(photo_path))
+                context_menu.add_separator()
+                context_menu.add_command(label="✕ Löschen", command=lambda: self._delete_photo_from_context(index))
+
+                # Zeige Menü an Mausposition
+                try:
+                    context_menu.tk_popup(event.x_root, event.y_root)
+                finally:
+                    context_menu.grab_release()
+
+
+    def _open_in_directory(self, file_path):
+        """Öffnet den Datei-Explorer und markiert die Datei"""
+        try:
+            if os.name == 'nt':  # Windows
+                subprocess.run(['explorer', '/select,', os.path.normpath(file_path)],
+                             creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+            elif os.name == 'posix':  # macOS und Linux
+                directory = os.path.dirname(file_path)
+                if platform.system() == 'Darwin':  # macOS
+                    subprocess.run(['open', '-R', file_path], creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                else:  # Linux
+                    subprocess.run(['xdg-open', directory], creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Verzeichnis konnte nicht geöffnet werden:\n{str(e)}")
+
+    def _check_qr_from_context(self, index):
+        """Führt QR-Code-Prüfung für spezifisches Video aus - video_paths enthält Working-Folder-Pfade"""
+        if 0 <= index < len(self.video_paths):
+            # video_paths enthält nach update_preview Working-Folder-Pfade!
+            video_path = self.video_paths[index]
+
+            if self.app:
+                # Führe QR-Analyse aus
+                self.app.run_qr_analysis([video_path])
+
+    def _cut_video_from_context(self, index):
+        """Öffnet Schnitt-Dialog für spezifisches Video"""
+        if 0 <= index < len(self.video_paths):
+            # Wähle das Video in der Tabelle aus
+            items = self.video_tree.get_children()
+            if index < len(items):
+                self.video_tree.selection_set(items[index])
+            # Öffne Schnitt-Dialog
+            self.open_cut_dialog()
+
+    def _delete_video_from_context(self, index):
+        """Löscht Video aus Kontextmenü"""
+        if 0 <= index < len(self.video_paths):
+            # Wähle das Video in der Tabelle aus
+            items = self.video_tree.get_children()
+            if index < len(items):
+                self.video_tree.selection_set(items[index])
+            # Rufe normale Lösch-Funktion auf
+            self.remove_selected_video()
+
+    def _delete_photo_from_context(self, index):
+        """Löscht Foto aus Kontextmenü"""
+        if 0 <= index < len(self.photo_paths):
+            # Wähle das Foto in der Tabelle aus
+            items = self.photo_tree.get_children()
+            if index < len(items):
+                self.photo_tree.selection_set(items[index])
+            # Rufe normale Lösch-Funktion auf
+            self.remove_selected_photo()
 
     def _handle_video_table_drop(self, event):
         """Verarbeitet das Ablegen von Dateien in die Video-Tabelle"""
@@ -852,11 +1144,11 @@ class DragDropFrame:
             return
 
         column = self.video_tree.identify_column(event.x)
-        # Spalte 8 ist die Wasserzeichen-Spalte (0-indiziert: 7, aber +1 für tree_id)
-        # Spalten: tree_id (#0), Nr, Dateiname, Format, Dauer, Größe, Datum, Uhrzeit, Wasserzeichen
-        # Index:    0        1     2           3       4      5      6      7        8
+        # Spalte 9 ist die Wasserzeichen-Spalte (0-indiziert: 8, aber +1 für tree_id)
+        # Spalten: tree_id (#0), Nr, Dateiname, Format, Dauer, Größe, Datum, Uhrzeit, Progress, WM
+        # Index:    0           1    2          3       4      5      6      7        8         9
 
-        if column != "#8":
+        if column != "#9":
             return
 
         # Finde die Reihe

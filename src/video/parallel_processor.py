@@ -45,13 +45,14 @@ class ParallelVideoProcessor:
 
         return workers
 
-    def process_videos_parallel(self, video_tasks, cancel_event=None):
+    def process_videos_parallel(self, video_tasks, cancel_event=None, on_completed_callback=None):
         """
         Verarbeitet mehrere Videos parallel mit ThreadPoolExecutor.
 
         Args:
             video_tasks: Liste von Tuples (task_function, args, kwargs)
             cancel_event: Optional threading.Event für Abbruch
+            on_completed_callback: Optional Callback(task_index) wenn ein Video fertig ist
 
         Returns:
             Liste der Ergebnisse in der Reihenfolge der Fertigstellung
@@ -83,6 +84,11 @@ class ParallelVideoProcessor:
                     result = future.result()
                     results.append((task_index, result, None))
                     print(f"✓ Video-Task {task_index + 1}/{len(video_tasks)} abgeschlossen")
+
+                    # Rufe Callback auf wenn Video fertig ist
+                    if on_completed_callback:
+                        on_completed_callback(task_index)
+
                 except Exception as e:
                     results.append((task_index, None, e))
                     print(f"✗ Video-Task {task_index + 1}/{len(video_tasks)} fehlgeschlagen: {e}")

@@ -273,9 +273,26 @@ class VideoPreview:
         self.last_video_paths = video_paths
 
         # NEU: Erstelle temp_dir nur wenn noch nicht vorhanden
-        # (verhindert unnötiges Löschen bereits kodierter Videos)
+        # WICHTIG: Wenn temp_dir existiert, NICHT neu erstellen - bereits kodierte Videos behalten!
         if not self.temp_dir or not os.path.exists(self.temp_dir):
             self._create_temp_directory()  # Erstellt auch leere Caches/Maps
+        else:
+            # temp_dir existiert bereits - behalte bereits kodierte Videos
+            # ABER: Bereinige ungültige Cache-Einträge (Dateien die nicht mehr existieren)
+            invalid_entries = []
+            for file_identity, copy_path in list(self.video_copies_map.items()):
+                if not os.path.exists(copy_path):
+                    invalid_entries.append(file_identity)
+
+            if invalid_entries:
+                print(f"🗑️ Bereinige {len(invalid_entries)} ungültige Cache-Einträge")
+                for file_identity in invalid_entries:
+                    del self.video_copies_map[file_identity]
+                    if file_identity in self.metadata_cache:
+                        del self.metadata_cache[file_identity]
+
+            print(f"♻️ Verwende bestehendes temp_dir: {self.temp_dir}")
+            print(f"   {len(self.video_copies_map)} Video(s) bereits im Cache")
 
         if not self.progress_handler:
             self.progress_handler = ProgressHandler(self.progress_frame)
@@ -473,16 +490,44 @@ class VideoPreview:
             self.parent.after(0, lambda: self.status_label.config(
                 text=f"Kodiere {len(videos_to_process)} Videos parallel...", fg="orange"))
 
+            # NEU: Aktiviere Progress-Modus in DragDrop-Tabelle
+            if self.app and hasattr(self.app, 'drag_drop'):
+                self.parent.after(0, self.app.drag_drop.show_progress_mode)
+
+            # Setze initialen Gesamt-Fortschritt
+            self.parent.after(0, self.progress_handler.update_progress, 0, len(videos_to_process))
+
             # Erstelle Tasks für parallele Verarbeitung
             tasks = []
             for i, original_path, source_path, copy_path, filename in videos_to_process:
-                def reencode_task(src=source_path, dst=copy_path, task_id=None):
-                    self._reencode_single_clip(src, dst, task_id)
+                # Setze Status auf "Warte..." für alle Videos
+                if self.app and hasattr(self.app, 'drag_drop'):
+                    self.parent.after(0, self.app.drag_drop.set_video_status, i, "⏳ Warte...")
+
+                def reencode_task(src=source_path, dst=copy_path, idx=i, task_id=None):
+                    # Setze Status auf "Kodiert..." wenn Task startet
+                    if self.app and hasattr(self.app, 'drag_drop'):
+                        self.parent.after(0, self.app.drag_drop.set_video_status, idx, "🔄 Kodiert...")
+                    self._reencode_single_clip(src, dst, task_id, idx)
                 tasks.append((reencode_task, (), {}))
 
             # Führe parallele Verarbeitung aus
             start_time = time.time()
-            results = self.parallel_processor.process_videos_parallel(tasks, self.cancellation_event)
+
+            # Zähler für fertige Videos (thread-safe)
+            import threading
+            completed_videos = {'count': 0}
+            completed_lock = threading.Lock()
+
+            def on_video_completed(task_index):
+                """Callback wenn ein Video fertig enkodiert ist"""
+                with completed_lock:
+                    completed_videos['count'] += 1
+                    # Update Gesamt-Fortschritt in VideoPreview
+                    self.parent.after(0, self.progress_handler.update_progress,
+                                    completed_videos['count'], len(videos_to_process))
+
+            results = self.parallel_processor.process_videos_parallel(tasks, self.cancellation_event, on_video_completed)
             total_time = time.time() - start_time
 
             # Prüfe auf Fehler
@@ -495,9 +540,6 @@ class VideoPreview:
                         i, original_path, source_path, copy_path, filename = videos_to_process[task_index]
                         print(f"Fehler bei Neukodierung von {filename}: {error}")
                         raise Exception(f"Fehler bei Neukodierung von {filename}")
-                else:
-                    # Update Progress für jedes fertige Video
-                    self.parent.after(0, self.progress_handler.update_progress, task_index + 1, len(videos_to_process))
 
             avg_time = total_time / len(videos_to_process)
             print(f"✅ Paralleles Re-Encoding abgeschlossen in {total_time:.1f}s ({avg_time:.1f}s pro Video)")
@@ -512,6 +554,11 @@ class VideoPreview:
         elif needs_reencoding and len(videos_to_process) > 0:
             # --- SEQUENZIELL: Re-Encoding (wie bisher) ---
             print(f"Starte sequenzielles Re-Encoding von {len(videos_to_process)} Videos...")
+
+            # NEU: Aktiviere Progress-Modus in DragDrop-Tabelle
+            if self.app and hasattr(self.app, 'drag_drop'):
+                self.parent.after(0, self.app.drag_drop.show_progress_mode)
+
             encoding_times = []
 
             for idx, (i, original_path, source_path, copy_path, filename) in enumerate(videos_to_process):
@@ -532,8 +579,12 @@ class VideoPreview:
                 status_msg = f"Kodiere Clip {idx + 1}/{len(videos_to_process)}{eta_str}..."
                 self.parent.after(0, lambda msg=status_msg: self.status_label.config(text=msg, fg="orange"))
 
+                # Setze Status in DragDrop-Tabelle
+                if self.app and hasattr(self.app, 'drag_drop'):
+                    self.parent.after(0, self.app.drag_drop.set_video_status, i, "🔄 Kodiert...")
+
                 try:
-                    self._reencode_single_clip(source_path, copy_path)
+                    self._reencode_single_clip(source_path, copy_path, video_index=i)
 
                     # Speichere Kodierzeit für ETA-Berechnung
                     encoding_time = time.time() - start_time
@@ -585,6 +636,9 @@ class VideoPreview:
         # NEU: Entsperre Schneiden-Button nach Kopieren/Kodieren
         if self.app and hasattr(self.app, 'drag_drop'):
             self.parent.after(0, lambda: self.app.drag_drop.set_cut_button_enabled(True))
+            # Deaktiviere Progress-Modus und zeige wieder Datum/Uhrzeit
+            if needs_reencoding and len(videos_to_process) > 0:
+                self.parent.after(0, self.app.drag_drop.show_normal_mode)
 
         self.parent.after(0, self.progress_handler.reset)
         return temp_copy_paths
@@ -695,7 +749,7 @@ class VideoPreview:
             print(f"    Konnte Thumbnail-Check nicht durchführen: {e}")
             return False  # Im Zweifelsfall ohne Thumbnail-Entfernung kopieren
 
-    def _run_ffmpeg_with_progress(self, command, total_duration=None, task_name="Encoding", task_id=None):
+    def _run_ffmpeg_with_progress(self, command, total_duration=None, task_name="Encoding", task_id=None, video_index=None):
         """
         Führt FFmpeg-Befehl aus und liest den Fortschritt live aus.
 
@@ -706,6 +760,7 @@ class VideoPreview:
             total_duration: Gesamtdauer des Videos in Sekunden (für Fortschrittsberechnung)
             task_name: Name der Aufgabe für Status-Updates
             task_id: Optional ID für parallele Tasks
+            video_index: Optional Index des Videos in der DragDrop-Tabelle
 
         Returns:
             True bei Erfolg, wirft Exception bei Fehler
@@ -797,17 +852,11 @@ class VideoPreview:
                             eta_seconds = int(remaining_time % 60)
                             eta_str = f"{eta_minutes}:{eta_seconds:02d}"
 
-                            # Sende Update an UI (Thread-sicher)
-                            if self.progress_handler:
-                                self.parent.after(0, self.progress_handler.update_encoding_progress,
-                                                task_name, progress_percent, fps, eta_str,
-                                                current_time_sec, total_duration, task_id)
-                    else:
-                        # Kein total_duration - zeige nur Zeit und FPS
-                        if self.progress_handler:
-                            self.parent.after(0, self.progress_handler.update_encoding_progress,
-                                            task_name, None, fps, None,
-                                            current_time_sec, None, task_id)
+                            # Sende Update NUR an DragDrop-Tabelle für individuellen Clip-Fortschritt
+                            # VideoPreview zeigt Gesamt-Fortschritt über update_progress()
+                            if video_index is not None and self.app and hasattr(self.app, 'drag_drop'):
+                                self.parent.after(0, self.app.drag_drop.update_video_progress,
+                                                video_index, progress_percent, fps, eta_str)
 
             # Warte auf Prozessende mit Timeout
             try:
@@ -832,11 +881,12 @@ class VideoPreview:
                 print(stderr_relevant)
                 raise subprocess.CalledProcessError(process.returncode, command, stderr=stderr_output)
 
-            # Finale 100% Update (nur wenn total_duration gültig ist)
-            if self.progress_handler and total_duration is not None and isinstance(total_duration, (int, float)):
-                self.parent.after(0, self.progress_handler.update_encoding_progress,
-                                task_name, 100, fps, "0:00",
-                                total_duration, total_duration, task_id)
+            # Finaler 100% Status nur für DragDrop-Tabelle (nicht für VideoPreview ProgressHandler)
+            # VideoPreview zeigt Gesamt-Fortschritt über update_progress()
+            if video_index is not None and self.app and hasattr(self.app, 'drag_drop'):
+                if total_duration is not None and isinstance(total_duration, (int, float)):
+                    self.parent.after(0, self.app.drag_drop.update_video_progress,
+                                    video_index, 100, fps, "0:00")
 
             return True
 
@@ -880,10 +930,16 @@ class VideoPreview:
             print(f"Warnung: Konnte Videodauer nicht ermitteln für {video_path}: {e}")
             return None
 
-    def _reencode_single_clip(self, input_path, output_path, task_id=None):
+    def _reencode_single_clip(self, input_path, output_path, task_id=None, video_index=None):
         """
         Kodiert ein einzelnes Video neu auf das Ziel-Format.
         WICHTIG: Blockiert während des Re-Encodings.
+
+        Args:
+            input_path: Pfad zum Input-Video
+            output_path: Pfad zum Output-Video
+            task_id: Optional Task-ID für paralleles Encoding
+            video_index: Optional Index des Videos in der DragDrop-Tabelle
         """
         target_params = {
             'width': 1920, 'height': 1080, 'fps': 30, 'pix_fmt': 'yuv420p',
@@ -988,8 +1044,13 @@ class VideoPreview:
 
         # Verwende neue Methode mit Live-Fortschritt
         try:
-            self._run_ffmpeg_with_progress(cmd, total_duration, task_name, task_id)
+            self._run_ffmpeg_with_progress(cmd, total_duration, task_name, task_id, video_index)
             print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+
+            # Setze Status in DragDrop-Tabelle auf "Fertig"
+            if video_index is not None and self.app and hasattr(self.app, 'drag_drop'):
+                self.parent.after(0, self.app.drag_drop.set_video_status, video_index, "✓ Fertig")
+
             return  # Erfolg!
         except subprocess.CalledProcessError as e:
             # Hole stderr aus dem Fehler
@@ -1042,7 +1103,7 @@ class VideoPreview:
 
                     try:
                         # Rekursiver Aufruf mit Software-Encoding
-                        self._reencode_single_clip(input_path, output_path, task_id)
+                        self._reencode_single_clip(input_path, output_path, task_id, video_index)
                         print(f"✅ Software-Encoding erfolgreich als Fallback")
                         return  # Erfolgreicher Fallback
                     finally:
@@ -1500,7 +1561,12 @@ class VideoPreview:
                                   command=self.retry_creation,
                                   state="normal")
         self.combined_video_path = None
-        self._cleanup_temp_copies()
+
+        # WICHTIG: Lösche temp_dir NUR wenn kein Neustart geplant ist!
+        if not self.pending_restart_callback:
+            self._cleanup_temp_copies()
+        else:
+            print("♻️ Behalte temp_dir trotz Fehler für Neustart")
 
     def register_new_copy(self, original_placeholder: str, new_copy_path: str):
         """
@@ -1681,7 +1747,13 @@ class VideoPreview:
                                   command=self.retry_creation,
                                   state="normal")
         self.combined_video_path = None
-        self._cleanup_temp_copies()
+
+        # WICHTIG: Lösche temp_dir NUR wenn kein Neustart geplant ist!
+        # Bei Neustart (neue Videos hinzufügen) wollen wir bereits kodierte Videos behalten
+        if not self.pending_restart_callback:
+            self._cleanup_temp_copies()
+        else:
+            print("♻️ Behalte temp_dir für Neustart (bereits kodierte Videos bleiben erhalten)")
 
     def cancel_creation(self):
         """Signals the processing thread to cancel the video creation."""
@@ -1701,6 +1773,10 @@ class VideoPreview:
         """Setzt die Vorschau zurück und löscht die temporäre Datei"""
         self.pending_restart_callback = None
         self.cancel_creation()
+
+        # NEU: Stelle Normal-Modus in DragDrop-Tabelle wieder her
+        if self.app and hasattr(self.app, 'drag_drop'):
+            self.app.drag_drop.show_normal_mode()
 
         # KORREKTUR: Zuerst Player entladen, um WinError 32 zu vermeiden
         if self.app and hasattr(self.app, 'video_player') and self.app.video_player:

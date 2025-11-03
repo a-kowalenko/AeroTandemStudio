@@ -293,6 +293,17 @@ class VideoGeneratorApp:
 
     def on_settings_saved(self):
         """Wird aufgerufen nachdem Settings gespeichert wurden"""
+        # WICHTIG: Config neu laden, damit Änderungen wirksam werden
+        self.config.reload_settings()
+
+        # WICHTIG: Hardware-Beschleunigung in VideoPreview neu laden
+        if hasattr(self, 'video_preview') and self.video_preview:
+            self.video_preview.reload_hardware_acceleration_settings()
+
+        # WICHTIG: Wenn ein VideoProcessor existiert, auch dort neu laden
+        if hasattr(self, 'video_processor') and self.video_processor:
+            self.video_processor.reload_hardware_acceleration_settings()
+
         # Server-Verbindung testen
         self.test_server_connection_async()
         # SD-Monitor sofort neu starten
@@ -819,6 +830,7 @@ class VideoGeneratorApp:
         self.video_processor = VideoProcessor(
             progress_callback=self._update_progress,
             status_callback=self._handle_status_update,
+            encoding_progress_callback=self._update_encoding_progress,  # NEU: Encoding-Fortschritt
             config_manager=self.config  # Config Manager übergeben
         )
 
@@ -844,6 +856,12 @@ class VideoGeneratorApp:
     def _update_progress(self, step, total_steps=8):
         """Callback für Fortschrittsupdates"""
         self.root.after(0, self.progress_handler.update_progress, step, total_steps)
+
+    def _update_encoding_progress(self, task_name="Encoding", progress=None, fps=0.0, eta=None,
+                                  current_time=0.0, total_time=None, task_id=None):
+        """Callback für Live-Encoding-Fortschritt"""
+        self.root.after(0, self.progress_handler.update_encoding_progress,
+                       task_name, progress, fps, eta, current_time, total_time, task_id)
 
     def _handle_status_update(self, status_type, message):
         """Callback für Statusupdates"""

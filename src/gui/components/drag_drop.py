@@ -25,6 +25,7 @@ class DragDropFrame:
 
         self.watermark_clip_index = None  # NEU: Index des Clips für Wasserzeichen
         self.show_watermark_column = False  # NEU: Steuert Sichtbarkeit der Wasserzeichen-Spalte
+        self.is_encoding = False  # NEU: Steuert Sichtbarkeit der Progress-Spalte vs. Datum/Uhrzeit
         self.create_widgets()
 
     def create_widgets(self):
@@ -87,7 +88,7 @@ class DragDropFrame:
         # Treeview für Videos
         self.video_tree = ttk.Treeview(
             video_table_frame,
-            columns=("Nr", "Dateiname", "Format", "Dauer", "Größe", "Datum", "Uhrzeit", "WM"),
+            columns=("Nr", "Dateiname", "Format", "Dauer", "Größe", "Datum", "Uhrzeit", "Progress", "WM"),
             show="headings",
             height=6,
             yscrollcommand=video_scrollbar.set
@@ -101,6 +102,7 @@ class DragDropFrame:
         self.video_tree.heading("Größe", text="Größe")
         self.video_tree.heading("Datum", text="Datum")
         self.video_tree.heading("Uhrzeit", text="Uhrzeit")
+        self.video_tree.heading("Progress", text="Fortschritt")
         self.video_tree.heading("WM", text="💧")
 
         self.video_tree.column("Nr", width=10, anchor="center")
@@ -110,6 +112,7 @@ class DragDropFrame:
         self.video_tree.column("Größe", width=70, anchor="center")
         self.video_tree.column("Datum", width=80, anchor="center")
         self.video_tree.column("Uhrzeit", width=70, anchor="center")
+        self.video_tree.column("Progress", width=0, minwidth=0, stretch=False, anchor="w")  # Initial versteckt
         self.video_tree.column("WM", width=0, minwidth=0, stretch=False, anchor="center")  # Startet versteckt
 
         self.video_tree.pack(side=tk.LEFT, fill="both", expand=True)
@@ -554,7 +557,8 @@ class DragDropFrame:
             # NEU: Wasserzeichen-Spalte
             watermark_value = "☑" if i - 1 == self.watermark_clip_index else "☐"
 
-            self.video_tree.insert("", "end", values=(i, filename, format_str, duration, size, date, timestamp, watermark_value))
+            # Einfügen: Nr, Dateiname, Format, Dauer, Größe, Datum, Uhrzeit, Progress, WM
+            self.video_tree.insert("", "end", values=(i, filename, format_str, duration, size, date, timestamp, "", watermark_value))
 
     def _update_photo_table(self):
         """Aktualisiert die Foto-Tabelle"""
@@ -807,6 +811,117 @@ class DragDropFrame:
         """Setzt die Komponente zurück"""
         self.clear_all()
 
+    # NEU: Methoden für Video-Encoding-Fortschritt
+    def update_video_progress(self, video_index, progress_percent, fps=None, eta=None):
+        """
+        Aktualisiert den Fortschritt für ein bestimmtes Video in der Tabelle.
+
+        Args:
+            video_index: Index des Videos (0-basiert)
+            progress_percent: Fortschritt in Prozent (0-100)
+            fps: Optional FPS-Wert
+            eta: Optional ETA-String (z.B. "1:23")
+        """
+        if video_index < 0 or video_index >= len(self.video_paths):
+            return
+
+        # Erstelle Text-basierten Fortschrittsbalken
+        bar_length = 20
+        filled = int((progress_percent / 100) * bar_length)
+        bar = "█" * filled + "░" * (bar_length - filled)
+
+        # Baue Fortschritts-Text
+        progress_text = f"{bar} {int(progress_percent)}%"
+
+        if fps and fps > 0:
+            progress_text += f" {fps:.1f}fps"
+
+        if eta:
+            progress_text += f" {eta}"
+
+        # Hole das Item in der Treeview
+        items = self.video_tree.get_children()
+        if video_index < len(items):
+            item = items[video_index]
+            # Update nur die Progress-Spalte
+            values = list(self.video_tree.item(item)['values'])
+            values[7] = progress_text  # Progress ist Spalte 7 (0-basiert)
+            self.video_tree.item(item, values=values)
+
+    def clear_video_progress(self, video_index):
+        """Löscht den Fortschritt für ein bestimmtes Video"""
+        if video_index < 0 or video_index >= len(self.video_paths):
+            return
+
+        items = self.video_tree.get_children()
+        if video_index < len(items):
+            item = items[video_index]
+            values = list(self.video_tree.item(item)['values'])
+            values[7] = ""  # Leere Progress-Spalte
+            self.video_tree.item(item, values=values)
+
+    def set_video_status(self, video_index, status_text):
+        """
+        Setzt einen Status-Text für ein Video (z.B. "Fertig", "Fehler", "Warte...")
+
+        Args:
+            video_index: Index des Videos
+            status_text: Status-Text anzuzeigen
+        """
+        if video_index < 0 or video_index >= len(self.video_paths):
+            return
+
+        items = self.video_tree.get_children()
+        if video_index < len(items):
+            item = items[video_index]
+            values = list(self.video_tree.item(item)['values'])
+            values[7] = status_text
+            self.video_tree.item(item, values=values)
+
+    def clear_all_video_progress(self):
+        """Löscht den Fortschritt für alle Videos"""
+        for i in range(len(self.video_paths)):
+            self.clear_video_progress(i)
+
+    def show_progress_mode(self):
+        """
+        Aktiviert Progress-Modus: Zeigt Progress-Spalte, versteckt Datum/Uhrzeit
+        """
+        if self.is_encoding:
+            return  # Bereits im Progress-Modus
+
+        self.is_encoding = True
+
+        # Verstecke Datum und Uhrzeit Spalten
+        self.video_tree.column("Datum", width=0, minwidth=0, stretch=False)
+        self.video_tree.column("Uhrzeit", width=0, minwidth=0, stretch=False)
+
+        # Zeige Progress-Spalte (breiter, da mehr Platz verfügbar)
+        self.video_tree.column("Progress", width=200, minwidth=200, stretch=False)
+
+        self.video_tree.update_idletasks()
+
+    def show_normal_mode(self):
+        """
+        Aktiviert Normal-Modus: Versteckt Progress-Spalte, zeigt Datum/Uhrzeit
+        """
+        if not self.is_encoding:
+            return  # Bereits im Normal-Modus
+
+        self.is_encoding = False
+
+        # Zeige Datum und Uhrzeit Spalten wieder
+        self.video_tree.column("Datum", width=80, minwidth=80, stretch=False)
+        self.video_tree.column("Uhrzeit", width=70, minwidth=70, stretch=False)
+
+        # Verstecke Progress-Spalte
+        self.video_tree.column("Progress", width=0, minwidth=0, stretch=False)
+
+        # Lösche alle Progress-Inhalte
+        self.clear_all_video_progress()
+
+        self.video_tree.update_idletasks()
+
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
 
@@ -1029,11 +1144,11 @@ class DragDropFrame:
             return
 
         column = self.video_tree.identify_column(event.x)
-        # Spalte 8 ist die Wasserzeichen-Spalte (0-indiziert: 7, aber +1 für tree_id)
-        # Spalten: tree_id (#0), Nr, Dateiname, Format, Dauer, Größe, Datum, Uhrzeit, Wasserzeichen
-        # Index:    0        1     2           3       4      5      6      7        8
+        # Spalte 9 ist die Wasserzeichen-Spalte (0-indiziert: 8, aber +1 für tree_id)
+        # Spalten: tree_id (#0), Nr, Dateiname, Format, Dauer, Größe, Datum, Uhrzeit, Progress, WM
+        # Index:    0           1    2          3       4      5      6      7        8         9
 
-        if column != "#8":
+        if column != "#9":
             return
 
         # Finde die Reihe

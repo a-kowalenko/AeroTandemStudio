@@ -29,37 +29,34 @@ def main():
             if splash.window.winfo_exists():
                 splash.update_status(text)
 
-        # Variable um zu tracken ob Initialisierung fertig ist
+        # Variable um App-Instanz zu speichern
         app_instance = [None]
-        init_complete = [False]
 
         def start_app_loading():
             """Startet das Laden der App"""
             # Erstelle App mit Splash-Callback
-            # Die App initialisiert sich jetzt asynchron in Schritten!
             app = VideoGeneratorApp(root=root, splash_callback=update_splash_status)
             app_instance[0] = app
 
-            # Überwache ob Initialisierung fertig ist
+            # Überwache Initialisierung
             check_init_complete()
 
         def check_init_complete():
-            """Prüft ob App-Initialisierung abgeschlossen ist"""
-            # Prüfe ob _init_complete aufgerufen wurde
-            # (erkennbar daran dass protocol gesetzt wurde)
-            if app_instance[0] and hasattr(app_instance[0].root, '_tclCommands'):
-                # App ist fertig initialisiert
-                root.after(500, finish_loading)  # Kurze Pause damit man "Bereit!" sieht
+            """Wartet bis App vollständig initialisiert ist"""
+            if app_instance[0] and app_instance[0].initialization_complete:
+                # Initialisierung ist fertig!
+                # Kurze Pause damit "Bereit!" sichtbar ist
+                root.after(300, finish_loading)
             else:
-                # Noch nicht fertig, prüfe in 100ms erneut
-                root.after(100, check_init_complete)
+                # Noch nicht fertig, prüfe in 50ms erneut
+                root.after(50, check_init_complete)
 
         def finish_loading():
             """Beendet den Ladevorgang"""
             # Schließe Splash
             splash.destroy()
 
-            # Zeige Hauptfenster
+            # JETZT erst Hauptfenster zeigen!
             root.deiconify()
 
             print("🎉 App gestartet!")

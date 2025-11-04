@@ -71,18 +71,177 @@ class VideoGeneratorApp:
         self.old_button_bg = ""
         self.old_button_cursor = ""
 
+        # Flag für Initialisierungsstatus
+        self.initialization_complete = False
+
         # Starte asynchrone Initialisierung
         self._init_step_1()
 
     def _init_step_1(self):
-        """Schritt 1: GUI erstellen"""
+        """Schritt 1: GUI erstellen - aufgeteilt in Sub-Schritte"""
         if self.splash_callback:
             self.splash_callback("Erstelle Benutzeroberfläche...")
 
-        self.setup_gui()
+        # Starte GUI-Erstellung in Chunks
+        self._setup_gui_step_1()
 
-        # Nächster Schritt nach kurzem Delay (Event-Loop läuft weiter!)
+    def _setup_gui_step_1(self):
+        """GUI Setup Teil 1: Grundkonfiguration"""
+        # WICHTIG: Stelle sicher dass Fenster versteckt bleibt!
+        if not self.root.wm_state() == 'withdrawn':
+            self.root.withdraw()
+
+        self.root.title("Aero Tandem Studio")
+
+        # Zentriere Fenster auf dem Bildschirm
+        window_width = 1400
+        window_height = 800
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
+        self.root.config(padx=20, pady=0)
+
+        # Force update damit Spinner weiterläuft
+        self.root.update_idletasks()
+
+        # Nächster Chunk
+        self.root.after(1, self._setup_gui_step_2)
+
+    def _setup_gui_step_2(self):
+        """GUI Setup Teil 2: Header und Container"""
+        # Header
+        self.create_header()
+
+        # Container
+        self.main_container = tk.Frame(self.root)
+        self.main_container.pack(fill="both", expand=True)
+
+        self.left_frame = tk.Frame(self.main_container, width=600)
+        self.left_frame.pack(side="left", fill="both", expand=True, padx=(0, 20))
+
+        self.right_frame = tk.Frame(self.main_container, width=350)
+        self.right_frame.pack(side="right", fill="y", padx=(20, 0))
+
+        # Force update
+        self.root.update_idletasks()
+
+        # Nächster Chunk
+        self.root.after(1, self._setup_gui_step_3)
+
+    def _setup_gui_step_3(self):
+        """GUI Setup Teil 3: Komponenten erstellen"""
+        # Dies ruft setup_gui() auf, das alle Komponenten erstellt
+        # Wir müssen die originale Methode aufrufen, aber Schritt für Schritt
+
+        # Formular und Drag&Drop
+        self.form_fields = FormFields(self.left_frame, self.config, self)
+
+        # Force update
+        self.root.update_idletasks()
+
+        self.drag_drop = DragDropFrame(self.left_frame, self)
+
+        # Force update
+        self.root.update_idletasks()
+
+        # Nächster Chunk
+        self.root.after(1, self._setup_gui_step_4)
+
+    def _setup_gui_step_4(self):
+        """GUI Setup Teil 4: Tabs und Preview"""
+        # Tabs erstellen
+        style = ttk.Style()
+        style.configure('Preview.TNotebook.Tab', font=('Arial', 8, 'bold'), padding=[20, 5])
+
+        self.preview_notebook = ttk.Notebook(self.right_frame, style='Preview.TNotebook')
+        self.video_tab = ttk.Frame(self.preview_notebook)
+        self.preview_notebook.add(self.video_tab, text="Video Vorschau")
+        self.foto_tab = ttk.Frame(self.preview_notebook)
+        self.preview_notebook.add(self.foto_tab, text="Foto Vorschau")
+
+        # Video Player und Preview
+        self.video_player = VideoPlayer(self.video_tab, self)
+
+        # Force update
+        self.root.update_idletasks()
+
+        self.video_preview = VideoPreview(self.video_tab, self)
+
+        # Force update
+        self.root.update_idletasks()
+
+        # Nächster Chunk
+        self.root.after(1, self._setup_gui_step_5)
+
+    def _setup_gui_step_5(self):
+        """GUI Setup Teil 5: Foto-Preview und Button"""
+        self.photo_preview = PhotoPreview(self.foto_tab, self)
+
+        # Force update
+        self.root.update_idletasks()
+
+        # Rufe den Rest von setup_gui auf
+        self._finish_setup_gui()
+
+        # Weiter mit nächstem Init-Schritt
         self.root.after(10, self._init_step_2)
+
+    def _finish_setup_gui(self):
+        """Finalisiert setup_gui - erstellt Upload-Frame etc."""
+        # Event-Binding
+        self.preview_notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        # Upload Frame erstellen (aus original setup_gui kopiert)
+        self.upload_frame = tk.Frame(self.right_frame)
+        progress_row = tk.Frame(self.upload_frame)
+        progress_row.pack(fill="x", side="top")
+
+        self.progress_handler = ProgressHandler(self.root, progress_row)
+
+        controls_row = tk.Frame(self.upload_frame)
+        controls_row.pack(fill="x", side="top", pady=(5, 0))
+
+        checkboxes_frame = tk.Frame(controls_row)
+        checkboxes_frame.pack(side="left", fill="both", expand=True)
+
+        upload_row = tk.Frame(checkboxes_frame)
+        upload_row.pack(fill="x", pady=(0, 3))
+
+        self.upload_to_server_var = tk.BooleanVar()
+        self.upload_checkbox = tk.Checkbutton(upload_row, text="Auf Server laden",
+                                               variable=self.upload_to_server_var,
+                                               font=("Arial", 11),
+                                               command=self.on_upload_checkbox_toggle)
+        self.upload_checkbox.pack(side="left")
+
+        self.server_status_label = tk.Label(upload_row, text="Prüfe...",
+                                            font=("Arial", 9, "bold"), fg="orange")
+        self.server_status_label.pack(side="left", padx=(5, 0))
+
+        autoclear_row = tk.Frame(checkboxes_frame)
+        autoclear_row.pack(fill="x")
+
+        self.auto_clear_files_var = tk.BooleanVar()
+        self.auto_clear_checkbox = tk.Checkbutton(autoclear_row,
+                                                   text="Nach Erstellen zurücksetzen",
+                                                   variable=self.auto_clear_files_var,
+                                                   font=("Arial", 11),
+                                                   command=self._on_auto_clear_toggle)
+        self.auto_clear_checkbox.pack(side="left")
+
+        self.erstellen_button = tk.Button(controls_row, text="Erstellen",
+                                          font=("Arial", 12, "bold"),
+                                          command=self.erstelle_video,
+                                          bg="#4CAF50", fg="white",
+                                          width=36, height=2)
+        self.erstellen_button.pack(side="right", padx=(10, 0))
+
+        self.pack_components()
+        self.load_settings()
+        self.test_server_connection_async()
 
     def _init_step_2(self):
         """Schritt 2: Dependencies prüfen"""
@@ -90,8 +249,6 @@ class VideoGeneratorApp:
             self.splash_callback("Prüfe FFmpeg Installation...")
 
         self.ensure_dependencies()
-
-        # Nächster Schritt
         self.root.after(10, self._init_step_3)
 
     def _init_step_3(self):
@@ -100,8 +257,6 @@ class VideoGeneratorApp:
             self.splash_callback("Initialisiere SD-Karten Monitor...")
 
         self.initialize_sd_card_monitor()
-
-        # Finaler Schritt
         self.root.after(10, self._init_complete)
 
     def _init_complete(self):
@@ -112,12 +267,24 @@ class VideoGeneratorApp:
         # NEU: Schließ-Ereignis abfangen
         self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
 
+        # Markiere Initialisierung als abgeschlossen
+        self.initialization_complete = True
+
         print("✅ App-Initialisierung abgeschlossen")
 
 
     def setup_gui(self):
         self.root.title("Aero Tandem Studio")
-        self.root.geometry("1400x800")
+
+        # Zentriere Fenster auf dem Bildschirm
+        window_width = 1400
+        window_height = 800
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
         self.root.config(padx=20, pady=0)
 
         # Header mit Titel und Settings-Button

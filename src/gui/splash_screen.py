@@ -98,20 +98,53 @@ class SplashScreen:
         )
         version_label.pack(pady=(5, 0))
 
-        # Spinner starten
-        self.spinner.start()
+        # Spinner starten mit schnellerem Delay (16ms = 60 FPS)
+        self.spinner.start(delay=16)
+
+        # Starte unabhängigen Animations-Loop
+        # Dieser läuft kontinuierlich und hält den Spinner am Leben!
+        self._animation_running = True
+        self._run_animation_loop()
 
         # Forciere Darstellung
         self.window.update()
 
+    def _run_animation_loop(self):
+        """
+        Unabhängiger Animations-Loop der kontinuierlich läuft.
+        Hält den Spinner am Leben, egal was im Hauptthread passiert!
+        """
+        if self._animation_running and self.window.winfo_exists():
+            # Update das Fenster (damit Spinner-Animation gezeichnet wird)
+            try:
+                # Beide Updates für maximale Flüssigkeit
+                self.window.update_idletasks()
+                self.window.update()
+            except:
+                pass
+
+            # Schedule nächstes Update (16ms = 60 FPS für maximale Flüssigkeit!)
+            self.window.after(16, self._run_animation_loop)
+
     def update_status(self, text):
         """Aktualisiert den Status-Text"""
-        self.loading_label.config(text=text)
-        self.window.update()
+        try:
+            self.loading_label.config(text=text)
+        except:
+            pass
 
     def destroy(self):
         """Schließt den Splash-Screen"""
+        self._animation_running = False  # Stoppe Animations-Loop
+
         if self.spinner:
-            self.spinner.stop()
-        self.window.destroy()
+            try:
+                self.spinner.stop()
+            except:
+                pass
+
+        try:
+            self.window.destroy()
+        except:
+            pass
 

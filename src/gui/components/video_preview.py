@@ -373,16 +373,30 @@ class VideoPreview:
             print(f"⚠️ Re-Encoding aktiviert → Kodiere nur neue Videos, Cache bleibt erhalten")
         else:
             # Bei Stream-Copy: Behalte existierende Kopien, entferne nur nicht mehr benötigte
-            # Erstelle Set der aktuellen file-identities
-            current_identities = set()
-            for path in original_paths:
-                file_identity = self._get_file_identity(path)
-                if file_identity:
-                    current_identities.add(file_identity)
+            # WICHTIG: Verwende self.last_video_paths (die vollständige Liste), NICHT original_paths (nur neue Videos)!
+            # Erstelle Set der aktuellen Dateinamen (nur Basename, nicht Pfad)
+            current_filenames = set()
+            # Nutze last_video_paths (vollständige aktuelle Video-Liste) statt original_paths (nur zu verarbeitende)
+            video_list_to_check = self.last_video_paths if self.last_video_paths else original_paths
+            for path in video_list_to_check:
+                filename = os.path.basename(path)
+                current_filenames.add(filename)
 
-            # Finde file-identities, die nicht mehr benötigt werden
-            identities_to_remove = [identity for identity in list(self.video_copies_map.keys())
-                                    if identity not in current_identities]
+            # DEBUG: Zeige was in der Liste ist
+            print(f"📋 DEBUG: current_filenames = {current_filenames}")
+            print(f"📋 DEBUG: video_copies_map keys = {[identity[0] for identity in self.video_copies_map.keys()]}")
+
+            # Finde Kopien, deren Dateinamen NICHT mehr in der aktuellen Liste sind
+            identities_to_remove = []
+            for identity, copy_path in list(self.video_copies_map.items()):
+                # Identity ist (filename, size), also identity[0] ist der Dateiname
+                filename_in_cache = identity[0]
+                # Nur entfernen wenn Dateiname NICHT in current_filenames
+                if filename_in_cache not in current_filenames:
+                    print(f"🗑️ DEBUG: '{filename_in_cache}' NICHT in current_filenames - wird gelöscht")
+                    identities_to_remove.append(identity)
+                else:
+                    print(f"✅ DEBUG: '{filename_in_cache}' in current_filenames - wird behalten")
 
             for identity in identities_to_remove:
                 # Lösche Datei und Cache-Eintrag

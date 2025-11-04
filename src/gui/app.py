@@ -3,7 +3,6 @@ from tkinter import messagebox, ttk
 import threading
 import os
 import queue
-import uuid  # NEU
 from typing import List
 from tkinterdnd2 import TkinterDnD
 
@@ -1188,23 +1187,40 @@ class VideoGeneratorApp:
             paths_to_refresh.append(original_path)
 
         elif action == "split":
-            new_copy_path = result.get("new_copy_path")
-            print(f"App: Clip '{os.path.basename(original_path)}' wurde geteilt. Neuer Clip: {new_copy_path}")
+            # NEU: VideoCutter gibt jetzt part1_path und part2_path zurück
+            part1_path = result.get("part1_path")
+            part2_path = result.get("part2_path")
+            print(f"App: Clip '{os.path.basename(original_path)}' wurde geteilt.")
+            print(f"     Teil 1: {os.path.basename(part1_path) if part1_path else 'N/A'}")
+            print(f"     Teil 2: {os.path.basename(part2_path) if part2_path else 'N/A'}")
 
-            # 1. Neuen (Platzhalter) Originalpfad erstellen
-            base, ext = os.path.splitext(original_path)
-            new_original_placeholder = f"{base}_split_{uuid.uuid4().hex[:6]}{ext}"
+            if not part1_path or not part2_path:
+                print("⚠️ Fehler: Split-Pfade nicht verfügbar")
+                return
 
-            # 2. Neuen Pfad in der DragDrop-Liste an der richtigen Stelle einfügen
+            # WICHTIG: Verwende die ECHTEN Dateipfade, nicht Placeholders!
+            # Nach dem Split existieren:
+            #   - part1_path (z.B. 000_1_1.MP4)
+            #   - part2_path (z.B. 000_1_2.MP4)
+            # Das Original (000_1.MP4) existiert NICHT mehr!
+
             if self.drag_drop:
-                self.drag_drop.insert_video_path_at_index(new_original_placeholder, index + 1)
+                # 1. Ersetze das Original (an index) durch part1_path
+                self.drag_drop.video_paths[index] = part1_path
+                print(f"DragDrop: Ersetze Original an Index {index} durch Teil 1: {os.path.basename(part1_path)}")
 
-            # 3. Die neue Kopie in der Vorschau-Map registrieren
+                # 2. Füge part2_path direkt danach ein
+                self.drag_drop.insert_video_path_at_index(part2_path, index + 1)
+
+            # 3. Registriere die gesplitteten Videos als Kopien im Vorschau-System
+            # Da die Dateien ihre finalen Namen haben, registrieren wir sie als ihre eigenen Kopien
             if self.video_preview:
-                self.video_preview.register_new_copy(new_original_placeholder, new_copy_path)
+                self.video_preview.register_new_copy(part1_path, part1_path)
+                self.video_preview.register_new_copy(part2_path, part2_path)
 
-            paths_to_refresh.append(original_path)
-            paths_to_refresh.append(new_original_placeholder)
+            # 4. Für Metadaten-Refresh: Verwende die echten Pfade
+            paths_to_refresh.append(part1_path)
+            paths_to_refresh.append(part2_path)
 
         elif action == "cancel":
             print(f"App: Schneiden von '{os.path.basename(original_path)}' abgebrochen.")

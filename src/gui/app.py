@@ -1184,6 +1184,13 @@ class VideoGeneratorApp:
 
         if action == "cut":
             print(f"App: Clip '{os.path.basename(original_path)}' wurde geschnitten (getrimmt).")
+
+            # Registriere das getrimmte Video als seine eigene Kopie
+            # (Das Video wurde in-place ersetzt, hat aber neuen Inhalt)
+            if self.video_preview:
+                self.video_preview.register_new_copy(original_path, original_path)
+                print(f"Getrimmtes Video registriert: {os.path.basename(original_path)}")
+
             paths_to_refresh.append(original_path)
 
         elif action == "split":

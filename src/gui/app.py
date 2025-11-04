@@ -31,8 +31,16 @@ from ..utils.constants import APP_VERSION
 
 class VideoGeneratorApp:
 
-    def __init__(self):
-        self.root = TkinterDnD.Tk()
+    def __init__(self, root=None, splash_callback=None):
+        """
+        Args:
+            root: Optionales bestehendes TkinterDnD.Tk() Fenster.
+                  Wenn None, wird ein neues erstellt.
+            splash_callback: Optional - Callback für Splash-Screen Status-Updates
+        """
+        # Verwende übergebenes Root oder erstelle neues
+        self.root = root if root is not None else TkinterDnD.Tk()
+        self.splash_callback = splash_callback
         self.config = ConfigManager()
         self.video_processor = None
         self.erstellen_button = None
@@ -63,12 +71,49 @@ class VideoGeneratorApp:
         self.old_button_bg = ""
         self.old_button_cursor = ""
 
+        # Starte asynchrone Initialisierung
+        self._init_step_1()
+
+    def _init_step_1(self):
+        """Schritt 1: GUI erstellen"""
+        if self.splash_callback:
+            self.splash_callback("Erstelle Benutzeroberfläche...")
+
         self.setup_gui()
+
+        # Nächster Schritt nach kurzem Delay (Event-Loop läuft weiter!)
+        self.root.after(10, self._init_step_2)
+
+    def _init_step_2(self):
+        """Schritt 2: Dependencies prüfen"""
+        if self.splash_callback:
+            self.splash_callback("Prüfe FFmpeg Installation...")
+
         self.ensure_dependencies()
+
+        # Nächster Schritt
+        self.root.after(10, self._init_step_3)
+
+    def _init_step_3(self):
+        """Schritt 3: SD-Monitor initialisieren"""
+        if self.splash_callback:
+            self.splash_callback("Initialisiere SD-Karten Monitor...")
+
         self.initialize_sd_card_monitor()
+
+        # Finaler Schritt
+        self.root.after(10, self._init_complete)
+
+    def _init_complete(self):
+        """Initialisierung abgeschlossen"""
+        if self.splash_callback:
+            self.splash_callback("Bereit!")
 
         # NEU: Schließ-Ereignis abfangen
         self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
+
+        print("✅ App-Initialisierung abgeschlossen")
+
 
     def setup_gui(self):
         self.root.title("Aero Tandem Studio")
@@ -1494,6 +1539,7 @@ class VideoGeneratorApp:
                     video_paths = self.drag_drop.get_video_paths()
                     if video_paths:
                         self.run_qr_analysis(video_paths)
+
 
     def run(self):
         """Startet die Hauptloop der Anwendung"""

@@ -589,6 +589,10 @@ class VideoPlayer:
                 fs_progress_x = int(fs_canvas_width * position_percent)
                 self.fs_progress_canvas.coords(self.fs_progress_bar, 0, 5, fs_progress_x, 20)
 
+        # NEU: Informiere VideoPreview über aktuelle Zeit für Clip-Synchronisation
+        if self.app and hasattr(self.app, 'video_preview'):
+            self.app.video_preview.set_active_clip_by_time(current_time_ms)
+
         if self.media_player.is_playing():
             self._start_updater()
 

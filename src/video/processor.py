@@ -711,7 +711,7 @@ class VideoProcessor:
     def _create_photo_with_watermark(self, input_photo_path, output_dir):
         """
         Verwendet FFmpeg, um ein einzelnes Foto auf 720p (Höhe) zu skalieren
-        und ein Wasserzeichen (80% Transparenz) darüber zu legen.
+        und ein Wasserzeichen (80% Transparenz, volle Breite) darüber zu legen.
         """
         wasserzeichen_path = os.path.join(os.path.dirname(self.hintergrund_path), "skydivede_wasserzeichen.png")
 
@@ -730,15 +730,18 @@ class VideoProcessor:
 
         # FFmpeg Filter:
         # 1. [0:v] (Input-Foto) skalieren auf 720px Höhe, Seitenverhältnis beibehalten
-        # 2. [1:v] (Wasserzeichen) skalieren, so dass es in 720px Höhe passt
-        # 3. [wm_orig] (Wasserzeichen) Transparenz auf 80% setzen
-        # 4. [v][wm_scaled] (beide) überlagern (mittig)
+        # 2. [1:v] (Wasserzeichen) auf Foto-Breite skalieren, Seitenverhältnis beibehalten
+        # 3. [wm_scaled] (Wasserzeichen) Transparenz auf 80% setzen
+        # 4. [v][wm_transparent] (beide) überlagern (mittig)
 
         watermark_filter = (
             f"[0:v]scale=w=-2:h={target_height}[v];"
-            f"[1:v]scale=w=-2:h={target_height}:force_original_aspect_ratio=decrease[wm_orig];"
-            f"[wm_orig]colorchannelmixer=aa={alpha_level}[wm_scaled];"
-            f"[v][wm_scaled]overlay=(W-w)/2:(H-h)/2"
+            # Skaliere Wasserzeichen auf die VOLLE BREITE des Fotos (w=iw), behalte Seitenverhältnis
+            f"[1:v]scale=w=iw:h=-2[wm_scaled];"
+            # Setze Transparenz
+            f"[wm_scaled]colorchannelmixer=aa={alpha_level}[wm_transparent];"
+            # Überlagere mittig
+            f"[v][wm_transparent]overlay=(W-w)/2:(H-h)/2"
         )
 
         command = [

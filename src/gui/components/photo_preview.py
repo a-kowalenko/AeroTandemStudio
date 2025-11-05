@@ -213,6 +213,7 @@ class PhotoPreview:
         button_frame.columnconfigure(0, weight=1)
         button_frame.columnconfigure(1, weight=1)
         button_frame.columnconfigure(2, weight=0)  # QR-Button hat feste Breite
+        button_frame.columnconfigure(3, weight=0)  # NEUE Spalte: WM-Button
 
         self.delete_button = tk.Button(
             button_frame,
@@ -249,6 +250,21 @@ class PhotoPreview:
             state="disabled"
         )
         self.qr_scan_button.grid(row=0, column=2, sticky="ew", padx=(5, 0))
+
+        # --- NEU: Wasserzeichen-Button ---
+        self.wm_button = tk.Button(
+            button_frame,
+            text="💧",
+            command=self._on_wm_button_click,
+            bg="#f0f0f0",
+            fg="black",
+            font=("Arial", 9),
+            width=3,
+            state="disabled"
+        )
+        # INITIAL VERSTECKT - wird von app.py gesteuert
+        # self.wm_button.grid(row=0, column=3, sticky="ew", padx=(5, 0))
+        # --- ENDE NEU ---
 
     def set_photos(self, photo_paths):
         """Setzt die anzuzeigenden Fotos"""
@@ -695,6 +711,8 @@ class PhotoPreview:
         self._update_thumbnails()
         self._update_info()
         self._update_delete_button()
+        # NEU: WM-Button Status aktualisieren
+        self.update_wm_button_state()
 
     def _on_thumbnail_click_release(self, event, index):
         """Behandelt ButtonRelease auf ein Thumbnail - nur wenn es kein Drag war"""
@@ -711,6 +729,8 @@ class PhotoPreview:
             self._update_large_preview()
             self._update_thumbnails()
             self._update_info()
+            # NEU: WM-Button Status aktualisieren
+            self.update_wm_button_state()
 
     def _show_next_photo(self):
         """Zeigt das nächste Foto"""
@@ -721,6 +741,8 @@ class PhotoPreview:
             self._update_large_preview()
             self._update_thumbnails()
             self._update_info()
+            # NEU: WM-Button Status aktualisieren
+            self.update_wm_button_state()
 
     def _on_canvas_click_focus(self, event):
         """Setzt Focus auf Frame bei Klick auf Canvas für Tastatur-Events"""
@@ -1012,6 +1034,9 @@ class PhotoPreview:
         total_size_mb = total_size / (1024 * 1024)
         self.info_labels["total_size"].config(text=f"{total_size_mb:.2f} MB")
 
+        # NEU: WM-Button Status aktualisieren
+        self.update_wm_button_state()
+
     def _update_delete_button(self):
         """Aktualisiert den Status und Text des Löschen-Buttons, Clear-Selection-Buttons und QR-Scan-Buttons"""
         # Bestimme welche Fotos als markiert gelten
@@ -1040,8 +1065,11 @@ class PhotoPreview:
         # (auch wenn mehrere ausgewählt sind, wird nur das aktuelle gescannt)
         if self.photo_paths and 0 <= self.current_photo_index < len(self.photo_paths):
             self.qr_scan_button.config(state="normal")
+            self.wm_button.config(state="normal")  # NEU
+            self.update_wm_button_state()  # NEU: Status aktualisieren
         else:
             self.qr_scan_button.config(state="disabled")
+            self.wm_button.config(state="disabled")  # NEU
 
     def _clear_all_selections(self):
         """Hebt alle expliziten Markierungen auf"""
@@ -1144,6 +1172,42 @@ class PhotoPreview:
         except Exception as e:
             # Fehler ignorieren, wird beim nächsten Update eh neu gerendert
             pass
+
+    # --- NEU: WASSERZEICHEN-METHODEN ---
+
+    def _on_wm_button_click(self):
+        """
+        Wird aufgerufen, wenn der Wasserzeichen-Button geklickt wird.
+        Leitet die Aktion an app.py weiter.
+        """
+        if self.app and hasattr(self.app, 'toggle_photo_watermark') and self.current_photo_index is not None:
+            if 0 <= self.current_photo_index < len(self.photo_paths):
+                self.app.toggle_photo_watermark(self.current_photo_index)
+
+    def set_wm_button_visibility(self, visible: bool):
+        """Zeigt oder verbirgt den Wasserzeichen-Button (gesteuert von app.py)."""
+        if visible:
+            self.wm_button.grid(row=0, column=3, sticky="ew", padx=(5, 0))
+        else:
+            self.wm_button.grid_remove()
+
+    def update_wm_button_state(self):
+        """
+        Aktualisiert Text und Farbe des WM-Buttons basierend auf dem Status
+        in drag_drop.py.
+        """
+        if (not self.app or not hasattr(self.app, 'drag_drop') or
+            self.current_photo_index < 0 or not self.photo_paths):
+            self.wm_button.config(text="💧", state="disabled", bg="#f0f0f0")
+            return
+
+        # Lese den Status direkt von drag_drop (via app)
+        is_marked = self.app.drag_drop.is_photo_watermarked(self.current_photo_index)
+
+        if is_marked:
+            self.wm_button.config(text="💧", state="normal", bg="#D32F2F", fg="white")
+        else:
+            self.wm_button.config(text="💧", state="normal", bg="#FF9800", fg="black")
 
     def pack(self, **kwargs):
         """Packt den Frame"""

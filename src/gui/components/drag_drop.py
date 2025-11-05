@@ -1188,6 +1188,44 @@ class DragDropFrame:
         self.watermark_photo_indices = []
         self._update_photo_table()
 
+    # --- NEUE ÖFFENTLICHE METHODEN FÜR WASSERZEICHEN-STEUERUNG ---
+
+    def toggle_video_watermark_at_index(self, index):
+        """
+        Schaltet die Wasserzeichen-Markierung für einen bestimmten Video-Index um.
+        Wird von app.py aufgerufen.
+        """
+        if self.watermark_clip_index == index:
+            # Bereits ausgewählt -> abwählen
+            self.watermark_clip_index = None
+        else:
+            # Anderes oder keins ausgewählt -> dieses auswählen
+            self.watermark_clip_index = index
+
+        self._update_video_table()
+
+    def is_video_watermarked(self, index):
+        """Prüft, ob ein bestimmter Video-Index als Wasserzeichen markiert ist."""
+        return self.watermark_clip_index == index
+
+    def toggle_photo_watermark_at_index(self, index):
+        """
+        Schaltet die Wasserzeichen-Markierung für einen bestimmten Foto-Index um.
+        Wird von app.py aufgerufen.
+        """
+        if index in self.watermark_photo_indices:
+            # Bereits in der Liste -> entfernen
+            self.watermark_photo_indices.remove(index)
+        else:
+            # Nicht in der Liste -> hinzufügen
+            self.watermark_photo_indices.append(index)
+
+        self._update_photo_table()
+
+    def is_photo_watermarked(self, index):
+        """Prüft, ob ein bestimmter Foto-Index als Wasserzeichen markiert ist."""
+        return index in self.watermark_photo_indices
+
     def _on_photo_watermark_checkbox_click(self, event):
         """Verarbeitet Klicks auf die Foto-Wasserzeichen-Spalte (Mehrfachauswahl)"""
         # Prüfen, ob Spalte überhaupt sichtbar ist

@@ -270,6 +270,9 @@ class VideoGeneratorApp:
         # Markiere Initialisierung als abgeschlossen
         self.initialization_complete = True
 
+        # NEU: Initial WM-Button-Sichtbarkeit setzen
+        self.update_watermark_column_visibility()
+
         print("✅ App-Initialisierung abgeschlossen")
 
 
@@ -1325,6 +1328,11 @@ class VideoGeneratorApp:
         if not video_wm_sichtbar:
             self.drag_drop.clear_watermark_selection()
 
+        # NEU: Button in VideoPreview steuern
+        if hasattr(self, 'video_preview'):
+            self.video_preview.set_wm_button_visibility(video_wm_sichtbar)
+            self.video_preview.update_wm_button_state()  # Status aktualisieren
+
         # --- NEU: Foto-Logik ---
         foto_gewaehlt = form_data.get("handcam_foto", False) or form_data.get("outside_foto", False)
         foto_bezahlt = form_data.get("ist_bezahlt_handcam_foto", False) or form_data.get("ist_bezahlt_outside_foto", False)
@@ -1340,6 +1348,11 @@ class VideoGeneratorApp:
         # Wenn Spalte nicht mehr sichtbar, lösche Auswahl
         if not foto_wm_sichtbar:
             self.drag_drop.clear_photo_watermark_selection()
+
+        # NEU: Button in PhotoPreview steuern
+        if hasattr(self, 'photo_preview'):
+            self.photo_preview.set_wm_button_visibility(foto_wm_sichtbar)
+            self.photo_preview.update_wm_button_state()  # Status aktualisieren
 
 
     def _switch_to_cancel_mode(self):
@@ -1384,6 +1397,32 @@ class VideoGeneratorApp:
 
         if self.video_processor:
             self.video_processor.cancel_process()
+
+    # --- NEUE WASSERZEICHEN-PROXY-METHODEN ---
+
+    def toggle_video_watermark(self, index):
+        """Wird von VideoPreview aufgerufen, leitet an DragDrop weiter."""
+        if not hasattr(self, 'drag_drop'):
+            return
+
+        # 1. Status in drag_drop ändern
+        self.drag_drop.toggle_video_watermark_at_index(index)
+
+        # 2. Button-Status in video_preview aktualisieren
+        if hasattr(self, 'video_preview'):
+            self.video_preview.update_wm_button_state()
+
+    def toggle_photo_watermark(self, index):
+        """Wird von PhotoPreview aufgerufen, leitet an DragDrop weiter."""
+        if not hasattr(self, 'drag_drop'):
+            return
+
+        # 1. Status in drag_drop ändern
+        self.drag_drop.toggle_photo_watermark_at_index(index)
+
+        # 2. Button-Status in photo_preview aktualisieren
+        if hasattr(self, 'photo_preview'):
+            self.photo_preview.update_wm_button_state()
 
     # --- NEUE METHODEN FÜR DEN SCHNEIDE-DIALOG ---
 

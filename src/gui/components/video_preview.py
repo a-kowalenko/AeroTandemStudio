@@ -232,7 +232,7 @@ class VideoPreview:
 
         # --- NEU: Thumbnail-Galerie ---
         thumbnail_frame = tk.Frame(self.frame)
-        thumbnail_frame.pack(fill="x", pady=(10, 5))
+        thumbnail_frame.pack(fill="x", pady=(0, 5))
 
         # Scrollbarer Canvas
         self.thumbnail_canvas = tk.Canvas(
@@ -249,7 +249,7 @@ class VideoPreview:
             orient="horizontal",
             command=self.thumbnail_canvas.xview
         )
-        self.thumbnail_scrollbar.pack(fill="x", pady=(2, 0))
+        self.thumbnail_scrollbar.pack(fill="x", pady=(0, 0))
         self.thumbnail_canvas.configure(xscrollcommand=self.thumbnail_scrollbar.set)
 
         # Inner Frame für Thumbnails
@@ -384,18 +384,22 @@ class VideoPreview:
         )
         self.qr_scan_button.grid(row=0, column=2, sticky="ew", padx=(5, 0))
 
-        # Container für Status-Label und Progress bar in einer Zeile
+        # Container für Status-Label und Progress bar in einer Zeile (zentriert)
         status_progress_container = tk.Frame(self.frame)
-        status_progress_container.pack(pady=5, fill='x')
+        status_progress_container.pack(pady=2, fill='x')
 
-        # Status-Label
-        self.status_label = tk.Label(status_progress_container, text="Ziehen Sie Videos in das Feld links",
+        # Innerer Container für Zentrierung
+        center_container = tk.Frame(status_progress_container)
+        center_container.pack(expand=True)
+
+        # Status-Label links
+        self.status_label = tk.Label(center_container, text="Ziehen Sie Videos in das Feld links",
                                      font=("Arial", 10), fg="gray", wraplength=400)
         self.status_label.pack(side='left', padx=(0, 10))
 
-        # Progress bar container
-        self.progress_frame = tk.Frame(status_progress_container)
-        self.progress_frame.pack(side='left', fill='x', expand=True)
+        # Progress bar container rechts
+        self.progress_frame = tk.Frame(center_container)
+        self.progress_frame.pack(side='left')
 
 
     def update_preview(self, video_paths):
@@ -592,7 +596,7 @@ class VideoPreview:
             else:
                 print(f"📦 {clips_to_process} von {total_clips} Videos müssen verarbeitet werden ({total_clips - clips_to_process} bereits im Cache)")
 
-        self.parent.after(0, self.progress_handler.pack_progress_bar)
+        self.parent.after(0, self.progress_handler.pack_progress_bar_right)
         self.parent.after(0, self.progress_handler.update_progress, 0, total_clips)
 
         # NEU: Sammle alle Videos, die verarbeitet werden müssen
@@ -1607,7 +1611,7 @@ class VideoPreview:
 
         def show_spinner():
             nonlocal format_check_spinner
-            format_check_spinner = CircularSpinner(self.progress_frame, size=40, line_width=4, color="#007ACC")
+            format_check_spinner = CircularSpinner(self.progress_frame, size=15, line_width=4, color="#007ACC")
             format_check_spinner.pack(pady=5)
             format_check_spinner.start()
 

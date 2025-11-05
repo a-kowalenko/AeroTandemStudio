@@ -47,6 +47,9 @@ class PhotoPreview:
         self.right_arrow_id = None
         self.show_arrows = False
 
+        # Tooltip für Dateinamen
+        self.filename_tooltip = None  # Für Tooltip-Verwaltung
+
         # Größen
         self.large_preview_width = 568
         self.large_preview_height = 320
@@ -59,7 +62,7 @@ class PhotoPreview:
 
         # --- Große Vorschau ---
         preview_frame = tk.Frame(self.frame)
-        preview_frame.pack(fill="x", pady=(0, 10))
+        preview_frame.pack(fill="x", pady=(0, 0))
 
         # Canvas für große Vorschau
         self.large_preview_canvas = tk.Canvas(
@@ -125,7 +128,7 @@ class PhotoPreview:
             orient="horizontal",
             command=self.thumbnail_canvas.xview
         )
-        self.thumbnail_scrollbar.pack(fill="x", pady=(2, 0))
+        self.thumbnail_scrollbar.pack(fill="x", pady=(0, 0))
         self.thumbnail_canvas.configure(xscrollcommand=self.thumbnail_scrollbar.set)
 
         # Frame innerhalb des Canvas für die Thumbnails
@@ -154,8 +157,8 @@ class PhotoPreview:
         right_info_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
 
         # Grid-Gewichte für gleichmäßige Verteilung
-        info_frame.grid_columnconfigure(0, weight=1)
-        info_frame.grid_columnconfigure(1, weight=1)
+        info_frame.grid_columnconfigure(0, weight=35, minsize=150)
+        info_frame.grid_columnconfigure(1, weight=65)
 
         # === LINKE SPALTE: Aktuelles Foto ===
         single_info_title = tk.Label(left_info_frame, text="Aktuelles Foto:", font=("Arial", 9, "bold"))
@@ -173,10 +176,22 @@ class PhotoPreview:
             label = tk.Label(left_info_frame, text=label_text, font=("Arial", 8), anchor="w")
             label.grid(row=idx, column=0, sticky="w", padx=(0, 5))
 
-            value_label = tk.Label(left_info_frame, text="-", font=("Arial", 8), anchor="w")
-            value_label.grid(row=idx, column=1, sticky="w")
+            if key == "filename":
+                # Dateiname mit Textkürzung und Tooltip
+                value_label = tk.Label(left_info_frame, text="-", font=("Arial", 8), anchor="w")
+                value_label.grid(row=idx, column=1, sticky="ew")
+
+                # Binde Tooltip-Events
+                value_label.bind("<Enter>", self._on_filename_hover_enter)
+                value_label.bind("<Leave>", self._on_filename_hover_leave)
+            else:
+                value_label = tk.Label(left_info_frame, text="-", font=("Arial", 8), anchor="w")
+                value_label.grid(row=idx, column=1, sticky="w")
 
             self.info_labels[key] = value_label
+
+        # Spalte 1 soll sich ausdehnen für Textkürzung
+        left_info_frame.grid_columnconfigure(1, weight=1)
 
         # === RECHTE SPALTE: Gesamt-Statistik ===
         stats_title = tk.Label(right_info_frame, text="Gesamt-Statistik:", font=("Arial", 9, "bold"))
@@ -439,7 +454,7 @@ class PhotoPreview:
             self.thumbnail_canvas.xview_moveto(new_view_start)
 
     def _create_thumbnail(self, photo_path, idx, is_current=False):
-        """Erstellt ein Thumbnail für ein Foto"""
+        """Erstellt ein Thumbnail für ein Foto - alle gleich groß (quadratisch)"""
         # Cache-Key berücksichtigt ob aktiv oder nicht
         cache_key = (idx, is_current)
         if cache_key in self.thumbnail_images:
@@ -447,10 +462,39 @@ class PhotoPreview:
 
         try:
             img = Image.open(photo_path)
-            # Aktive Thumbnails sind größer
+
+            # Bestimme Thumbnail-Größe (aktive sind 1.3x größer)
             size = int(self.thumbnail_size * 1.3) if is_current else self.thumbnail_size
-            img.thumbnail((size, size), Image.LANCZOS)
-            thumbnail = ImageTk.PhotoImage(img)
+
+            # Erstelle quadratisches Thumbnail mit Cropping (zentriert)
+            # Berechne Aspect Ratio
+            width, height = img.size
+            aspect = width / height
+
+            if aspect > 1:
+                # Landscape - schneide Seiten ab
+                new_height = height
+                new_width = height
+                left = (width - new_width) // 2
+                top = 0
+                right = left + new_width
+                bottom = height
+            else:
+                # Portrait oder quadratisch - schneide oben/unten ab
+                new_width = width
+                new_height = width
+                left = 0
+                top = (height - new_height) // 2
+                right = width
+                bottom = top + new_height
+
+            # Crop zu Quadrat
+            img_cropped = img.crop((left, top, right, bottom))
+
+            # Skaliere auf finale Größe
+            img_resized = img_cropped.resize((size, size), Image.LANCZOS)
+
+            thumbnail = ImageTk.PhotoImage(img_resized)
             self.thumbnail_images[cache_key] = thumbnail
             return thumbnail
         except Exception as e:
@@ -931,9 +975,10 @@ class PhotoPreview:
         photo_path = self.photo_paths[self.current_photo_index]
 
         try:
-            # Dateiname
+            # Dateiname (mit Kürzung)
             filename = os.path.basename(photo_path)
-            self.info_labels["filename"].config(text=filename)
+            truncated_filename = self._truncate_filename(filename, max_chars=30)
+            self.info_labels["filename"].config(text=truncated_filename)
 
             # Auflösung
             img = Image.open(photo_path)
@@ -1103,6 +1148,60 @@ class PhotoPreview:
     def pack(self, **kwargs):
         """Packt den Frame"""
         self.frame.pack(**kwargs)
+
+    def _on_filename_hover_enter(self, event):
+        """Zeigt Tooltip mit vollständigem Dateinamen beim Hover"""
+        widget = event.widget
+        full_text = widget.cget("text")
+
+        # Zeige Tooltip nur wenn Text abgekürzt ist (enthält ...)
+        if "..." in full_text or len(full_text) > 30:
+            # Hole vollständigen Dateinamen aus photo_paths
+            if self.photo_paths and self.current_photo_index < len(self.photo_paths):
+                full_filename = os.path.basename(self.photo_paths[self.current_photo_index])
+
+                # Erstelle Tooltip
+                x = widget.winfo_rootx() + 10
+                y = widget.winfo_rooty() + 25
+
+                self.filename_tooltip = tk.Toplevel(widget)
+                self.filename_tooltip.wm_overrideredirect(True)
+                self.filename_tooltip.wm_geometry(f"+{x}+{y}")
+
+                label = tk.Label(
+                    self.filename_tooltip,
+                    text=full_filename,
+                    background="#ffffe0",
+                    relief="solid",
+                    borderwidth=1,
+                    font=("Arial", 8),
+                    padx=5,
+                    pady=3
+                )
+                label.pack()
+
+    def _on_filename_hover_leave(self, event):
+        """Entfernt Tooltip beim Verlassen"""
+        if self.filename_tooltip:
+            self.filename_tooltip.destroy()
+            self.filename_tooltip = None
+
+    def _truncate_filename(self, filename, max_chars=30):
+        """Kürzt Dateinamen wenn zu lang"""
+        if len(filename) <= max_chars:
+            return filename
+
+        # Behalte Dateiendung
+        name, ext = os.path.splitext(filename)
+        if len(ext) > 10:  # Falls Endung sehr lang
+            ext = ext[:10]
+
+        # Berechne verfügbare Zeichen für Namen
+        available = max_chars - len(ext) - 3  # 3 für "..."
+        if available < 5:
+            return filename[:max_chars-3] + "..."
+
+        return name[:available] + "..." + ext
 
     def get_photo_paths(self):
         """Gibt die aktuellen Foto-Pfade zurück"""

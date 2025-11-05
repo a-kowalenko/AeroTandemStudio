@@ -353,7 +353,7 @@ class VideoGeneratorApp:
 
         # Untere Zeile: Checkboxen links, Button rechts
         controls_row = tk.Frame(self.upload_frame)
-        controls_row.pack(fill="x", side="top", pady=(5, 0))
+        controls_row.pack(fill="x", side="top", pady=(0, 0))
 
         # Linke Seite: Frame für Checkboxen (untereinander)
         checkboxes_frame = tk.Frame(controls_row)
@@ -361,7 +361,7 @@ class VideoGeneratorApp:
 
         # Erste Zeile: Server-Upload Checkbox und Status
         upload_row = tk.Frame(checkboxes_frame)
-        upload_row.pack(fill="x", pady=(0, 3))
+        upload_row.pack(fill="x", pady=(0, 0))
 
         self.upload_to_server_var = tk.BooleanVar()
         self.upload_checkbox = tk.Checkbutton(
@@ -428,7 +428,7 @@ class VideoGeneratorApp:
             try:
                 from PIL import Image, ImageTk
                 img = Image.open(img_path).convert("RGBA")
-                img = img.resize((60, 60), Image.LANCZOS)
+                img = img.resize((50, 50), Image.LANCZOS)
                 self.logo_image = ImageTk.PhotoImage(img)
             except Exception:
                 try:
@@ -444,7 +444,7 @@ class VideoGeneratorApp:
         title_label = tk.Label(
             header_frame,
             text="Aero Tandem Studio",
-            font=("Arial", 18, "bold"),
+            font=("Arial", 16, "bold"),
             fg="#009d8b"
         )
         title_label.pack(side="left")
@@ -458,7 +458,7 @@ class VideoGeneratorApp:
         self.settings_button = tk.Button(
             header_frame,
             text="⚙",  # Gear Icon
-            font=("Arial", 18),
+            font=("Arial", 16),
             command=self.show_settings,
             bg="#f0f0f0",
             relief="flat",
@@ -559,19 +559,19 @@ class VideoGeneratorApp:
 
         # Rechte Spalte
         # Tab-View packen
-        self.preview_notebook.pack(fill="both", expand=True, pady=(0, 10))
+        self.preview_notebook.pack(fill="both", expand=True, pady=(0, 0))
 
         # Video-Tab Inhalt packen
         # self.title_label.pack(pady=0)
         # self.preview_separator.pack(fill='x', pady=5)
-        self.video_player.pack(fill="x", pady=(0, 10), side="top")
-        self.video_preview.pack(fill="x", pady=(0, 8), side="top")
+        self.video_player.pack(fill="x", pady=(0, 0), side="top")
+        self.video_preview.pack(fill="x", pady=(0, 0), side="top")
 
         # Foto-Tab Inhalt packen
-        self.photo_preview.pack(fill="both", expand=True, padx=5, pady=5)
+        self.photo_preview.pack(fill="both", expand=True, padx=5, pady=0)
 
         # Upload-Frame (enthält jetzt Progress oben rechts, Checkboxen und Button)
-        self.upload_frame.pack(pady=5, fill="x", side="top")
+        self.upload_frame.pack(pady=0, fill="x", side="top")
 
         # Progress Bar NICHT hier packen - wird nur während Erstellung angezeigt
         # self.progress_handler.pack_progress_bar_right()

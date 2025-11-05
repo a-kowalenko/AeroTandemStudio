@@ -229,48 +229,6 @@ class VideoPreview:
         return durations
 
     def create_widgets(self):
-        # --- Gemeinsamer Container für Info (links) und Steuerung (rechts) ---
-        top_frame = tk.Frame(self.frame)
-        top_frame.pack(fill="x", pady=5)
-
-        # Linke Seite: Video-Info
-        info_frame = tk.Frame(top_frame)
-        info_frame.pack(side="left", anchor="n", padx=10, pady=5)
-
-        self.duration_label = tk.Label(info_frame, text="Gesamtdauer: --:--", font=("Arial", 10))
-        self.duration_label.pack(anchor="w")
-
-        self.size_label = tk.Label(info_frame, text="Dateigröße: --", font=("Arial", 10))
-        self.size_label.pack(anchor="w")
-
-        self.clips_label = tk.Label(info_frame, text="Anzahl Clips: --", font=("Arial", 10))
-        self.clips_label.pack(anchor="w")
-
-        self.encoding_label = tk.Label(info_frame, text="Encoding: --", font=("Arial", 9), fg="gray")
-        self.encoding_label.pack(anchor="w")
-
-        # Rechte Seite: Steuerungs-Buttons
-        control_frame = tk.Frame(top_frame)
-        control_frame.pack(side="right", anchor="n", padx=10, pady=5)
-
-        self.play_button = tk.Button(control_frame, text="▶ Vorschau abspielen",
-                                     command=self.play_preview, state="disabled",
-                                     font=("Arial", 11), width=20, height=1)
-        self.play_button.pack(pady=2)
-
-        self.action_button = tk.Button(control_frame, text="⏹ Erstellung abbrechen",
-                                       command=self.cancel_creation, state="disabled",
-                                       font=("Arial", 11), width=20, height=1)
-        self.action_button.pack(pady=2)
-
-        # Status-Label unter beiden Bereichen
-        self.status_label = tk.Label(self.frame, text="Ziehen Sie Videos in das Feld links",
-                                     font=("Arial", 10), fg="gray", wraplength=300)
-        self.status_label.pack(pady=5)
-
-        # Progress bar container
-        self.progress_frame = tk.Frame(self.frame)
-        self.progress_frame.pack(pady=5, fill='x')
 
         # --- NEU: Thumbnail-Galerie ---
         thumbnail_frame = tk.Frame(self.frame)
@@ -310,15 +268,16 @@ class VideoPreview:
         info_detail_frame = tk.Frame(self.frame, relief="groove", borderwidth=1, padx=5, pady=5)
         info_detail_frame.pack(fill="x", pady=(0, 10))
 
-        # Zwei Spalten
+        # Zwei Spalten - linke Spalte fest 35%
         left_info_frame = tk.Frame(info_detail_frame)
         left_info_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
 
         right_info_frame = tk.Frame(info_detail_frame)
         right_info_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
 
-        info_detail_frame.grid_columnconfigure(0, weight=1)
-        info_detail_frame.grid_columnconfigure(1, weight=1)
+        # WICHTIG: Linke Spalte 35%, Rechte Spalte 65%
+        info_detail_frame.grid_columnconfigure(0, weight=35, minsize=150)
+        info_detail_frame.grid_columnconfigure(1, weight=65)
 
         # === LINKE SPALTE: Aktueller Clip ===
         single_info_title = tk.Label(left_info_frame, text="Aktueller Clip:", font=("Arial", 9, "bold"))
@@ -332,14 +291,28 @@ class VideoPreview:
         ]
 
         self.info_labels = {}
+        self.filename_tooltip = None  # Für Tooltip-Verwaltung
+
         for idx, (label_text, key) in enumerate(info_fields, start=1):
             label = tk.Label(left_info_frame, text=label_text, font=("Arial", 8), anchor="w")
             label.grid(row=idx, column=0, sticky="w", padx=(0, 5))
 
-            value_label = tk.Label(left_info_frame, text="-", font=("Arial", 8), anchor="w")
-            value_label.grid(row=idx, column=1, sticky="w")
+            if key == "filename":
+                # Dateiname mit Textkürzung und Tooltip
+                value_label = tk.Label(left_info_frame, text="-", font=("Arial", 8), anchor="w")
+                value_label.grid(row=idx, column=1, sticky="ew")
+
+                # Binde Tooltip-Events
+                value_label.bind("<Enter>", self._on_filename_hover_enter)
+                value_label.bind("<Leave>", self._on_filename_hover_leave)
+            else:
+                value_label = tk.Label(left_info_frame, text="-", font=("Arial", 8), anchor="w")
+                value_label.grid(row=idx, column=1, sticky="w")
 
             self.info_labels[key] = value_label
+
+        # Spalte 1 soll sich ausdehnen für Textkürzung
+        left_info_frame.grid_columnconfigure(1, weight=1)
 
         # === RECHTE SPALTE: Gesamt-Statistik ===
         stats_title = tk.Label(right_info_frame, text="Gesamt-Statistik:", font=("Arial", 9, "bold"))
@@ -355,9 +328,24 @@ class VideoPreview:
         self.info_labels["total_duration"] = tk.Label(right_info_frame, text="00:00", font=("Arial", 8), anchor="w")
         self.info_labels["total_duration"].grid(row=2, column=1, sticky="w")
 
+        # NEU: Dateigröße und Encoding hinzufügen
+        total_size_label_text = tk.Label(right_info_frame, text="Dateigröße:", font=("Arial", 8), anchor="w")
+        total_size_label_text.grid(row=3, column=0, sticky="w", padx=(0, 5))
+        self.size_label = tk.Label(right_info_frame, text="--", font=("Arial", 8), anchor="w")
+        self.size_label.grid(row=3, column=1, sticky="w")
+
+        encoding_label_text = tk.Label(right_info_frame, text="Encoding:", font=("Arial", 8), anchor="w")
+        encoding_label_text.grid(row=4, column=0, sticky="w", padx=(0, 5))
+        self.encoding_label = tk.Label(right_info_frame, text="--", font=("Arial", 8), anchor="w", fg="gray")
+        self.encoding_label.grid(row=4, column=1, sticky="w")
+
+        # Dummy-Label für clips_label (für Kompatibilität)
+        self.clips_label = self.info_labels["total_count"]
+        self.duration_label = self.info_labels["total_duration"]
+
         # Buttons
         button_frame = tk.Frame(right_info_frame)
-        button_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        button_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         button_frame.columnconfigure(0, weight=1)
         button_frame.columnconfigure(1, weight=1)
         button_frame.columnconfigure(2, weight=0)
@@ -395,6 +383,19 @@ class VideoPreview:
             state="disabled"
         )
         self.qr_scan_button.grid(row=0, column=2, sticky="ew", padx=(5, 0))
+
+        # Container für Status-Label und Progress bar in einer Zeile
+        status_progress_container = tk.Frame(self.frame)
+        status_progress_container.pack(pady=5, fill='x')
+
+        # Status-Label
+        self.status_label = tk.Label(status_progress_container, text="Ziehen Sie Videos in das Feld links",
+                                     font=("Arial", 10), fg="gray", wraplength=400)
+        self.status_label.pack(side='left', padx=(0, 10))
+
+        # Progress bar container
+        self.progress_frame = tk.Frame(status_progress_container)
+        self.progress_frame.pack(side='left', fill='x', expand=True)
 
 
     def update_preview(self, video_paths):
@@ -447,13 +448,13 @@ class VideoPreview:
             self.progress_handler = ProgressHandler(self.progress_frame)
 
         self.status_label.config(text="Erstelle Vorschau...", fg="blue")
-        self.play_button.config(state="disabled")
+        # self.play_button.config(state="disabled")  # ENTFERNT
 
-        self.action_button.config(text="⏹ Erstellung abbrechen",
-                                  command=self.cancel_creation,
-                                  state="normal")
-        self.encoding_label.config(text="Encoding: Prüfe Formate...")
-        self.clips_label.config(text=f"Anzahl Videos: {len(video_paths)}")
+        # self.action_button.config(text="⏹ Erstellung abbrechen",  # ENTFERNT
+        #                           command=self.cancel_creation,
+        #                           state="normal")
+        self.encoding_label.config(text="Prüfe Formate...")
+        self.clips_label.config(text=str(len(video_paths)))
 
         self.cancellation_event.clear()
 
@@ -1330,7 +1331,7 @@ class VideoPreview:
                     temp_copy_paths = cached_copy_paths
                     needs_reencoding = False
                     self.parent.after(0, lambda: self.encoding_label.config(
-                        text="Encoding: Verwende existierende Kopien"))
+                        text="Verwende existierende Kopien"))
                 else:
                     # Mindestens eine Kopie fehlt
                     print("⚠️ Einige Kopien fehlen, erstelle Videos neu...")
@@ -1673,9 +1674,9 @@ class VideoPreview:
         encoder_name = self._get_current_encoder_name()
 
         if format_info["compatible"]:
-            self.encoding_label.config(text=f"Encoding: Kompatibel | {encoder_name}", fg="green")
+            self.encoding_label.config(text=f"Kompatibel | {encoder_name}", fg="green")
         else:
-            self.encoding_label.config(text=f"Encoding: Standardisiert | {encoder_name}", fg="orange")
+            self.encoding_label.config(text=f"Standardisiert | {encoder_name}", fg="orange")
 
     def _update_ui_success(self, copy_paths, was_reencoded):
         """
@@ -1704,22 +1705,22 @@ class VideoPreview:
         total_duration = f"{int(minutes):02d}:{int(seconds):02d}"
         total_size = self._format_size_bytes(total_bytes)
 
-        self.duration_label.config(text=f"Gesamtdauer: {total_duration}")
-        self.size_label.config(text=f"Dateigröße: {total_size}")
-        self.clips_label.config(text=f"Anzahl Clips: {len(copy_paths)}")
+        self.duration_label.config(text=total_duration)
+        self.size_label.config(text=total_size)
+        self.clips_label.config(text=str(len(copy_paths)))
 
         # Hole Encoder-Namen
         encoder_name = self._get_current_encoder_name()
 
         if was_reencoded:
             self.status_label.config(text="Vorschau bereit (standardisiert)", fg="green")
-            self.encoding_label.config(text=f"Encoding: Standardisiert | {encoder_name}", fg="orange")
+            self.encoding_label.config(text=f"Standardisiert | {encoder_name}", fg="orange")
         else:
             self.status_label.config(text="Vorschau bereit (schnell)", fg="green")
-            self.encoding_label.config(text=f"Encoding: Direkt kombiniert | {encoder_name}", fg="green")
+            self.encoding_label.config(text=f"Direkt kombiniert | {encoder_name}", fg="green")
 
-        self.play_button.config(state="normal")
-        self.action_button.config(state="disabled")
+        # self.play_button.config(state="normal")  # ENTFERNT
+        # self.action_button.config(state="disabled")  # ENTFERNT
 
         clip_durations = self._get_clip_durations_seconds(copy_paths)
         if self.app and hasattr(self.app, 'video_player') and self.app.video_player:
@@ -1742,10 +1743,10 @@ class VideoPreview:
         if self.progress_handler: self.parent.after(0, self.progress_handler.reset)
         self.status_label.config(text=error_msg, fg="red")
         self.clear_preview_info()
-        self.play_button.config(state="disabled")
-        self.action_button.config(text="🔄 Erneut versuchen",
-                                  command=self.retry_creation,
-                                  state="normal")
+        # self.play_button.config(state="disabled")  # ENTFERNT
+        # self.action_button.config(text="🔄 Erneut versuchen",  # ENTFERNT
+        #                           command=self.retry_creation,
+        #                           state="normal")
         self.combined_video_path = None
 
         # WICHTIG: Lösche temp_dir NUR wenn kein Neustart geplant ist!
@@ -1801,9 +1802,9 @@ class VideoPreview:
         """Thread-Funktion, die nur das Kombinieren der (bereits vorhandenen) Kopien durchführt."""
 
         self.parent.after(0, lambda: self.status_label.config(text="Aktualisiere Vorschau nach Schnitt...", fg="blue"))
-        self.parent.after(0,
-                          lambda: self.action_button.config(text="⏹ Erstellung abbrechen", command=self.cancel_creation,
-                                                            state="normal"))
+        # self.parent.after(0,  # ENTFERNT
+        #                   lambda: self.action_button.config(text="⏹ Erstellung abbrechen", command=self.cancel_creation,
+        #                                                     state="normal"))
 
         try:
             new_combined_path = self._create_fast_combined_video(copy_paths)
@@ -1853,13 +1854,13 @@ class VideoPreview:
         total_duration = f"{int(minutes):02d}:{int(seconds):02d}"
         total_size = self._format_size_bytes(total_bytes)
 
-        self.duration_label.config(text=f"Gesamtdauer: {total_duration}")
-        self.size_label.config(text=f"Dateigröße: {total_size}")
-        self.clips_label.config(text=f"Anzahl Clips: {len(self.last_video_paths)}")
+        self.duration_label.config(text=total_duration)
+        self.size_label.config(text=total_size)
+        self.clips_label.config(text=str(len(self.last_video_paths)))
 
         self.status_label.config(text="Vorschau nach Schnitt aktualisiert", fg="green")
-        self.play_button.config(state="normal")
-        self.action_button.config(state="disabled")
+        # self.play_button.config(state="normal")  # ENTFERNT
+        # self.action_button.config(state="disabled")  # ENTFERNT
 
         # NEU: Video-Player aktualisieren
         clip_durations = self._get_clip_durations_seconds(copy_paths)
@@ -1939,10 +1940,10 @@ class VideoPreview:
         if self.progress_handler: self.parent.after(0, self.progress_handler.reset)
         self.status_label.config(text="Vorschau-Erstellung abgebrochen", fg="orange")
         self.clear_preview_info()
-        self.play_button.config(state="disabled")
-        self.action_button.config(text="🔄 Erneut versuchen",
-                                  command=self.retry_creation,
-                                  state="normal")
+        # self.play_button.config(state="disabled")  # ENTFERNT
+        # self.action_button.config(text="🔄 Erneut versuchen",  # ENTFERNT
+        #                           command=self.retry_creation,
+        #                           state="normal")
         self.combined_video_path = None
 
         # WICHTIG: Lösche temp_dir NUR wenn kein Neustart geplant ist!
@@ -1956,7 +1957,7 @@ class VideoPreview:
         """Signals the processing thread to cancel the video creation."""
         if self.processing_thread and self.processing_thread.is_alive():
             self.status_label.config(text="Abbruch wird eingeleitet...", fg="orange")
-            self.action_button.config(state="disabled")
+            # self.action_button.config(state="disabled")  # ENTFERNT
             self.cancellation_event.set()
 
     def retry_creation(self):
@@ -1993,10 +1994,10 @@ class VideoPreview:
         self.last_video_paths = None
         self.clear_preview_info()
         self.status_label.config(text="Keine Vorschau verfügbar", fg="gray")
-        self.play_button.config(state="disabled")
-        self.action_button.config(text="⏹ Erstellung abbrechen",
-                                  command=self.cancel_creation,
-                                  state="disabled")
+        # self.play_button.config(state="disabled")  # ENTFERNT
+        # self.action_button.config(text="⏹ Erstellung abbrechen",  # ENTFERNT
+        #                           command=self.cancel_creation,
+        #                           state="disabled")
 
         # NEU: Thumbnails und Info zurücksetzen
         self.video_paths = []
@@ -2008,10 +2009,10 @@ class VideoPreview:
 
     def clear_preview_info(self):
         """Helper to clear all text labels."""
-        self.duration_label.config(text="Gesamtdauer: --:--")
-        self.size_label.config(text="Dateigröße: --")
-        self.clips_label.config(text=f"Anzahl Clips: {len(self.last_video_paths) if self.last_video_paths else '--'}")
-        self.encoding_label.config(text="Encoding: --", fg="gray")
+        self.duration_label.config(text="00:00")
+        self.size_label.config(text="--")
+        self.clips_label.config(text="0")
+        self.encoding_label.config(text="--", fg="gray")
 
     def get_combined_video_path(self):
         """Gibt den Pfad des kombinierten Videos zurück"""
@@ -2229,6 +2230,62 @@ class VideoPreview:
 
     # --- THUMBNAIL-FUNKTIONALITÄT ---
 
+    def _on_filename_hover_enter(self, event):
+        """Zeigt Tooltip mit vollständigem Dateinamen beim Hover"""
+        widget = event.widget
+        full_text = widget.cget("text")
+
+        # Zeige Tooltip nur wenn Text abgekürzt ist (enthält ...)
+        if "..." in full_text or len(full_text) > 30:
+            # Hole vollständigen Dateinamen aus video_paths
+            if self.video_paths and self.current_active_clip < len(self.video_paths):
+                full_filename = os.path.basename(self.video_paths[self.current_active_clip])
+
+                # Erstelle Tooltip
+                x = widget.winfo_rootx() + 10
+                y = widget.winfo_rooty() + 25
+
+                self.filename_tooltip = tk.Toplevel(widget)
+                self.filename_tooltip.wm_overrideredirect(True)
+                self.filename_tooltip.wm_geometry(f"+{x}+{y}")
+
+                label = tk.Label(
+                    self.filename_tooltip,
+                    text=full_filename,
+                    background="#ffffe0",
+                    relief="solid",
+                    borderwidth=1,
+                    font=("Arial", 8),
+                    padx=5,
+                    pady=3
+                )
+                label.pack()
+
+    def _on_filename_hover_leave(self, event):
+        """Entfernt Tooltip beim Verlassen"""
+        if self.filename_tooltip:
+            self.filename_tooltip.destroy()
+            self.filename_tooltip = None
+
+    def _truncate_filename(self, filename, max_chars=30):
+        """Kürzt Dateinamen wenn zu lang"""
+        if len(filename) <= max_chars:
+            return filename
+
+        # Behalte Dateiendung
+        name, ext = os.path.splitext(filename)
+        if len(ext) > 10:  # Falls Endung sehr lang
+            ext = ext[:10]
+
+        # Berechne verfügbare Zeichen für Namen
+        available = max_chars - len(ext) - 3  # 3 für "..."
+        if available < 5:
+            return filename[:max_chars-3] + "..."
+
+        return name[:available] + "..." + ext
+
+    # --- THUMBNAIL-FUNKTIONALITÄT ---
+
     def _create_video_thumbnail(self, video_path, clip_index, is_active=False):
         """
         Erstellt ein Thumbnail vom ersten Frame eines Video-Clips.
@@ -2272,7 +2329,11 @@ class VideoPreview:
             # Lade Bild und erstelle Thumbnail
             img = Image.open(tmp_path)
             size = int(self.thumbnail_size * 1.3) if is_active else self.thumbnail_size
-            img.thumbnail((size, size), Image.LANCZOS)
+            # Versuche neuere PIL-Version, fallback auf ältere
+            try:
+                img.thumbnail((size, size), Image.Resampling.LANCZOS)
+            except AttributeError:
+                img.thumbnail((size, size), Image.LANCZOS)
             thumbnail = ImageTk.PhotoImage(img)
 
             # Cache speichern
@@ -2513,9 +2574,10 @@ class VideoPreview:
         video_path = self.video_paths[self.current_active_clip]
 
         try:
-            # Dateiname
+            # Dateiname (mit Kürzung)
             filename = os.path.basename(video_path)
-            self.info_labels["filename"].config(text=filename)
+            truncated_filename = self._truncate_filename(filename, max_chars=30)
+            self.info_labels["filename"].config(text=truncated_filename)
 
             # Hole Metadaten aus Cache (bereits von update_preview geladen)
             # Suche die file-identity aus der Kopie (umgekehrter Lookup im Cache)

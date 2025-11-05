@@ -132,6 +132,8 @@ class VideoProcessor:
         create_watermark_version = payload.get("create_watermark_version", False)
         # NEU: Index des für Wasserzeichen ausgewählten Clips
         watermark_clip_index = payload.get("watermark_clip_index", None)
+        # NEU: Indizes der für Wasserzeichen ausgewählten Fotos
+        watermark_photo_indices = payload.get("watermark_photo_indices", [])
 
         print("kunde Objekt:", kunde)
         gast = form_data["gast"]
@@ -346,6 +348,36 @@ class VideoProcessor:
                     self._update_progress(i, TOTAL_STEPS)
                 full_video_output_path = None  # Sicherstellen, dass es None ist
 
+            # --- NEU: FOTO WASSERZEICHEN VERARBEITUNG ---
+            if watermark_photo_indices and photo_paths:
+                self._check_for_cancellation()
+                self._update_status("Erstelle Wasserzeichen-Vorschau für Fotos...")
+
+                # 1. Pfade der ausgewählten Fotos holen
+                selected_photo_paths = []
+                for i in watermark_photo_indices:
+                    if i < len(photo_paths):
+                        selected_photo_paths.append(photo_paths[i])
+
+                if selected_photo_paths:
+                    # 2. Preview-Verzeichnis erstellen (Ziel: base_output_dir/Preview_Foto)
+                    try:
+                        preview_dir = self._generate_watermark_photo_directory(base_output_dir)
+
+                        # 3. Jedes ausgewählte Foto verarbeiten
+                        processed_count = 0
+                        for photo_path in selected_photo_paths:
+                            self._check_for_cancellation()
+                            if os.path.exists(photo_path):
+                                self._create_photo_with_watermark(photo_path, preview_dir)
+                                processed_count += 1
+
+                        print(f"{processed_count} Foto(s) mit Wasserzeichen verarbeitet und in {preview_dir} gespeichert.")
+
+                    except Exception as e:
+                        print(f"Fehler bei der Erstellung der Foto-Wasserzeichen: {e}")
+                        self._update_status(f"Fehler bei Foto-WM: {e}")
+
             # --- FOTO VERARBEITUNG (Schritt 11) ---
             self._check_for_cancellation()
             step_photo = 11 if create_watermark_version else 10
@@ -437,23 +469,23 @@ class VideoProcessor:
 
     def _generate_watermark_video_path(self, base_output_dir, base_filename):
         """Generiert den Pfad für die Wasserzeichen-Video-Version"""
-        watermark_dir = os.path.join(base_output_dir, "Wasserzeichen_Video")
+        watermark_dir = os.path.join(base_output_dir, "Preview_Video")
 
         try:
             os.makedirs(watermark_dir, exist_ok=True)
         except PermissionError as e:
-            error_msg = f"Zugriff verweigert beim Erstellen des Wasserzeichen-Ordners\n\n"
+            error_msg = f"Zugriff verweigert beim Erstellen des Vorschau-Ordners\n\n"
             error_msg += f"Basis-Verzeichnis: {base_output_dir}\n"
-            error_msg += f"Unterordner: Wasserzeichen_Video\n\n"
+            error_msg += f"Unterordner: Preview_Video\n\n"
             error_msg += f"Technische Details: {str(e)}"
             raise PermissionError(error_msg)
         except OSError as e:
-            error_msg = f"Fehler beim Erstellen des Wasserzeichen-Ordners\n\n"
+            error_msg = f"Fehler beim Erstellen des Vorschau-Ordners\n\n"
             error_msg += f"Voller Pfad: {watermark_dir}\n\n"
             error_msg += f"Technische Details: {str(e)}"
             raise OSError(error_msg)
 
-        output_filename = f"{base_filename}_wasserzeichen.mp4"
+        output_filename = f"{base_filename}_preview.mp4"
         full_output_path = os.path.join(watermark_dir, output_filename)
 
         return full_output_path
@@ -655,6 +687,75 @@ class VideoProcessor:
 
         print(f"{copied_files_count} Foto(s) nach '{handcam_dir}' und/oder '{outside_dir}' kopiert")
         return copied_files_count
+
+    def _generate_watermark_photo_directory(self, base_output_dir):
+        """
+        Erstellt den Ordner 'Preview_Foto' innerhalb des base_output_dir.
+        """
+        preview_dir_path = os.path.join(base_output_dir, "Preview_Foto")
+
+        try:
+            os.makedirs(preview_dir_path, exist_ok=True)
+            return preview_dir_path
+        except PermissionError as e:
+            error_msg = f"Zugriff verweigert beim Erstellen des Foto-Vorschau-Ordners\n\n"
+            error_msg += f"Pfad: {preview_dir_path}\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise PermissionError(error_msg)
+        except OSError as e:
+            error_msg = f"Fehler beim Erstellen des Foto-Vorschau-Ordners\n\n"
+            error_msg += f"Pfad: {preview_dir_path}\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise OSError(error_msg)
+
+    def _create_photo_with_watermark(self, input_photo_path, output_dir):
+        """
+        Verwendet FFmpeg, um ein einzelnes Foto auf 720p (Höhe) zu skalieren
+        und ein Wasserzeichen (80% Transparenz) darüber zu legen.
+        """
+        wasserzeichen_path = os.path.join(os.path.dirname(self.hintergrund_path), "skydivede_wasserzeichen.png")
+
+        if not os.path.exists(wasserzeichen_path):
+            print(f"Warnung: Wasserzeichen-Datei nicht gefunden: {wasserzeichen_path}")
+            return
+        if not os.path.exists(input_photo_path):
+            print(f"Warnung: Eingabe-Foto nicht gefunden: {input_photo_path}")
+            return
+
+        output_filename = os.path.basename(input_photo_path)
+        output_path = os.path.join(output_dir, output_filename)
+
+        target_height = 720
+        alpha_level = 0.8  # 80% Transparenz
+
+        # FFmpeg Filter:
+        # 1. [0:v] (Input-Foto) skalieren auf 720px Höhe, Seitenverhältnis beibehalten
+        # 2. [1:v] (Wasserzeichen) skalieren, so dass es in 720px Höhe passt
+        # 3. [wm_orig] (Wasserzeichen) Transparenz auf 80% setzen
+        # 4. [v][wm_scaled] (beide) überlagern (mittig)
+
+        watermark_filter = (
+            f"[0:v]scale=w=-2:h={target_height}[v];"
+            f"[1:v]scale=w=-2:h={target_height}:force_original_aspect_ratio=decrease[wm_orig];"
+            f"[wm_orig]colorchannelmixer=aa={alpha_level}[wm_scaled];"
+            f"[v][wm_scaled]overlay=(W-w)/2:(H-h)/2"
+        )
+
+        command = [
+            "ffmpeg", "-y",
+            "-i", input_photo_path,
+            "-i", wasserzeichen_path,
+            "-filter_complex", watermark_filter,
+            "-frames:v", "1",  # Wichtig: Nur einen Frame (das Bild) ausgeben
+            output_path
+        ]
+
+        try:
+            subprocess.run(command, capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+        except subprocess.CalledProcessError as e:
+            print(f"Fehler bei FFmpeg-Foto-Wasserzeichen für {output_filename}:")
+            print(f"STDERR: {e.stderr}")
+            raise e
 
     def _get_video_info(self, video_path):
         """

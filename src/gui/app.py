@@ -1135,6 +1135,19 @@ class VideoGeneratorApp:
             messagebox.showwarning("Fehlende Dateien", "\n\n".join(error_messages))
             return
 
+        # NEU: Foto-Wasserzeichen-Validierung
+        foto_gewaehlt = form_data.get("handcam_foto", False) or form_data.get("outside_foto", False)
+        foto_bezahlt = form_data.get("ist_bezahlt_handcam_foto", False) or form_data.get("ist_bezahlt_outside_foto", False)
+        foto_wm_erforderlich = foto_gewaehlt and not foto_bezahlt
+
+        watermark_photo_indices = self.drag_drop.get_watermark_photo_indices()
+
+        if foto_wm_erforderlich and not watermark_photo_indices:
+            messagebox.showwarning("Fehlende Auswahl",
+                                   "Sie haben ein Foto-Produkt als 'nicht bezahlt' markiert, aber kein Foto für das Wasserzeichen ausgewählt.\n\n"
+                                   "Bitte wählen Sie mindestens ein Foto in der '💧' Spalte aus.")
+            return
+
         # Parse Kundendaten aus der Formular-Eingabe
         kunde_id_val = form_data.get("kunde_id")
         kunde = Kunde(
@@ -1204,7 +1217,8 @@ class VideoGeneratorApp:
             "photo_paths": photo_paths,
             "settings": self.config.get_settings(),
             "create_watermark_version": video_gewaehlt_aber_nicht_bezahlt,
-            "watermark_clip_index": self.drag_drop.get_watermark_clip_index()  # NEU: Index des ausgewählten Clips
+            "watermark_clip_index": self.drag_drop.get_watermark_clip_index(),  # NEU: Index des ausgewählten Clips
+            "watermark_photo_indices": watermark_photo_indices  # NEU: Foto-Indizes
         }
 
         print('kunde in erstelle_video:', kunde)
@@ -1293,24 +1307,39 @@ class VideoGeneratorApp:
         """Aktualisiert die Sichtbarkeit der Wasserzeichen-Spalte basierend auf Kunde-Status"""
         form_data = self.form_fields.get_form_data()
 
-        # Prüfe, ob Video gewählt aber nicht bezahlt ist
-        video_gewaehlt_aber_nicht_bezahlt = (
-                (form_data.get("handcam_video", False) and not form_data.get("ist_bezahlt_handcam_video", False)) or
-                (form_data.get("outside_video", False) and not form_data.get("ist_bezahlt_outside_video", False))
-        )
+        # --- Video-Logik ---
+        video_gewaehlt = form_data.get("handcam_video", False) or form_data.get("outside_video", False)
+        video_bezahlt = form_data.get("ist_bezahlt_handcam_video", False) or form_data.get("ist_bezahlt_outside_video", False)
+        video_wm_sichtbar = video_gewaehlt and not video_bezahlt
 
         # Debug-Ausgabe
-        print(f"🔍 Wasserzeichen-Spalte Update:")
+        print(f"🔍 Video-Wasserzeichen-Spalte Update:")
         print(f"   Handcam Video: {form_data.get('handcam_video', False)}, Bezahlt: {form_data.get('ist_bezahlt_handcam_video', False)}")
         print(f"   Outside Video: {form_data.get('outside_video', False)}, Bezahlt: {form_data.get('ist_bezahlt_outside_video', False)}")
-        print(f"   → Spalte sichtbar: {video_gewaehlt_aber_nicht_bezahlt}")
+        print(f"   → Spalte sichtbar: {video_wm_sichtbar}")
 
         # Zeige Spalte wenn Video ausgewählt aber nicht bezahlt ist
-        self.drag_drop.set_watermark_column_visible(video_gewaehlt_aber_nicht_bezahlt)
+        self.drag_drop.set_watermark_column_visible(video_wm_sichtbar)
 
         # Wenn Spalte nicht mehr sichtbar, lösche Auswahl
-        if not video_gewaehlt_aber_nicht_bezahlt:
+        if not video_wm_sichtbar:
             self.drag_drop.clear_watermark_selection()
+
+        # --- NEU: Foto-Logik ---
+        foto_gewaehlt = form_data.get("handcam_foto", False) or form_data.get("outside_foto", False)
+        foto_bezahlt = form_data.get("ist_bezahlt_handcam_foto", False) or form_data.get("ist_bezahlt_outside_foto", False)
+        foto_wm_sichtbar = foto_gewaehlt and not foto_bezahlt
+
+        print(f"🔍 Foto-Wasserzeichen-Spalte Update:")
+        print(f"   Foto gewählt: {foto_gewaehlt}, Foto bezahlt: {foto_bezahlt}")
+        print(f"   → Spalte sichtbar: {foto_wm_sichtbar}")
+
+        # Rufe die neue Methode in drag_drop auf
+        self.drag_drop.set_photo_watermark_column_visible(foto_wm_sichtbar)
+
+        # Wenn Spalte nicht mehr sichtbar, lösche Auswahl
+        if not foto_wm_sichtbar:
+            self.drag_drop.clear_photo_watermark_selection()
 
 
     def _switch_to_cancel_mode(self):

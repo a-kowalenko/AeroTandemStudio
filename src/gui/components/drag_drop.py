@@ -24,6 +24,7 @@ class DragDropFrame:
         self.qr_check_enabled = tk.BooleanVar(value=qr_check_initial)  # NEU: Checkbox-Variable für QR-Prüfung
 
         self.watermark_clip_index = None  # NEU: Index des Clips für Wasserzeichen
+        self.watermark_photo_indices = []  # NEU: Liste für Foto-Mehrfachauswahl
         self.show_watermark_column = False  # NEU: Steuert Sichtbarkeit der Wasserzeichen-Spalte
         self.is_encoding = False  # NEU: Steuert Sichtbarkeit der Progress-Spalte vs. Datum/Uhrzeit
         self.create_widgets()
@@ -31,7 +32,7 @@ class DragDropFrame:
     def create_widgets(self):
         # Oberer Frame für Label und Checkbox in einer Reihe
         top_frame = tk.Frame(self.frame)
-        top_frame.pack(pady=10, fill="x")
+        top_frame.pack(pady=0, fill="x")
 
         # Checkbox für QR-Code-Prüfung (rechts)
         self.qr_check_checkbox = tk.Checkbutton(
@@ -46,7 +47,7 @@ class DragDropFrame:
         # Haupt-Label (links)
         self.drop_label = tk.Label(top_frame,
                                    text="Videos (.mp4) und Fotos (.jpg, .png) hierher ziehen",
-                                   font=("Arial", 12))
+                                   font=("Arial", 10))
         self.drop_label.pack(side=tk.LEFT)
 
         # Notebook (Tabs) erstellen mit größerem Style
@@ -158,7 +159,7 @@ class DragDropFrame:
         # Treeview für Fotos
         self.photo_tree = ttk.Treeview(
             photo_table_frame,
-            columns=("Nr", "Dateiname", "Größe", "Datum", "Uhrzeit"),
+            columns=("Nr", "Dateiname", "Größe", "Datum", "Uhrzeit", "WM"),
             show="headings",
             height=6,
             yscrollcommand=photo_scrollbar.set
@@ -170,18 +171,23 @@ class DragDropFrame:
         self.photo_tree.heading("Größe", text="Größe")
         self.photo_tree.heading("Datum", text="Datum")
         self.photo_tree.heading("Uhrzeit", text="Uhrzeit")
+        self.photo_tree.heading("WM", text="💧")
 
         self.photo_tree.column("Nr", width=10, anchor="center")
         self.photo_tree.column("Dateiname", width=250)
         self.photo_tree.column("Größe", width=100, anchor="center")
         self.photo_tree.column("Datum", width=100, anchor="center")
         self.photo_tree.column("Uhrzeit", width=100, anchor="center")
+        self.photo_tree.column("WM", width=0, minwidth=0, stretch=False, anchor="center")  # Initial versteckt
 
         self.photo_tree.pack(side=tk.LEFT, fill="both", expand=True)
         photo_scrollbar.config(command=self.photo_tree.yview)
 
         # Doppelklick-Event für Fotos
         self.photo_tree.bind("<Double-1>", self._on_photo_double_click)
+
+        # NEU: Event für Checkbox-Klicks in der Foto-Wasserzeichen-Spalte
+        self.photo_tree.bind("<ButtonRelease-1>", self._on_photo_watermark_checkbox_click)
 
         # Rechtsklick-Event für Kontextmenü
         self.photo_tree.bind("<Button-3>", self._show_photo_context_menu)
@@ -571,7 +577,10 @@ class DragDropFrame:
             date = self._get_file_date_fallback(photo_path)
             timestamp = self._get_file_time_fallback(photo_path)
 
-            self.photo_tree.insert("", "end", values=(i, filename, size, date, timestamp))
+            # NEU: Wasserzeichen-Status bestimmen
+            watermark_value = "☑" if (i - 1) in self.watermark_photo_indices else "☐"
+
+            self.photo_tree.insert("", "end", values=(i, filename, size, date, timestamp, watermark_value))
 
     # --- NEU: Fallback-Methoden für Metadaten (sync ffprobe) ---
     # (Dies sind die alten Methoden, umbenannt)
@@ -746,6 +755,21 @@ class DragDropFrame:
         if selection:
             index = self.photo_tree.index(selection[0])
             self.photo_paths.pop(index)
+
+            # NEU: Wasserzeichen-Indizes aktualisieren
+            # Wenn der gelöschte Index markiert war, entferne ihn
+            if index in self.watermark_photo_indices:
+                self.watermark_photo_indices.remove(index)
+
+            # Indizes verschieben, die größer als der entfernte Index sind
+            updated_indices = []
+            for i in self.watermark_photo_indices:
+                if i > index:
+                    updated_indices.append(i - 1)
+                else:
+                    updated_indices.append(i)
+            self.watermark_photo_indices = updated_indices
+
             self._update_photo_table()
             self._update_photo_preview()
 
@@ -767,6 +791,7 @@ class DragDropFrame:
     def clear_photos(self):
         """Entfernt alle Fotos"""
         self.photo_paths.clear()
+        self.clear_photo_watermark_selection()  # NEU
         self._update_photo_table()
         self._update_photo_preview()
 
@@ -1144,6 +1169,56 @@ class DragDropFrame:
         """Löscht die Wasserzeichen-Auswahl"""
         self.watermark_clip_index = None
         self._update_video_table()
+
+    # NEU: Methoden für Foto-Wasserzeichen
+    def set_photo_watermark_column_visible(self, visible: bool):
+        """Zeigt oder verbirgt die Wasserzeichen-Spalte für Fotos"""
+        if visible:
+            self.photo_tree.column("WM", width=20, minwidth=30, stretch=False)
+        else:
+            self.photo_tree.column("WM", width=0, minwidth=0, stretch=False)
+        self.photo_tree.update_idletasks()
+
+    def get_watermark_photo_indices(self):
+        """Gibt die Liste der für Wasserzeichen ausgewählten Foto-Indizes zurück"""
+        return self.watermark_photo_indices
+
+    def clear_photo_watermark_selection(self):
+        """Löscht die Foto-Wasserzeichen-Auswahl"""
+        self.watermark_photo_indices = []
+        self._update_photo_table()
+
+    def _on_photo_watermark_checkbox_click(self, event):
+        """Verarbeitet Klicks auf die Foto-Wasserzeichen-Spalte (Mehrfachauswahl)"""
+        # Prüfen, ob Spalte überhaupt sichtbar ist
+        if self.photo_tree.column("WM", "width") == 0:
+            return
+
+        region = self.photo_tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+
+        column = self.photo_tree.identify_column(event.x)
+        # Spalten: #0 (tree), #1 (Nr), #2 (Datei), #3 (Größe), #4 (Datum), #5 (Uhrzeit), #6 (WM)
+        if column != "#6":
+            return
+
+        item = self.photo_tree.identify_row(event.y)
+        if not item:
+            return
+
+        index = self.photo_tree.index(item)
+
+        # Multi-Auswahl-Logik (Toggle):
+        if index in self.watermark_photo_indices:
+            self.watermark_photo_indices.remove(index)
+        else:
+            self.watermark_photo_indices.append(index)
+
+        self._update_photo_table()
+
+        # Verhindere, dass die Reihe ausgewählt wird (optional, aber gut für Checkbox-Feeling)
+        self.photo_tree.selection_remove(self.photo_tree.selection())
 
     def _on_watermark_checkbox_click(self, event):
         """Verarbeitet Klicks auf die Wasserzeichen-Spalte"""

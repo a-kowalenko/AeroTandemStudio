@@ -66,6 +66,14 @@ class VideoProcessor:
                 print("ℹ Paralleles Processing deaktiviert (sequenziell)")
                 self.parallel_processor = None
 
+    def reload_hardware_acceleration_settings(self):
+        """
+        Lädt die Hardware-Beschleunigungseinstellungen neu.
+        Wird aufgerufen wenn die Einstellungen geändert wurden.
+        """
+        print("🔄 VideoProcessor: Lade Hardware-Beschleunigungseinstellungen neu...")
+        self._init_hardware_acceleration()
+
     def _get_encoding_params(self, codec='h264'):
         """
         Gibt Encoding-Parameter basierend auf Hardware-Beschleunigung zurück.

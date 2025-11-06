@@ -488,6 +488,11 @@ class VideoPreview:
 
     def _create_temp_directory(self):
         """Erstellt ein sauberes temporäres Verzeichnis für Video-Kopien."""
+        # NEU: Wenn temp_dir bereits existiert, NICHT neu erstellen!
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            print(f"⚠️ temp_dir existiert bereits, überspringe Erstellung: {self.temp_dir}")
+            return
+
         self._cleanup_temp_copies()
         try:
             self.temp_dir = tempfile.mkdtemp(prefix="aero_studio_preview_")
@@ -621,10 +626,44 @@ class VideoPreview:
         for i, original_path in enumerate(original_paths):
             self._check_for_cancellation()
 
+            # NEU: Prüfe ob die Datei bereits im Working-Folder liegt
+            # (wurde von drag_drop.py importiert)
+            if self.temp_dir and os.path.normpath(os.path.dirname(original_path)) == os.path.normpath(self.temp_dir):
+                # Video ist bereits im Working-Folder!
+                print(f"✅ Video bereits im Working-Folder: {os.path.basename(original_path)}")
+
+                # Verwende die Datei direkt
+                temp_copy_paths.append(original_path)
+
+                # Füge zum Cache hinzu
+                file_identity = self._get_file_identity(original_path)
+                if file_identity and file_identity not in self.video_copies_map:
+                    self.video_copies_map[file_identity] = original_path
+
+                # Cache Metadaten wenn noch nicht vorhanden
+                if file_identity and file_identity not in self.metadata_cache:
+                    try:
+                        # original_path IST bereits die Kopie im Working-Folder
+                        self._cache_metadata_for_copy(original_path, original_path)
+                    except Exception as e:
+                        print(f"  ⚠️ Metadaten-Extraktion fehlgeschlagen: {e}")
+
+                self.parent.after(0, self.progress_handler.update_progress, i + 1, total_clips)
+                continue  # Überspringe weitere Verarbeitung für dieses Video
+
             filename = os.path.basename(original_path)
             # Ersetze ungültige Zeichen im Dateinamen für den Fall der Fälle
             safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-            copy_path = os.path.join(self.temp_dir, f"{i:03d}_{safe_filename}")
+            copy_path = os.path.join(self.temp_dir, safe_filename)
+
+            # Bei Namenskollision: Füge Suffix hinzu
+            if os.path.exists(copy_path):
+                base_name, ext = os.path.splitext(safe_filename)
+                counter = 1
+                while os.path.exists(copy_path):
+                    copy_path = os.path.join(self.temp_dir, f"{base_name}_{counter}{ext}")
+                    counter += 1
+
 
             # OPTIMIERUNG: Prüfe ob bereits eine gültige Kopie existiert
             # Bei Stream-Copy ODER bei Re-Encoding mit preserve_cache

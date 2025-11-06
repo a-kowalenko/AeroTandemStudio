@@ -380,7 +380,7 @@ class DragDropFrame:
         new_videos_added = False
         new_photos_added = False
 
-        # Videos IMPORTIEREN (in Working-Folder kopieren)
+        # Videos IMPORTIEREN (sofort in Working-Folder kopieren)
         if new_videos and self.app and hasattr(self.app, 'video_preview'):
             print(f"\n📥 Importiere {len(new_videos)} Video(s) in Working-Folder...")
 
@@ -393,20 +393,37 @@ class DragDropFrame:
                 # Importiere Video (kopiere in Working-Folder)
                 imported_path = self._import_video(video_path)
                 if imported_path:
-                    # Prüfe auf Duplikate (basierend auf Dateinamen)
-                    filename = os.path.basename(imported_path)
-                    is_duplicate = any(os.path.basename(p) == filename for p in self.video_paths)
+                    # Prüfe auf Duplikate (basierend auf Dateigröße und -inhalt)
+                    try:
+                        imported_size = os.path.getsize(imported_path)
+                        is_duplicate = False
 
-                    if not is_duplicate:
+                        for existing_path in self.video_paths:
+                            try:
+                                if os.path.getsize(existing_path) == imported_size:
+                                    # Gleiche Größe - prüfe ob es wirklich die gleiche Datei ist
+                                    # (könnte auch unterschiedliche Dateien mit gleicher Größe sein)
+                                    if os.path.basename(existing_path) == os.path.basename(imported_path):
+                                        is_duplicate = True
+                                        break
+                            except:
+                                pass
+
+                        if not is_duplicate:
+                            imported_paths.append(imported_path)
+                            new_videos_added = True
+                        else:
+                            print(f"  ⚠️ Überspringe Duplikat: {os.path.basename(imported_path)}")
+                            # Lösche die Kopie wieder
+                            try:
+                                os.remove(imported_path)
+                            except:
+                                pass
+                    except Exception as e:
+                        print(f"  ⚠️ Fehler bei Duplikat-Prüfung: {e}")
+                        # Im Fehlerfall trotzdem hinzufügen
                         imported_paths.append(imported_path)
                         new_videos_added = True
-                    else:
-                        print(f"  ⚠️ Überspringe Duplikat: {filename}")
-                        # Lösche die Kopie wieder
-                        try:
-                            os.remove(imported_path)
-                        except:
-                            pass
 
             # Füge importierte Pfade zu video_paths hinzu
             self.video_paths.extend(imported_paths)
@@ -433,7 +450,8 @@ class DragDropFrame:
 
     def _import_video(self, source_path):
         """
-        Importiert ein Video in den Working-Folder.
+        Importiert ein Video in den Working-Folder mit Original-Dateinamen.
+        Bei Namenskollision wird ein Suffix (_1, _2, etc.) hinzugefügt.
 
         Returns:
             Working-Folder-Pfad oder None bei Fehler
@@ -447,13 +465,21 @@ class DragDropFrame:
                 return None
 
             filename = os.path.basename(source_path)
-            # Erstelle eindeutigen Pfad mit Index
-            index = len(self.video_paths)
             safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-            dest_path = os.path.join(temp_dir, f"{index:03d}_{safe_filename}")
+            dest_path = os.path.join(temp_dir, safe_filename)
+
+            # Bei Namenskollision: Füge Suffix hinzu
+            if os.path.exists(dest_path):
+                base_name, ext = os.path.splitext(safe_filename)
+                counter = 1
+                while os.path.exists(dest_path):
+                    dest_path = os.path.join(temp_dir, f"{base_name}_{counter}{ext}")
+                    counter += 1
+                print(f"  📋 {filename} → {os.path.basename(dest_path)} (Namenskollision)")
+            else:
+                print(f"  📋 {filename} → Working-Folder")
 
             # Kopiere Datei
-            print(f"  📋 {filename} → Working-Folder")
             shutil.copy2(source_path, dest_path)
 
             return dest_path
@@ -461,11 +487,6 @@ class DragDropFrame:
         except Exception as e:
             print(f"  ❌ Fehler beim Importieren von {os.path.basename(source_path)}: {e}")
             return None
-
-        # App über *alle* neuen Dateien benachrichtigen
-        if new_videos_added or new_photos_added:
-            if hasattr(self.app, 'on_files_added'):
-                self.app.on_files_added(new_videos_added, new_photos_added)
 
     def _update_app_preview(self, video_paths=None):
         """

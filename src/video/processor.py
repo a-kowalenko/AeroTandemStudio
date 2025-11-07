@@ -274,14 +274,25 @@ class VideoProcessor:
                     # Task 1: Normale Version zusammenfügen
                     def create_normal_version_task(task_id=None):
                         concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
-                        subprocess.run([
+                        command = [
                             "ffmpeg", "-y",
+                            "-fflags", "+genpts",
                             "-i", concat_input,
                             "-c", "copy",
                             "-bsf:a", "aac_adtstoasc",
-                            "-movflags", "+faststart",
-                            full_video_output_path
-                        ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                            "-movflags", "+faststart"
+                        ]
+                        # HEVC-spezifische Stabilisierung und Tagging
+                        if video_params.get('vcodec') == 'hevc':
+                            command.extend(["-bsf:v", "hevc_metadata=aud=insert,extract_extradata", "-tag:v", "hvc1"])
+
+                        command.append(full_video_output_path)
+
+                        subprocess.run(
+                            command,
+                            capture_output=True, text=True, check=True,
+                            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+                        )
 
                     # Task 2: Wasserzeichen-Version erstellen
                     def create_watermark_version_task(task_id=None):
@@ -314,14 +325,25 @@ class VideoProcessor:
                         self._update_progress(9, TOTAL_STEPS)
                         self._update_status("Füge Videos final zusammen...")
                         concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
-                        subprocess.run([
+                        command = [
                             "ffmpeg", "-y",
+                            "-fflags", "+genpts",
                             "-i", concat_input,
                             "-c", "copy",
                             "-bsf:a", "aac_adtstoasc",
-                            "-movflags", "+faststart",
-                            full_video_output_path
-                        ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                            "-movflags", "+faststart"
+                        ]
+                        # HEVC-spezifische Stabilisierung und Tagging
+                        if video_params.get('vcodec') == 'hevc':
+                            command.extend(["-bsf:v", "hevc_metadata=aud=insert,extract_extradata", "-tag:v", "hvc1"])
+
+                        command.append(full_video_output_path)
+
+                        subprocess.run(
+                            command,
+                            capture_output=True, text=True, check=True,
+                            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+                        )
                     else:
                         self._update_progress(9, TOTAL_STEPS)
                         self._update_status("Überspringe normale Video-Erstellung...")
@@ -597,9 +619,9 @@ class VideoProcessor:
         # Encoding-Parameter (Hardware oder Software)
         command.extend(encoding_params['output_params'])
 
+
         # Zusätzliche Parameter für Kompatibilität
         command.extend([
-            "-tag:v", v_params['vtag'],
             "-pix_fmt", v_params['pix_fmt'],
             "-r", v_params['fps'],
             "-video_track_timescale", v_params['timescale'],

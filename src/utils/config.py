@@ -51,7 +51,9 @@ class ConfigManager:
             # Hardware-Beschleunigung
             "hardware_acceleration_enabled": True,  # Hardware-Beschleunigung standardmäßig aktiviert
             # Paralleles Processing
-            "parallel_processing_enabled": True  # Paralleles Processing standardmäßig aktiviert
+            "parallel_processing_enabled": True,  # Paralleles Processing standardmäßig aktiviert
+            # Codec-Auswahl
+            "video_codec": "auto"  # auto, h264, h265, vp9, av1
         }
 
     def save_settings(self, settings):

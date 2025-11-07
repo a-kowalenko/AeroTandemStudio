@@ -472,16 +472,44 @@ class HardwareAccelerationDetector:
 
     def _get_software_params(self, codec='h264'):
         """Gibt Software-Encoding-Parameter zurück (Fallback)"""
-        encoder = 'libx265' if codec == 'hevc' else 'libx264'
-        return {
+        # Encoder-Mapping
+        encoder_map = {
+            'h264': 'libx264',
+            'h265': 'libx265',
+            'hevc': 'libx265',
+            'vp9': 'libvpx-vp9',
+            'av1': 'libaom-av1'  # Oder 'libsvtav1' für schnelleres Encoding
+        }
+
+        encoder = encoder_map.get(codec, 'libx264')
+
+        # Basis-Parameter
+        params = {
             'input_params': [],
-            'output_params': [
-                '-c:v', encoder,
-                '-preset', 'medium',
-                '-crf', '23'
-            ],
+            'output_params': ['-c:v', encoder],
             'encoder': encoder
         }
+
+        # Codec-spezifische Optimierungen
+        if codec in ['h264', 'h265', 'hevc']:
+            params['output_params'].extend([
+                '-preset', 'medium',
+                '-crf', '23'
+            ])
+        elif codec == 'vp9':
+            params['output_params'].extend([
+                '-b:v', '0',  # Constant Quality Mode
+                '-crf', '31',  # Qualität (0-63, 31 ist gut)
+                '-cpu-used', '2'  # Geschwindigkeit (0=langsam, 5=schnell)
+            ])
+        elif codec == 'av1':
+            params['output_params'].extend([
+                '-b:v', '0',  # Constant Quality Mode
+                '-crf', '32',  # Qualität (0-63)
+                '-cpu-used', '4'  # Geschwindigkeit (0=langsam, 8=schnell)
+            ])
+
+        return params
 
     def get_hardware_info_string(self):
         """Gibt einen lesbaren String mit Hardware-Informationen zurück"""

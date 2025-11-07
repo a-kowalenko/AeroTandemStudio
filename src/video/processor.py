@@ -503,7 +503,9 @@ class VideoProcessor:
         Erstellt eine Video-Version mit Wasserzeichen über dem gesamten Video.
         NEU: Nutzt Hardware-Encoding wenn verfügbar, aber Software-Decoding für Filter-Kompatibilität.
 
-        WICHTIG: overlay-Filter benötigt Software-Frames (yuv420p), daher KEIN Hardware-Decoding!
+        WICHTIG:
+        - overlay-Filter benötigt Software-Frames (yuv420p), daher KEIN Hardware-Decoding!
+        - Wasserzeichen-Videos werden IMMER mit H.264 codiert für maximale Kompatibilität
         """
 
         # Pfad zum Wasserzeichen-Bild
@@ -527,10 +529,8 @@ class VideoProcessor:
             f"[v][wm_scaled]overlay=(W-w)/2:(H-h)/2"
         )
 
-        # Hole Encoding-Parameter (mit oder ohne Hardware-Beschleunigung)
-        vcodec = video_params.get('vcodec', 'h264')
-        codec_type = 'hevc' if vcodec in ['hevc', 'h265'] else 'h264'
-        encoding_params = self._get_encoding_params(codec_type)
+        # Hole Encoding-Parameter für H.264 (Wasserzeichen-Videos werden immer mit H.264 codiert)
+        encoding_params = self._get_encoding_params('h264')
 
         # Baue FFmpeg-Befehl
         command = ["ffmpeg", "-y"]

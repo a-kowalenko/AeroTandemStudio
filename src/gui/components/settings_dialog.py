@@ -20,7 +20,7 @@ class SettingsDialog:
         """Zeigt den Einstellungs-Dialog"""
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("Einstellungen")
-        self.dialog.geometry("550x650")  # Größe angepasst
+        self.dialog.geometry("750x650")  # Größe angepasst
         self.dialog.resizable(False, False)
         self.dialog.transient(self.parent)
 
@@ -43,6 +43,8 @@ class SettingsDialog:
         self.hardware_acceleration_var = tk.BooleanVar()
         # Variable für Paralleles Processing
         self.parallel_processing_var = tk.BooleanVar()
+        # Variable für Codec-Auswahl
+        self.codec_var = tk.StringVar(value="auto")
 
         self.create_widgets()
         self.load_settings()
@@ -66,7 +68,7 @@ class SettingsDialog:
         parent_height = self.parent.winfo_height()
 
         # Dialog-Dimensionen (fest definiert)
-        w, h = 550, 650
+        w, h = 750, 650
 
         x = parent_x + (parent_width - w) // 2
         y = parent_y + (parent_height - h) // 2
@@ -98,12 +100,17 @@ class SettingsDialog:
         self.notebook.add(self.tab_allgemein, text="Allgemein")
         self.create_allgemein_tab()
 
-        # --- Tab 2: Server ---
+        # --- Tab 2: Encoding ---
+        self.tab_encoding = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.tab_encoding, text="Encoding")
+        self.create_encoding_tab()
+
+        # --- Tab 3: Server ---
         self.tab_server = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.tab_server, text="Server")
         self.create_server_tab()
 
-        # --- Tab 3: Extras ---
+        # --- Tab 4: Extras ---
         self.tab_extras = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.tab_extras, text="Extras")
         self.create_extras_tab()
@@ -246,8 +253,66 @@ class SettingsDialog:
         # Werden nur angezeigt wenn Auto-Backup aktiviert ist
         # Initial-Zustand wird in load_settings() gesetzt
 
-        # --- Sektion 3: Erweitert ---
-        advanced_frame = ttk.LabelFrame(self.tab_allgemein, text="Erweitert", padding=(10, 10))
+    def create_encoding_tab(self):
+        """Erstellt den Tab 'Encoding'"""
+
+        # --- Sektion 1: Codec-Auswahl ---
+        codec_frame = ttk.LabelFrame(self.tab_encoding, text="Video-Codec", padding=(10, 10))
+        codec_frame.pack(fill="x", pady=(0, 15))
+        codec_frame.grid_columnconfigure(0, weight=1)
+
+        # Info-Text oben
+        info_text = "Wählen Sie den Codec für die finale Videoerstellung:"
+        tk.Label(codec_frame, text=info_text, font=("Arial", 10), fg="gray", wraplength=500, justify="left").grid(
+            row=0, column=0, sticky="w", padx=5, pady=(0, 10))
+
+        # Radio-Buttons für Codec-Auswahl
+        codec_options = [
+            ("auto", "Auto (empfohlen)", "Automatische Codec-Erkennung. Keine Neucodierung wenn alle Clips kompatibel sind."),
+            ("h264", "H.264 (AVC)", "Hohe Kompatibilität, gute Qualität und effiziente Kompression."),
+            ("h265", "H.265 (HEVC)", "Bessere Kompression als H.264, benötigt jedoch mehr Rechenleistung."),
+            ("vp9", "VP9", "Optimiert für Web-Streaming, Open-Source."),
+            ("av1", "AV1", "Beste Kompression, langsameres Encoding, zukunftssicher.")
+        ]
+
+        for idx, (value, label, description) in enumerate(codec_options):
+            radio = tk.Radiobutton(
+                codec_frame,
+                text=label,
+                variable=self.codec_var,
+                value=value,
+                font=("Arial", 10, "bold"),
+                command=self.on_codec_changed
+            )
+            radio.grid(row=idx+1, column=0, sticky="w", padx=10, pady=(5, 0))
+
+            # Beschreibung unter dem Radio-Button
+            desc_label = tk.Label(
+                codec_frame,
+                text=description,
+                font=("Arial", 9),
+                fg="gray",
+                wraplength=480,
+                justify="left"
+            )
+            desc_label.grid(row=idx+2, column=0, sticky="w", padx=30, pady=(0, 8))
+
+        # Hinweis für Wasserzeichen-Video
+        separator = ttk.Separator(codec_frame, orient='horizontal')
+        separator.grid(row=len(codec_options)*2+1, column=0, sticky="ew", pady=10)
+
+        watermark_note = tk.Label(
+            codec_frame,
+            text="ℹ️ Hinweis: Wasserzeichen-Videos werden immer mit H.264 codiert (240p, optimiert für Vorschau).",
+            font=("Arial", 9),
+            fg="#2196F3",
+            wraplength=480,
+            justify="left"
+        )
+        watermark_note.grid(row=len(codec_options)*2+2, column=0, sticky="w", padx=10, pady=(0, 5))
+
+        # --- Sektion 2: Erweitert ---
+        advanced_frame = ttk.LabelFrame(self.tab_encoding, text="Erweitert", padding=(10, 10))
         advanced_frame.pack(fill="x", pady=(0, 10))
         advanced_frame.grid_columnconfigure(0, weight=1)
 
@@ -284,8 +349,8 @@ class SettingsDialog:
 
         # --- Paralleles Processing ---
         # Separator-Linie
-        separator = ttk.Separator(advanced_frame, orient='horizontal')
-        separator.grid(row=2, column=0, sticky="ew", pady=10)
+        separator2 = ttk.Separator(advanced_frame, orient='horizontal')
+        separator2.grid(row=2, column=0, sticky="ew", pady=10)
 
         # Paralleles Processing Container
         parallel_container = tk.Frame(advanced_frame)
@@ -310,6 +375,12 @@ class SettingsDialog:
             anchor="w"
         )
         self.parallel_info_label.grid(row=4, column=0, sticky="w", padx=20, pady=(0, 5))
+
+    def on_codec_changed(self):
+        """Wird aufgerufen wenn ein anderer Codec ausgewählt wird"""
+        selected_codec = self.codec_var.get()
+        print(f"Codec geändert zu: {selected_codec}")
+        # Weitere Logik könnte hier hinzugefügt werden
 
     def on_hw_accel_toggle(self):
         """Wird aufgerufen wenn die Hardware-Beschleunigung Checkbox geändert wird"""
@@ -548,6 +619,9 @@ class SettingsDialog:
         # Paralleles Processing
         self.parallel_processing_var.set(settings.get("parallel_processing_enabled", True))
 
+        # Codec-Auswahl
+        self.codec_var.set(settings.get("video_codec", "auto"))
+
         # Trigger checkbox visibility based on auto_backup setting
         self.on_auto_backup_toggle()
 
@@ -578,6 +652,9 @@ class SettingsDialog:
 
         # Paralleles Processing
         parallel_processing_enabled = self.parallel_processing_var.get()
+
+        # Codec-Auswahl
+        video_codec = self.codec_var.get()
 
         if not server_url:
             messagebox.showwarning("Fehler", "Bitte geben Sie eine Server-Adresse ein.", parent=self.dialog)
@@ -616,6 +693,9 @@ class SettingsDialog:
 
             # Paralleles Processing
             current_settings["parallel_processing_enabled"] = parallel_processing_enabled
+
+            # Codec-Auswahl
+            current_settings["video_codec"] = video_codec
 
             # Speichern
             self.config.save_settings(current_settings)

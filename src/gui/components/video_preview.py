@@ -1179,8 +1179,17 @@ class VideoPreview:
         }
         tp = target_params
 
-        # Hole Encoding-Parameter (Hardware oder Software)
-        encoding_params = self._get_encoding_params('h264')
+        # NEU: Hole Codec-Auswahl aus Settings
+        selected_codec = "auto"
+        if self.app and hasattr(self.app, 'config'):
+            settings = self.app.config.get_settings()
+            selected_codec = settings.get("video_codec", "auto")
+
+        # Wenn "auto", verwende h264 (Standard), sonst den ausgewählten Codec
+        codec_to_use = "h264" if selected_codec == "auto" else selected_codec
+
+        # Hole Encoding-Parameter für den gewählten Codec
+        encoding_params = self._get_encoding_params(codec_to_use)
 
         cmd = ["ffmpeg", "-y"]
 
@@ -1357,6 +1366,7 @@ class VideoPreview:
         """
         Erstellt ein kombiniertes Vorschau-Video.
         NEU: Verwendet bereits existierende Kopien wieder, wenn die gleichen Videos nur umsortiert wurden.
+        NEU: Berücksichtigt Codec-Auswahl aus den Einstellungen.
         """
         try:
             if self.cancellation_event.is_set():
@@ -1366,8 +1376,16 @@ class VideoPreview:
             # Deaktiviere Erstellen-Button während Kombinierung
             self.parent.after(0, lambda: self.app._set_button_waiting())
 
+            # Hole Codec-Auswahl aus Settings
+            selected_codec = "auto"
+            if self.app and hasattr(self.app, 'config'):
+                settings = self.app.config.get_settings()
+                selected_codec = settings.get("video_codec", "auto")
+                print(f"Codec-Auswahl: {selected_codec}")
+
             # Initialisiere Variablen
             needs_reencoding = False
+            force_codec = selected_codec != "auto"  # Wenn nicht "auto", dann erzwinge Re-Encoding
             temp_copy_paths = []
 
             # Prüfe ob bereits Kopien existieren (mit file-identity-basiertem Cache)
@@ -1489,7 +1507,13 @@ class VideoPreview:
                     print(f"Prüfe Format von {len(video_paths)} neuen Videos...")
                     format_info = self._check_video_formats(video_paths)
 
-                    if format_info["compatible"]:
+                    # NEU: Prüfe Codec-Auswahl
+                    if force_codec:
+                        # Spezifischer Codec wurde ausgewählt → ALLE neu kodieren
+                        print(f"→ Codec '{selected_codec}' ausgewählt → ALLE Videos werden neu kodiert")
+                        needs_reencoding = True
+                        self.videos_were_reencoded = True
+                    elif format_info["compatible"]:
                         # Alle gleich → Stream-Copy
                         print("✅ Alle Videos kompatibel → Stream-Copy")
                         needs_reencoding = False

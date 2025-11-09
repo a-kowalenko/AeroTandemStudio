@@ -1252,9 +1252,13 @@ class VideoPreview:
             cmd.extend(["-vf", filter_str])
         else:
             # Software-Filter (Standard)
+            # WICHTIG: format=yuv420p konvertiert 10-bit Videos zu 8-bit (für Kompatibilität)
             cmd.extend([
-                "-vf", f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']}"
+                "-vf", f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']},format=yuv420p"
             ])
+
+        # WICHTIG: Pixel-Format explizit setzen für bessere Kompatibilität
+        cmd.extend(["-pix_fmt", "yuv420p"])
 
         # Video-Encoder (Hardware oder Software)
         cmd.extend(encoding_params['output_params'])
@@ -1340,12 +1344,14 @@ class VideoPreview:
             # WICHTIG: Prüfe auf Hardware-Encoder-Fehler und versuche Fallback
             if self.hw_accel_enabled and stderr_text:
                 hw_error_indicators = [
+                    "10 bit encode not supported",  # WICHTIG: 10-bit Videos nicht von HW-Encoder unterstützt
                     "Driver does not support",
                     "nvenc API version",
                     "minimum required Nvidia driver",
                     "Error while opening encoder",
                     "Could not open encoder",
                     "No NVENC capable devices found",
+                    "No capable devices found",
                     "Cannot load nvcuda.dll",
                     "amf encoder error",
                     "qsv encoder error",
@@ -1357,6 +1363,11 @@ class VideoPreview:
 
                 if any(indicator in stderr_text for indicator in hw_error_indicators):
                     print(f"⚠️ Hardware-Encoder-Fehler erkannt!")
+
+                    # Prüfe spezifisch auf 10-bit Problem
+                    if "10 bit encode not supported" in stderr_text:
+                        print(f"→ 10-bit Video erkannt - Hardware-Encoder unterstützt nur 8-bit")
+
                     print(f"→ Versuche Fallback auf Software-Encoding (libx264)...")
 
                     # Deaktiviere Hardware-Beschleunigung temporär
@@ -1365,6 +1376,7 @@ class VideoPreview:
 
                     try:
                         # Rekursiver Aufruf mit Software-Encoding
+                        print(f"Starte Re-Encoding (Software): {os.path.basename(input_path)} → 1080p@30fps")
                         self._reencode_single_clip(input_path, output_path, task_id, video_index)
                         print(f"✅ Software-Encoding erfolgreich als Fallback")
                         return  # Erfolgreicher Fallback

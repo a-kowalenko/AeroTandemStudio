@@ -33,11 +33,11 @@ class SDFileSelectorDialog:
 
         # NEU: Filter-Variablen
         self.filter_type_var = tk.StringVar(value="Alle")
-        self.filter_sort_var = tk.StringVar(value="Name")
+        self.filter_sort_var = tk.StringVar(value="Datum")  # Standard: Datum
+        self.filter_sort_order_var = tk.StringVar(value="↓ Ab")  # Standard: Absteigend (neueste zuerst)
 
-        # Alle standardmäßig ausgewählt
-        for file_info in files_info:
-            self.selected_paths.add(file_info['path'])
+        # Standardmäßig KEINE Dateien ausgewählt (User muss explizit auswählen)
+        # self.selected_paths bleibt leer
 
         # Thumbnail-Cache
         self.thumbnail_cache = {}  # path -> PhotoImage
@@ -48,12 +48,16 @@ class SDFileSelectorDialog:
         self.drag_rect = None
         self.is_drag_selecting = False
         self.drag_canvas = None
+        self.current_canvas = None  # Für Scroll-Handler
         self.thumbnail_widgets = {}  # path -> (frame_widget, bbox)
 
         # NEU: Async Thumbnail-Loading
         self.thumbnail_queue = []  # Queue von (file_info, thumb_label) Paaren
         self.is_loading_thumbnails = False
         self.loading_cancelled = False
+
+        # Mousewheel-Scrolling Callback (wird von switch_to_thumbnails gesetzt)
+        self.mousewheel_callback = None
 
     def show(self):
         """Zeigt den Dialog an"""
@@ -118,21 +122,7 @@ class SDFileSelectorDialog:
                 font=("Arial", 12, "bold"),
                 fg="#f44336").pack(side='left')
 
-        # View-Umschalter
-        view_frame = tk.Frame(header_frame)
-        view_frame.pack(side='right')
-
-        self.thumbnail_btn = tk.Button(view_frame, text="🖼️ Thumbnails",
-                                      command=self.switch_to_thumbnails,
-                                      relief='sunken')
-        self.thumbnail_btn.pack(side='left', padx=2)
-
-        self.details_btn = tk.Button(view_frame, text="📋 Details",
-                                    command=self.switch_to_details,
-                                    relief='raised')
-        self.details_btn.pack(side='left', padx=2)
-
-        # Auswahl-Info
+        # Auswahl-Info und Hinweis
         info_frame = tk.Frame(main_frame)
         info_frame.pack(fill='x', pady=(0, 10))
 
@@ -141,36 +131,83 @@ class SDFileSelectorDialog:
                                        font=("Arial", 10))
         self.selection_label.pack(side='left')
 
-        # Schnell-Auswahl Buttons
-        tk.Button(info_frame, text="Alle auswählen",
-                 command=self.select_all).pack(side='right', padx=2)
-        tk.Button(info_frame, text="Alle abwählen",
-                 command=self.deselect_all).pack(side='right', padx=2)
+        # Hinweis für Deselektierung
+        hint_label = tk.Label(info_frame,
+                             text="💡 Tipp: Klick = Toggle | Strg+Klick = Gezielt | Drag = Mehrfach",
+                             font=("Arial", 8), fg="#666")
+        hint_label.pack(side='left', padx=15)
 
-        # NEU: Filter-Frame
-        filter_frame = tk.Frame(main_frame)
-        filter_frame.pack(fill='x', pady=(0, 10))
+        # NEU: Tabs + Filter + Buttons in einer Row
+        tab_and_filter_frame = tk.Frame(main_frame)
+        tab_and_filter_frame.pack(fill='x', pady=(0, 5))
 
-        tk.Label(filter_frame, text="Filter:", font=("Arial", 10, "bold")).pack(side='left', padx=(0, 10))
+        # Links: Tabs (ttk.Notebook wie in drag_drop.py) mit Style
+        style = ttk.Style()
+        style.configure('Large.TNotebook.Tab',
+                       font=('Arial', 8, 'bold'),
+                       padding=[20, 5])  # [horizontal, vertical] padding
+
+        self.notebook = ttk.Notebook(tab_and_filter_frame, style='Large.TNotebook')
+        self.notebook.pack(side='left')
+
+        # Dummy-Frames für Tabs (Content wird dynamisch geladen)
+        self.thumbnail_tab_frame = ttk.Frame(self.notebook)
+        self.details_tab_frame = ttk.Frame(self.notebook)
+
+        self.notebook.add(self.thumbnail_tab_frame, text="Kacheln")
+        self.notebook.add(self.details_tab_frame, text="Details")
+
+        # Tab-Change-Event
+        self.notebook.bind('<<NotebookTabChanged>>', self._on_tab_changed)
+
+        # Rechts: Filter + Buttons
+        right_controls = tk.Frame(tab_and_filter_frame)
+        right_controls.pack(side='right', fill='x')
+
+        # Buttons (ganz rechts)
+        button_group = tk.Frame(right_controls)
+        button_group.pack(side='right', padx=(10, 0))
+
+        tk.Button(button_group, text="Alle auswählen",
+                 command=self.select_all, font=("Arial", 9)).pack(side='left', padx=2)
+        tk.Button(button_group, text="Alle abwählen",
+                 command=self.deselect_all, font=("Arial", 9)).pack(side='left', padx=2)
+
+        # Filter (rechts, vor Buttons)
+        filter_group = tk.Frame(right_controls)
+        filter_group.pack(side='right', padx=(0, 10))
 
         # Typ-Filter
-        tk.Label(filter_frame, text="Typ:", font=("Arial", 9)).pack(side='left', padx=(0, 5))
-        type_combo = ttk.Combobox(filter_frame, textvariable=self.filter_type_var,
+        tk.Label(filter_group, text="Typ:", font=("Arial", 9)).pack(side='left', padx=(0, 3))
+        type_combo = ttk.Combobox(filter_group, textvariable=self.filter_type_var,
                                   values=["Alle", "Videos", "Fotos"],
-                                  state='readonly', width=10)
-        type_combo.pack(side='left', padx=(0, 15))
+                                  state='readonly', width=8)
+        type_combo.pack(side='left', padx=(0, 8))
         type_combo.bind('<<ComboboxSelected>>', lambda e: self.apply_filters())
 
         # Sortierung
-        tk.Label(filter_frame, text="Sortierung:", font=("Arial", 9)).pack(side='left', padx=(0, 5))
-        sort_combo = ttk.Combobox(filter_frame, textvariable=self.filter_sort_var,
-                                 values=["Name", "Größe", "Typ"],
-                                 state='readonly', width=10)
-        sort_combo.pack(side='left')
+        tk.Label(filter_group, text="Sort:", font=("Arial", 9)).pack(side='left', padx=(0, 3))
+        sort_combo = ttk.Combobox(filter_group, textvariable=self.filter_sort_var,
+                                 values=["Name", "Größe", "Typ", "Datum"],
+                                 state='readonly', width=8)
+        sort_combo.pack(side='left', padx=(0, 8))
         sort_combo.bind('<<ComboboxSelected>>', lambda e: self.apply_filters())
 
+        # Sortierrichtung
+        order_combo = ttk.Combobox(filter_group, textvariable=self.filter_sort_order_var,
+                                   values=["↑ Auf", "↓ Ab"],
+                                   state='readonly', width=7)
+        order_combo.pack(side='left')
+        order_combo.bind('<<ComboboxSelected>>', lambda e: self.apply_filters())
+
+        # Aktualisiere Sortierrichtungs-Variable für neue Labels
+        if self.filter_sort_order_var.get() == "Aufsteigend":
+            self.filter_sort_order_var.set("↑ Auf")
+        else:
+            self.filter_sort_order_var.set("↓ Ab")
+
         # Container für die Ansichten
-        self.view_container = tk.Frame(main_frame, relief='sunken', borderwidth=1)
+        self.view_container = tk.Frame(main_frame)
         self.view_container.pack(fill='both', expand=True, pady=(0, 10))
 
         # Buttons
@@ -188,8 +225,6 @@ class SDFileSelectorDialog:
     def switch_to_thumbnails(self):
         """Wechselt zur Thumbnail-Ansicht"""
         self.view_mode = "thumbnail"
-        self.thumbnail_btn.config(relief='sunken')
-        self.details_btn.config(relief='raised')
 
         # Lösche alte Ansicht
         for widget in self.view_container.winfo_children():
@@ -215,6 +250,9 @@ class SDFileSelectorDialog:
         # Reset Thumbnail-Queue
         self.thumbnail_queue = []
         self.loading_cancelled = False
+
+        # Canvas-Referenz für Scroll-Handler speichern
+        self.current_canvas = canvas
 
         # Filtere und sortiere Dateien
         filtered_files = self.get_filtered_files()
@@ -243,83 +281,126 @@ class SDFileSelectorDialog:
         canvas.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
 
-        # NEU: Drag-Selection Events
-        def on_mouse_down(event):
-            # Konvertiere zu Canvas-Koordinaten
-            self.drag_start_x = canvas.canvasx(event.x)
-            self.drag_start_y = canvas.canvasy(event.y)
-            self.is_drag_selecting = True
+        # Initialisiere Drag-State
+        self.drag_start_x = None
+        self.drag_start_y = None
+        self.is_drag_selecting = False
+        self.drag_rect = None
 
-            # Erstelle Auswahlrechteck
-            self.drag_rect = canvas.create_rectangle(
-                self.drag_start_x, self.drag_start_y,
-                self.drag_start_x, self.drag_start_y,
-                outline='#2196F3', width=2, dash=(4, 4)
-            )
+        # NEU: Drag-Selection - Rectangle wird über Widgets gezeichnet
+        def on_canvas_click(event):
+            # Nur auf leerem Canvas-Bereich
+            # Prüfe ob Canvas-Item unter Mauszeiger ist
+            x = canvas.canvasx(event.x)
+            y = canvas.canvasy(event.y)
 
-        def on_mouse_move(event):
-            if not self.is_drag_selecting or not self.drag_rect:
-                return
+            # Finde alle Items an dieser Position
+            items = canvas.find_overlapping(x, y, x, y)
 
-            # Aktualisiere Rechteck
-            current_x = canvas.canvasx(event.x)
-            current_y = canvas.canvasy(event.y)
-
-            canvas.coords(self.drag_rect,
-                         self.drag_start_x, self.drag_start_y,
-                         current_x, current_y)
-
-        def on_mouse_up(event):
-            if not self.is_drag_selecting:
-                return
-
+            # Wenn nur scrollable_frame window vorhanden, dann leerer Bereich
+            # (Klick auf Widgets würde nicht hier ankommen)
+            self.drag_start_x = x
+            self.drag_start_y = y
             self.is_drag_selecting = False
+            self.drag_rect = None
+
+        def on_canvas_drag(event):
+            if self.drag_start_x is None:
+                return
+
+            x = canvas.canvasx(event.x)
+            y = canvas.canvasy(event.y)
+
+            # Prüfe Mindestbewegung
+            if not self.is_drag_selecting:
+                dx = abs(x - self.drag_start_x)
+                dy = abs(y - self.drag_start_y)
+
+                if dx > 10 or dy > 10:
+                    self.is_drag_selecting = True
+                    # Erstelle Rectangle auf Canvas (wird über Widgets gezeichnet)
+                    self.drag_rect = canvas.create_rectangle(
+                        self.drag_start_x, self.drag_start_y,
+                        x, y,
+                        outline='#2196F3', width=3,
+                        fill='#BBDEFB',
+                        stipple='gray50'
+                    )
+
+            # Update Rectangle
+            if self.is_drag_selecting and self.drag_rect:
+                canvas.coords(self.drag_rect,
+                             self.drag_start_x, self.drag_start_y,
+                             x, y)
+
+        def on_canvas_release(event):
+            if not self.is_drag_selecting:
+                self.drag_start_x = None
+                self.drag_start_y = None
+                return
+
+            x = canvas.canvasx(event.x)
+            y = canvas.canvasy(event.y)
 
             # Berechne Auswahlbereich
-            end_x = canvas.canvasx(event.x)
-            end_y = canvas.canvasy(event.y)
+            sel_x1 = min(self.drag_start_x, x)
+            sel_y1 = min(self.drag_start_y, y)
+            sel_x2 = max(self.drag_start_x, x)
+            sel_y2 = max(self.drag_start_y, y)
 
-            sel_x1 = min(self.drag_start_x, end_x)
-            sel_y1 = min(self.drag_start_y, end_y)
-            sel_x2 = max(self.drag_start_x, end_x)
-            sel_y2 = max(self.drag_start_y, end_y)
-
-            # Prüfe welche Thumbnails im Bereich sind
+            # Prüfe Überschneidungen
             for path, (widget, bbox) in self.thumbnail_widgets.items():
                 widget_x1, widget_y1, widget_x2, widget_y2 = bbox
 
-                # Überschneidungs-Prüfung
                 if not (sel_x2 < widget_x1 or sel_x1 > widget_x2 or
                        sel_y2 < widget_y1 or sel_y1 > widget_y2):
-                    # Widget ist im Auswahlbereich
                     if path not in self.selected_paths:
                         self.selected_paths.add(path)
-                        # Update Border
-                        widget.config(bg='#2196F3')
+                        if widget.winfo_children():
+                            inner_frame = widget.winfo_children()[0]
+                            inner_frame.config(bg='#000000')
 
-            # Lösche Auswahlrechteck
+            # Cleanup
             if self.drag_rect:
                 canvas.delete(self.drag_rect)
                 self.drag_rect = None
 
+            self.is_drag_selecting = False
+            self.drag_start_x = None
+            self.drag_start_y = None
             self.update_selection_info()
 
-        # Binde Events
-        canvas.bind('<ButtonPress-1>', on_mouse_down)
-        canvas.bind('<B1-Motion>', on_mouse_move)
-        canvas.bind('<ButtonRelease-1>', on_mouse_up)
+        # Binde nur auf Canvas (nicht auf Widgets)
+        canvas.bind('<Button-1>', on_canvas_click)
+        canvas.bind('<B1-Motion>', on_canvas_drag)
+        canvas.bind('<ButtonRelease-1>', on_canvas_release)
 
         # Mausrad-Scrolling - nur für Canvas, nicht global!
         def _on_mousewheel(event):
             try:
                 if canvas.winfo_exists():
                     canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                    return "break"  # Verhindere weitere Event-Propagierung
             except:
                 pass  # Canvas existiert nicht mehr
 
-        # Binde NUR auf Canvas und scrollable_frame, NICHT bind_all!
-        canvas.bind("<MouseWheel>", _on_mousewheel)
-        scrollable_frame.bind("<MouseWheel>", _on_mousewheel)
+        # Speichere Callback für Verwendung in create_thumbnail_widget
+        self.mousewheel_callback = _on_mousewheel
+
+        # Binde auf Canvas und scrollable_frame
+        canvas.bind("<MouseWheel>", _on_mousewheel, add=True)
+        scrollable_frame.bind("<MouseWheel>", _on_mousewheel, add=True)
+
+        # WICHTIG: Binde auch auf view_container für globales Scrolling
+        self.view_container.bind("<MouseWheel>", _on_mousewheel, add=True)
+
+    def _on_tab_changed(self, event):
+        """Handler für Tab-Wechsel"""
+        selected_tab = self.notebook.index(self.notebook.select())
+        if selected_tab == 0:
+            self.switch_to_thumbnails()
+        else:
+            self.switch_to_details()
 
     def get_filtered_files(self):
         """Gibt gefilterte und sortierte Dateiliste zurück"""
@@ -334,12 +415,20 @@ class SDFileSelectorDialog:
 
         # Sortierung
         sort_by = self.filter_sort_var.get()
+        sort_order = self.filter_sort_order_var.get()
+        # Unterstütze beide Formate: "Absteigend" und "↓ Ab"
+        reverse = (sort_order in ["Absteigend", "↓ Ab"])
+
         if sort_by == "Name":
-            files.sort(key=lambda f: f['filename'].lower())
+            files.sort(key=lambda f: f['filename'].lower(), reverse=reverse)
         elif sort_by == "Größe":
-            files.sort(key=lambda f: f['size_bytes'], reverse=True)
+            files.sort(key=lambda f: f['size_bytes'], reverse=reverse)
         elif sort_by == "Typ":
-            files.sort(key=lambda f: (not f['is_video'], f['filename'].lower()))
+            files.sort(key=lambda f: (not f['is_video'], f['filename'].lower()), reverse=reverse)
+        elif sort_by == "Datum":
+            # Sortiere nach Datei-Änderungsdatum
+            import os
+            files.sort(key=lambda f: os.path.getmtime(f['path']), reverse=reverse)
 
         return files
 
@@ -355,15 +444,24 @@ class SDFileSelectorDialog:
         path = file_info['path']
         is_selected = path in self.selected_paths
 
-        # Container-Frame mit Border für Markierung
-        frame = tk.Frame(parent, relief='solid', borderwidth=3,
-                        bg='#2196F3' if is_selected else '#e0e0e0',
-                        padx=2, pady=2)
-        frame.grid(row=row, column=col, padx=5, pady=5, sticky='n')
+        # Outer-Frame: Feste Größe mit festem Abstand, verhindert Verschiebung
+        outer_frame = tk.Frame(parent, bg=parent.cget('bg'), width=200, height=220)
+        outer_frame.grid(row=row, column=col, padx=10, pady=10, sticky='n')
+        outer_frame.grid_propagate(False)  # WICHTIG: Verhindert automatische Größenanpassung
 
-        # Innerer Frame (weiß)
+        # Inner-Frame: Immer mit Border-Space, aber Farbe ändert sich
+        # Border ist IMMER 2px, nur die Farbe wechselt zwischen weiß (unsichtbar) und Schwarz
+        border_color = '#000000' if is_selected else 'white'
+        frame = tk.Frame(outer_frame,
+                        relief='solid',
+                        borderwidth=2,
+                        bg=border_color,
+                        highlightthickness=0)
+        frame.pack(fill='both', expand=True)
+
+        # Content-Frame (weiß, innen)
         inner_frame = tk.Frame(frame, bg='white', padx=5, pady=5)
-        inner_frame.pack()
+        inner_frame.pack(fill='both', expand=True, padx=2, pady=2)
 
         # Thumbnail (echtes Bild oder Icon)
         thumb_frame = tk.Frame(inner_frame, width=180, height=135, bg='#f0f0f0')
@@ -388,16 +486,42 @@ class SDFileSelectorDialog:
         filename_label = tk.Label(inner_frame, text=filename, font=("Arial", 9), bg='white')
         filename_label.pack(pady=(5, 0))
 
+        # NEU: Filedatum
+        import os
+        import time
+        try:
+            mtime = os.path.getmtime(file_info['path'])
+            date_str = time.strftime("%d.%m.%Y %H:%M", time.localtime(mtime))
+        except:
+            date_str = "Unbekannt"
+
+        date_label = tk.Label(inner_frame, text=date_str, font=("Arial", 8), fg='#666', bg='white')
+        date_label.pack()
+
         # Größe
         size_mb = file_info['size_bytes'] / (1024 * 1024)
         size_label = tk.Label(inner_frame, text=f"{size_mb:.1f} MB", font=("Arial", 8), fg='gray', bg='white')
         size_label.pack()
 
-        # Events: Klick=Toggle, Doppelklick=Öffnen - DEFINIERE ZUERST!
+        # Events: Klick=Toggle, Doppelklick=Öffnen, Strg+Klick=Invertieren - DEFINIERE ZUERST!
         def on_click(event):
-            self.toggle_selection(path)
-            # Update Border-Color
-            frame.config(bg='#2196F3' if path in self.selected_paths else '#e0e0e0')
+            # Strg+Klick: Toggle (markieren/demarkieren)
+            # Normaler Klick: Nur wenn nicht bereits ausgewählt, dann auswählen
+            if event.state & 0x0004:  # Strg gedrückt (Control-Taste)
+                # Toggle: Markieren wenn nicht markiert, demarkieren wenn markiert
+                self.toggle_selection(path)
+            else:
+                # Normaler Klick: Auswählen (wie bisher)
+                if path not in self.selected_paths:
+                    self.selected_paths.add(path)
+                else:
+                    # Bereits ausgewählt: Demarkieren
+                    self.selected_paths.remove(path)
+
+            # Update Border-Color (Größe bleibt gleich!)
+            is_now_selected = path in self.selected_paths
+            border_color = '#000000' if is_now_selected else 'white'
+            frame.config(bg=border_color)
             self.update_selection_info()
 
         def on_double_click(event):
@@ -429,12 +553,24 @@ class SDFileSelectorDialog:
             self.thumbnail_queue.append((file_info, thumb_label, thumb_frame, frame, on_click, on_double_click))
 
         # Binde Events an ALLE Widgets im Frame (inkl. Labels!)
-        for widget in [frame, inner_frame, thumb_frame, thumb_label, icon_bg_frame, icon_label, filename_label, size_label]:
+        for widget in [outer_frame, frame, inner_frame, thumb_frame, thumb_label, icon_bg_frame, icon_label, filename_label, date_label, size_label]:
             widget.bind('<Button-1>', on_click)
             widget.bind('<Double-Button-1>', on_double_click)
 
-        # Gebe Frame zurück für Drag-Selection
-        return frame
+            # WICHTIG: Binde Mousewheel auch auf alle Widgets für Scrolling über Thumbnails
+            # Event muss an Canvas weitergeleitet werden
+            def make_scroll_handler(w):
+                def scroll_handler(event):
+                    # Scrolle den Canvas
+                    if hasattr(self, 'current_canvas') and self.current_canvas:
+                        self.current_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                    return "break"
+                return scroll_handler
+
+            widget.bind('<MouseWheel>', make_scroll_handler(widget))
+
+        # Gebe Outer-Frame zurück für Drag-Selection
+        return outer_frame
 
     def generate_thumbnail(self, file_info):
         """Generiert echtes Thumbnail für Datei"""
@@ -509,8 +645,6 @@ class SDFileSelectorDialog:
     def switch_to_details(self):
         """Wechselt zur Detail-Ansicht"""
         self.view_mode = "details"
-        self.thumbnail_btn.config(relief='raised')
-        self.details_btn.config(relief='sunken')
 
         # Lösche alte Ansicht
         for widget in self.view_container.winfo_children():
@@ -524,7 +658,7 @@ class SDFileSelectorDialog:
         scrollbar.pack(side='right', fill='y')
 
         tree = ttk.Treeview(tree_frame,
-                           columns=('select', 'filename', 'type', 'size', 'path'),
+                           columns=('select', 'filename', 'type', 'size', 'date', 'path'),
                            show='headings',
                            yscrollcommand=scrollbar.set)
         tree.pack(side='left', fill='both', expand=True)
@@ -536,13 +670,15 @@ class SDFileSelectorDialog:
         tree.heading('filename', text='Dateiname')
         tree.heading('type', text='Typ')
         tree.heading('size', text='Größe')
+        tree.heading('date', text='Datum')
         tree.heading('path', text='Pfad')
 
         tree.column('select', width=40, anchor='center')
-        tree.column('filename', width=250)
-        tree.column('type', width=80, anchor='center')
-        tree.column('size', width=100, anchor='e')
-        tree.column('path', width=300)
+        tree.column('filename', width=220)
+        tree.column('type', width=70, anchor='center')
+        tree.column('size', width=90, anchor='e')
+        tree.column('date', width=130, anchor='center')
+        tree.column('path', width=250)
 
         # Filtere und sortiere Dateien
         filtered_files = self.get_filtered_files()
@@ -551,6 +687,15 @@ class SDFileSelectorDialog:
         for file_info in filtered_files:
             is_selected = file_info['path'] in self.selected_paths
             size_mb = file_info['size_bytes'] / (1024 * 1024)
+
+            # Filedatum
+            import os
+            import time
+            try:
+                mtime = os.path.getmtime(file_info['path'])
+                date_str = time.strftime("%d.%m.%Y %H:%M", time.localtime(mtime))
+            except:
+                date_str = "Unbekannt"
 
             tree.insert('', 'end', values=(
                 '✓' if is_selected else '',
@@ -723,6 +868,10 @@ class SDFileSelectorDialog:
             # WICHTIG: Binde Click-Events auf das neue Label
             new_label.bind('<Button-1>', on_click)
             new_label.bind('<Double-Button-1>', on_double_click)
+
+            # WICHTIG: Binde auch Mousewheel für Scrolling!
+            if self.mousewheel_callback:
+                new_label.bind('<MouseWheel>', self.mousewheel_callback)
 
             # Stelle sicher dass Icon-Frame über dem Thumbnail bleibt
             # Finde alle Kinder von thumb_frame und bringe Icon nach vorne

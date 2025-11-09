@@ -1719,7 +1719,14 @@ class VideoGeneratorApp:
             f"Eingestelltes Limit: {limit_mb} MB\n\n"
             f"Was möchten Sie tun?"
         )
-        tk.Label(main_frame, text=info_text, font=("Arial", 10), justify='left').pack(pady=(0, 20))
+        tk.Label(main_frame, text=info_text, font=("Arial", 10), justify='left').pack(pady=(0, 10))
+
+        # NEU: Hinweis wenn Auto-Import deaktiviert ist
+        settings = self.config.get_settings()
+        if not settings.get("sd_auto_import", False):
+            hint_text = "ℹ️ Hinweis: Automatischer Import ist deaktiviert.\nDateien werden nur gesichert, nicht importiert."
+            tk.Label(main_frame, text=hint_text, font=("Arial", 9, "bold"), fg="#D84315",
+                    justify='left', bg='#FFE0B2', padx=10, pady=8, relief='solid', borderwidth=1).pack(pady=(0, 15), fill='x')
 
         # Buttons
         button_frame = tk.Frame(main_frame)

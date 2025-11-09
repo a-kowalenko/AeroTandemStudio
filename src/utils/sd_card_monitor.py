@@ -17,6 +17,8 @@ except ImportError:
     WINDOWS_API_AVAILABLE = False
     print("Warnung: pywin32 nicht verfügbar. SD-Karten Monitor wird nicht funktionieren.")
 
+from src.utils.media_history import MediaHistoryStore, get_media_type_from_filename  # NEU
+
 
 class SDCardMonitor:
     """Überwacht SD-Karten und führt automatische Backups durch"""
@@ -28,7 +30,10 @@ class SDCardMonitor:
         Args:
             config_manager: ConfigManager Instanz für Settings
             on_backup_complete: Callback-Funktion wenn Backup abgeschlossen ist
-                               Wird aufgerufen mit (backup_path, success)
+                               Wird aufgerufen mit (backup_path, success, error_message)
+                               - backup_path: Pfad zum Backup oder None bei Fehler
+                               - success: True bei Erfolg, False bei Fehler
+                               - error_message: Fehlermeldung bei Fehler, None bei Erfolg
             on_progress_update: Callback für Progress-Updates während Backup
                                Wird aufgerufen mit (current_mb, total_mb, speed_mbps)
             on_status_change: Callback wenn sich der Status ändert
@@ -44,6 +49,7 @@ class SDCardMonitor:
         self.monitor_thread = None
         self.known_drives = set()
         self.backup_in_progress = False
+        self.history = MediaHistoryStore.instance()  # NEU
 
     def start_monitoring(self):
         """Startet die Überwachung von SD-Karten"""
@@ -188,7 +194,7 @@ class SDCardMonitor:
 
         try:
             # Erstelle Backup
-            backup_path = self._create_backup(drive, backup_folder)
+            backup_path, error_message = self._create_backup(drive, backup_folder)
 
             if backup_path:
                 print(f"Backup erfolgreich: {backup_path}")
@@ -208,18 +214,20 @@ class SDCardMonitor:
                 # Werfe SD-Karte aus (optional, erstmal deaktiviert da komplex in Windows)
                 # self._eject_drive(drive)
 
-                # Rufe Callback auf
+                # Rufe Callback auf mit Erfolg
                 if self.on_backup_complete:
-                    self.on_backup_complete(backup_path, True)
+                    self.on_backup_complete(backup_path, True, None)
             else:
-                print("Backup fehlgeschlagen")
+                # Backup fehlgeschlagen
+                print(f"Backup fehlgeschlagen: {error_message}")
                 if self.on_backup_complete:
-                    self.on_backup_complete(None, False)
+                    self.on_backup_complete(None, False, error_message)
 
         except Exception as e:
-            print(f"Fehler beim Backup: {e}")
+            error_message = f"Fehler beim Backup: {str(e)}"
+            print(error_message)
             if self.on_backup_complete:
-                self.on_backup_complete(None, False)
+                self.on_backup_complete(None, False, error_message)
         finally:
             self.backup_in_progress = False
 
@@ -233,7 +241,9 @@ class SDCardMonitor:
         Kopiert nur vollwertige Mediendateien direkt in den Backup-Ordner (flache Struktur)
 
         Returns:
-            Pfad zum Backup-Ordner oder None bei Fehler
+            Tuple (backup_path, error_message):
+                - backup_path: Pfad zum Backup-Ordner oder None bei Fehler
+                - error_message: Fehlermeldung oder None bei Erfolg
         """
         backup_path = None
         try:
@@ -247,8 +257,9 @@ class SDCardMonitor:
             dcim_source = os.path.join(drive, "DCIM")
 
             if not os.path.isdir(dcim_source):
-                print(f"DCIM Ordner nicht gefunden: {dcim_source}")
-                return None
+                error_msg = f"DCIM Ordner nicht gefunden: {dcim_source}"
+                print(error_msg)
+                return None, error_msg
 
             # Erstelle Backup-Ordner
             os.makedirs(backup_path, exist_ok=True)
@@ -271,19 +282,46 @@ class SDCardMonitor:
                         media_files.append(src_file)
 
             if not media_files:
-                print("Keine Mediendateien gefunden")
-                return None
+                error_msg = "Keine Mediendateien auf der SD-Karte gefunden"
+                print(error_msg)
+                return None, error_msg
 
-            # Berechne Gesamtgröße
+            # Optional: Duplikate überspringen
+            settings = self.config.get_settings()
+            skip_processed = settings.get("sd_skip_processed", False)
+            filtered_files = []
+            skipped_count = 0
+
+            if skip_processed:
+                print("Duplikat-Filter aktiv: Prüfe bereits verarbeitete Dateien...")
+                for src_file in media_files:
+                    ident = self.history.compute_identity(src_file)
+                    if not ident:
+                        filtered_files.append(src_file)
+                        continue
+                    identity_hash, size_bytes = ident
+                    if self.history.contains(identity_hash):
+                        skipped_count += 1
+                    else:
+                        filtered_files.append(src_file)
+            else:
+                filtered_files = media_files
+
+            if not filtered_files:
+                error_msg = f"Keine neuen Dateien zum Sichern. Übersprungen: {skipped_count}"
+                print(error_msg)
+                return None, error_msg
+
+            # Berechne Gesamtgröße basierend auf gefilterter Liste
             total_size = 0
-            for file_path in media_files:
+            for file_path in filtered_files:
                 try:
                     total_size += os.path.getsize(file_path)
                 except Exception:
                     pass
 
             total_mb = total_size / (1024 * 1024)
-            print(f"Gefunden: {len(media_files)} Mediendateien ({total_mb:.1f} MB)")
+            print(f"Gefunden: {len(media_files)} Mediendateien ({total_mb:.1f} MB), neu: {len(filtered_files)}, übersprungen: {skipped_count}")
 
             # Kopiere mit Progress-Tracking
             copied_size = 0
@@ -293,13 +331,13 @@ class SDCardMonitor:
             # Behandle Dateinamen-Duplikate
             used_filenames = set()
 
-            for src_file in media_files:
+            for src_file in filtered_files:
                 try:
                     # Original-Dateiname
                     original_name = os.path.basename(src_file)
                     dst_filename = original_name
 
-                    # Bei Duplikaten: Füge Suffix hinzu
+                    # Bei Duplikaten im Zielordner: Füge Suffix hinzu
                     counter = 1
                     name_without_ext, ext = os.path.splitext(original_name)
                     while dst_filename.lower() in used_filenames:
@@ -315,6 +353,14 @@ class SDCardMonitor:
                     copied_size += file_size
                     copied_count += 1
 
+                    # Historie aktualisieren (backed_up_at setzen)
+                    ident = self.history.compute_identity(src_file)
+                    if ident:
+                        identity_hash, size_bytes = ident
+                        media_type = get_media_type_from_filename(original_name)
+                        self.history.upsert(identity_hash, original_name, size_bytes, media_type,
+                                            backed_up_at=time.strftime('%Y-%m-%dT%H:%M:%S'))
+
                     # Progress-Update
                     if self.on_progress_update and total_size > 0:
                         current_mb = copied_size / (1024 * 1024)
@@ -325,19 +371,20 @@ class SDCardMonitor:
                 except Exception as e:
                     print(f"Fehler beim Kopieren von {src_file}: {e}")
 
-            print(f"Backup abgeschlossen: {copied_count} Mediendateien kopiert")
+            print(f"Backup abgeschlossen: {copied_count} neue Mediendateien kopiert")
 
-            return backup_path
+            return backup_path, None  # Erfolg: Pfad und kein Fehler
 
         except Exception as e:
-            print(f"Fehler beim Erstellen des Backups: {e}")
+            error_msg = f"Fehler beim Erstellen des Backups: {str(e)}"
+            print(error_msg)
             # Aufräumen bei Fehler
             if backup_path and os.path.isdir(backup_path):
                 try:
                     shutil.rmtree(backup_path)
                 except Exception:
                     pass
-            return None
+            return None, error_msg  # Fehler: kein Pfad, aber Fehlermeldung
 
     def _clear_sd_card(self, drive):
         """Löscht den Inhalt des DCIM Ordners auf der SD-Karte"""

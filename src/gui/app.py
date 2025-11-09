@@ -5,6 +5,7 @@ import os
 import queue
 from typing import List
 from tkinterdnd2 import TkinterDnD
+from datetime import datetime
 
 from .components.form_fields import FormFields
 from .components.drag_drop import DragDropFrame
@@ -23,6 +24,7 @@ from ..video.processor import VideoProcessor
 from ..utils.config import ConfigManager
 from ..utils.validation import validate_form_data
 from ..utils.sd_card_monitor import SDCardMonitor
+from ..utils.media_history import MediaHistoryStore
 from ..installer.ffmpeg_installer import ensure_ffmpeg_installed
 from ..utils.file_utils import test_server_connection
 from ..installer.updater import initialize_updater
@@ -542,25 +544,40 @@ class VideoGeneratorApp:
         widget.bind("<Leave>", hide_tooltip)
 
     def show_settings(self):
-        """Zeigt den Einstellungs-Dialog"""
-        SettingsDialog(self.root, self.config, on_settings_saved=self.on_settings_saved).show()
+        """
+        Zeigt den Einstellungs-Dialog
+
+        Öffnet ein modales Fenster mit allen Konfigurationsoptionen.
+        Nach dem Speichern wird on_settings_saved() automatisch aufgerufen.
+        """
+        SettingsDialog(
+            self.root,
+            self.config,
+            on_settings_saved=self.on_settings_saved
+        ).show()
 
     def on_settings_saved(self):
-        """Wird aufgerufen nachdem Settings gespeichert wurden"""
-        # WICHTIG: Config neu laden, damit Änderungen wirksam werden
+        """
+        Wird aufgerufen nachdem Settings gespeichert wurden
+
+        Lädt alle notwendigen Komponenten neu, damit Änderungen
+        sofort wirksam werden ohne die App neu starten zu müssen.
+        """
+        # Config neu laden für aktuelle Einstellungen
         self.config.reload_settings()
 
-        # WICHTIG: Hardware-Beschleunigung in VideoPreview neu laden
+        # Hardware-Beschleunigung in VideoPreview neu laden
         if hasattr(self, 'video_preview') and self.video_preview:
             self.video_preview.reload_hardware_acceleration_settings()
 
-        # WICHTIG: Wenn ein VideoProcessor existiert, auch dort neu laden
+        # Wenn VideoProcessor existiert, auch dort neu laden
         if hasattr(self, 'video_processor') and self.video_processor:
             self.video_processor.reload_hardware_acceleration_settings()
 
-        # Server-Verbindung testen
+        # Server-Verbindung asynchron testen
         self.test_server_connection_async()
-        # SD-Monitor sofort neu starten
+
+        # SD-Monitor sofort neu starten (wenn Auto-Backup aktiviert/deaktiviert wurde)
         self._restart_sd_monitor_if_needed()
 
     def pack_components(self):
@@ -1332,7 +1349,7 @@ class VideoGeneratorApp:
         # Zeige Spalte wenn Video ausgewählt aber nicht bezahlt ist
         self.drag_drop.set_watermark_column_visible(video_wm_sichtbar)
 
-        # Wenn Spalte nicht mehr sichtbar, lösche Auswahl
+        # Wenn spalte nicht mehr sichtbar, lösche Auswahl
         if not video_wm_sichtbar:
             self.drag_drop.clear_watermark_selection()
 
@@ -1353,7 +1370,7 @@ class VideoGeneratorApp:
         # Rufe die neue Methode in drag_drop auf
         self.drag_drop.set_photo_watermark_column_visible(foto_wm_sichtbar)
 
-        # Wenn Spalte nicht mehr sichtbar, lösche Auswahl
+        # Wenn spalte nicht mehr sichtbar, lösche Auswahl
         if not foto_wm_sichtbar:
             self.drag_drop.clear_photo_watermark_selection()
 
@@ -1649,14 +1666,10 @@ class VideoGeneratorApp:
         def update_ui():
             if self.sd_status_indicator:
                 self.sd_status_indicator.update_backup_progress(current_mb, total_mb, speed_mbps)
-
-            # Auch in der Status-Bar anzeigen
             progress_percent = (current_mb / total_mb * 100) if total_mb > 0 else 0
             self.progress_handler.set_status(
                 f"Status: SD-Backup {progress_percent:.0f}% ({current_mb:.0f}/{total_mb:.0f} MB, {speed_mbps:.1f} MB/s)"
             )
-
-        # UI-Update im Haupt-Thread
         self.root.after(0, update_ui)
 
     def _restart_sd_monitor_if_needed(self):
@@ -1668,51 +1681,70 @@ class VideoGeneratorApp:
             is_monitoring = self.sd_card_monitor.monitoring
 
             if should_monitor and not is_monitoring:
-                # Monitoring wurde aktiviert
                 self.sd_card_monitor.start_monitoring()
             elif not should_monitor and is_monitoring:
-                # Monitoring wurde deaktiviert
                 self.sd_card_monitor.stop_monitoring()
                 if self.sd_status_indicator:
                     self.sd_status_indicator.hide()
                 self.progress_handler.set_status("Status: Bereit.")
 
-    def on_sd_backup_complete(self, backup_path, success):
+    def on_sd_backup_complete(self, backup_path, success, error_message=None):
         """
         Wird aufgerufen wenn SD-Karten Backup abgeschlossen ist
 
+        Callback-Methode vom SD-Card-Monitor. Zeigt Benachrichtigung
+        und startet optional automatischen Import wenn aktiviert.
+
         Args:
-            backup_path: Pfad zum Backup-Ordner oder None bei Fehler
-            success: True wenn Backup erfolgreich war
+            backup_path: Pfad zum erstellten Backup-Ordner (oder None bei Fehler)
+            success: True wenn Backup erfolgreich, False bei Fehler
+            error_message: Fehlermeldung bei Fehler, None bei Erfolg
         """
+        # Fehlerfall behandeln
         if not success:
-            print("SD-Karten Backup fehlgeschlagen")
-            messagebox.showerror("Backup Fehler",
-                               "Das Backup von der SD-Karte ist fehlgeschlagen.",
-                               parent=self.root)
+            print(f"SD-Karten Backup fehlgeschlagen: {error_message}")
+
+            # Zeige detaillierte Fehlermeldung
+            error_text = "Das Backup von der SD-Karte ist fehlgeschlagen."
+            if error_message:
+                error_text += f"\n\nGrund:\n{error_message}"
+
+            messagebox.showerror(
+                "Backup Fehler",
+                error_text,
+                parent=self.root
+            )
             return
 
+        # Erfolgsfall
         print(f"SD-Karten Backup erfolgreich: {backup_path}")
 
         settings = self.config.get_settings()
 
         # Prüfe ob automatischer Import aktiviert ist
         if settings.get("sd_auto_import", False):
+            # Starte automatischen Import
             self.import_from_backup(backup_path)
         else:
-            # Zeige Info-Nachricht
-            messagebox.showinfo("Backup erfolgreich",
-                              f"SD-Karten Backup wurde erfolgreich erstellt:\n{backup_path}",
-                              parent=self.root)
+            # Zeige nur Erfolgs-Benachrichtigung
+            messagebox.showinfo(
+                "Backup erfolgreich",
+                f"SD-Karten Backup wurde erfolgreich erstellt:\n{backup_path}",
+                parent=self.root
+            )
 
     def import_from_backup(self, backup_path):
         """
-        Importiert Dateien aus dem Backup-Ordner (simuliert Drag&Drop)
+        Importiert Dateien aus dem Backup-Ordner in die Anwendung
+
+        Simuliert Drag&Drop durch direktes Hinzufügen der Dateien.
+        Wenn "Nur neue Dateien" aktiviert ist, werden bereits importierte
+        Dateien automatisch übersprungen.
 
         Args:
-            backup_path: Pfad zum Backup-Ordner
+            backup_path: Pfad zum Backup-Ordner mit Mediendateien
         """
-        # Merke QR-Check Status und deaktiviere temporär
+        # QR-Check Status merken und temporär deaktivieren
         qr_check_was_enabled = False
         if self.drag_drop and hasattr(self.drag_drop, 'qr_check_enabled'):
             qr_check_was_enabled = self.drag_drop.qr_check_enabled.get()
@@ -1720,15 +1752,15 @@ class VideoGeneratorApp:
                 print("QR-Code-Prüfung temporär deaktiviert für Auto-Import")
                 self.drag_drop.qr_check_enabled.set(False)
 
-        # Variable für finally-Block
+        # Flag für finally-Block
         videos_imported = False
 
         try:
-            # Sammle alle Dateien aus dem Backup
+            # Sammle alle Dateien aus dem Backup-Ordner
             video_files = []
             photo_files = []
 
-            # Dateien liegen jetzt direkt im Backup-Ordner (flache Struktur)
+            # Dateien liegen direkt im Backup-Ordner (flache Struktur)
             if os.path.isdir(backup_path):
                 for file in os.listdir(backup_path):
                     file_lower = file.lower()
@@ -1739,12 +1771,64 @@ class VideoGeneratorApp:
                         continue
 
                     # Video-Formate
-                    if file_lower.endswith(('.mp4', '.mov', '.avi', '.mkv', '.m4v', '.mpg', '.mpeg', '.wmv', '.flv', '.webm')):
+                    if file_lower.endswith(('.mp4', '.mov', '.avi', '.mkv', '.m4v',
+                                          '.mpg', '.mpeg', '.wmv', '.flv', '.webm')):
                         video_files.append(file_path)
                     # Foto-Formate
-                    elif file_lower.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.gif', '.webp', '.heic', '.raw', '.cr2', '.nef', '.arw', '.dng')):
+                    elif file_lower.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tif',
+                                            '.tiff', '.gif', '.webp', '.heic', '.raw',
+                                            '.cr2', '.nef', '.arw', '.dng')):
                         photo_files.append(file_path)
 
+            # Prüfe Einstellung für Duplikate-Filter
+            settings = self.config.get_settings()
+            skip_processed = settings.get("sd_skip_processed", False)
+
+            if skip_processed and (video_files or photo_files):
+                # Filtere bereits importierte Dateien
+                history_store = MediaHistoryStore.instance()
+
+                filtered_videos = []
+                filtered_photos = []
+                skipped_count = 0
+
+                print("Prüfe auf bereits importierte Dateien...")
+
+                # Videos filtern - nur importierte überspringen, nicht gesicherte
+                for file_path in video_files:
+                    identity = history_store.compute_identity(file_path)
+                    if identity:
+                        identity_hash, _ = identity
+                        # Prüfe ob bereits IMPORTIERT (nicht nur gesichert)
+                        if not history_store.was_imported(identity_hash):
+                            filtered_videos.append(file_path)
+                        else:
+                            skipped_count += 1
+                    else:
+                        # Bei Hash-Fehler: Datei trotzdem importieren
+                        filtered_videos.append(file_path)
+
+                # Fotos filtern - nur importierte überspringen, nicht gesicherte
+                for file_path in photo_files:
+                    identity = history_store.compute_identity(file_path)
+                    if identity:
+                        identity_hash, _ = identity
+                        # Prüfe ob bereits IMPORTIERT (nicht nur gesichert)
+                        if not history_store.was_imported(identity_hash):
+                            filtered_photos.append(file_path)
+                        else:
+                            skipped_count += 1
+                    else:
+                        # Bei Hash-Fehler: Datei trotzdem importieren
+                        filtered_photos.append(file_path)
+
+                print(f"Import-Filter: {len(video_files) + len(photo_files)} Dateien, "
+                      f"{len(filtered_videos) + len(filtered_photos)} neu, {skipped_count} übersprungen")
+
+                video_files = filtered_videos
+                photo_files = filtered_photos
+
+            # Importiere gefilterte Dateien
             if video_files or photo_files:
                 # Füge Dateien zum Drag&Drop hinzu
                 if self.drag_drop:
@@ -1753,44 +1837,140 @@ class VideoGeneratorApp:
                 if video_files:
                     videos_imported = True
 
+                # Füge zur Historie hinzu wenn Option aktiviert
+                if skip_processed:
+                    history_store = MediaHistoryStore.instance()
+                    now = datetime.now().isoformat()
+
+                    # Videos zur Historie hinzufügen
+                    for file_path in video_files:
+                        identity = history_store.compute_identity(file_path)
+                        if identity:
+                            identity_hash, size_bytes = identity
+                            filename = os.path.basename(file_path)
+                            history_store.upsert(
+                                identity_hash=identity_hash,
+                                filename=filename,
+                                size_bytes=size_bytes,
+                                media_type='video',
+                                imported_at=now
+                            )
+
+                    # Fotos zur Historie hinzufügen
+                    for file_path in photo_files:
+                        identity = history_store.compute_identity(file_path)
+                        if identity:
+                            identity_hash, size_bytes = identity
+                            filename = os.path.basename(file_path)
+                            history_store.upsert(
+                                identity_hash=identity_hash,
+                                filename=filename,
+                                size_bytes=size_bytes,
+                                media_type='photo',
+                                imported_at=now
+                            )
+
                 print(f"Auto-Import: {len(video_files)} Videos und {len(photo_files)} Fotos importiert")
 
-                # messagebox.showinfo("Import erfolgreich",
-                #                   f"SD-Karten Backup erfolgreich importiert:\n"
-                #                   f"{len(video_files)} Videos und {len(photo_files)} Fotos",
-                #                   parent=self.root)
+                # Öffne passenden Tab (Video oder Foto) basierend auf Mehrheit
+                self._switch_to_predominant_tab(len(video_files), len(photo_files))
+
             else:
-                print("Keine Dateien zum Importieren gefunden")
-                messagebox.showwarning("Keine Dateien",
-                                     "Im Backup wurden keine Videos oder Fotos gefunden.",
-                                     parent=self.root)
+                # Keine neuen Dateien gefunden
+                print("Keine neuen Dateien zum Importieren gefunden")
+                if skip_processed:
+                    messagebox.showinfo(
+                        "Keine neuen Dateien",
+                        "Alle Dateien im Backup wurden bereits früher importiert.",
+                        parent=self.root
+                    )
+                else:
+                    messagebox.showwarning(
+                        "Keine Dateien",
+                        "Im Backup wurden keine Videos oder Fotos gefunden.",
+                        parent=self.root
+                    )
 
         except Exception as e:
             print(f"Fehler beim Importieren aus Backup: {e}")
-            messagebox.showerror("Import Fehler",
-                               f"Fehler beim Importieren der Dateien:\n{str(e)}",
-                               parent=self.root)
+            messagebox.showerror(
+                "Import Fehler",
+                f"Fehler beim Importieren der Dateien:\n{str(e)}",
+                parent=self.root
+            )
+
         finally:
-            # Stelle QR-Check Status wieder her
+            # QR-Check Status wiederherstellen
             if qr_check_was_enabled and self.drag_drop and hasattr(self.drag_drop, 'qr_check_enabled'):
                 print("QR-Code-Prüfung wieder aktiviert nach Auto-Import")
                 self.drag_drop.qr_check_enabled.set(True)
 
-                # Trigger QR-Analyse für das erste importierte Video
+                # Trigger QR-Analyse für erstes importiertes Video
                 if videos_imported:
                     print("Starte QR-Analyse für erstes importiertes Video")
                     video_paths = self.drag_drop.get_video_paths()
                     if video_paths:
                         self.run_qr_analysis(video_paths)
 
+    def _switch_to_predominant_tab(self, video_count: int, photo_count: int):
+        """
+        Wechselt automatisch zum Video- oder Foto-Tab basierend darauf,
+        welcher Medientyp häufiger importiert wurde.
+
+        Wechselt beide Notebooks:
+        - Preview-Notebook (Video-/Foto-Preview)
+        - Drag&Drop-Notebook (Video-/Foto-Liste)
+
+        Args:
+            video_count: Anzahl importierter Videos
+            photo_count: Anzahl importierter Fotos
+        """
+        if video_count == 0 and photo_count == 0:
+            return  # Nichts zu tun
+
+        # Bestimme welcher Tab geöffnet werden soll
+        if video_count > photo_count:
+            # Mehr Videos → Video-Tab
+            target_tab = "video"
+            target_index = 0
+            print(f"→ Öffne Video-Tabs (Auto-Import: {video_count} Videos > {photo_count} Fotos)")
+        elif photo_count > video_count:
+            # Mehr Fotos → Foto-Tab
+            target_tab = "photo"
+            target_index = 1
+            print(f"→ Öffne Foto-Tabs (Auto-Import: {photo_count} Fotos > {video_count} Videos)")
+        else:
+            # Gleich viele → Video-Tab als Standard
+            target_tab = "video"
+            target_index = 0
+            print(f"→ Öffne Video-Tabs (Auto-Import: gleich viele - {video_count} Videos = {photo_count} Fotos)")
+
+        # Wechsle zum passenden Tab im Preview-Notebook
+        if self.preview_notebook and hasattr(self.preview_notebook, 'select'):
+            try:
+                if target_tab == "video" and self.video_tab:
+                    self.preview_notebook.select(self.video_tab)
+                    print("  ✅ Preview: Video-Tab aktiviert")
+                elif target_tab == "photo" and self.foto_tab:
+                    self.preview_notebook.select(self.foto_tab)
+                    print("  ✅ Preview: Foto-Tab aktiviert")
+            except Exception as e:
+                print(f"  ⚠️ Fehler beim Preview-Tab-Wechsel: {e}")
+
+        # Wechsle zum passenden Tab im Drag&Drop-Notebook
+        if self.drag_drop and hasattr(self.drag_drop, 'notebook'):
+            try:
+                # Verwende Index für einfacheren Zugriff (0=Videos, 1=Fotos)
+                self.drag_drop.notebook.select(target_index)
+                print(f"  ✅ Drag&Drop: {'Video' if target_index == 0 else 'Foto'}-Tab aktiviert")
+            except Exception as e:
+                print(f"  ⚠️ Fehler beim Drag&Drop-Tab-Wechsel: {e}")
 
     def run(self):
         """Startet die Hauptloop der Anwendung"""
-
         try:
             initialize_updater(self.root, self.APP_VERSION)
         except Exception as e:
             print(f"Fehler beim Initialisieren des Updaters: {e}")
-
         self.root.mainloop()
 

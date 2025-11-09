@@ -26,6 +26,9 @@ class ConfigManager:
                     # Stelle sicher, dass server_url existiert
                     if "server_url" not in settings:
                         settings["server_url"] = "smb://169.254.169.254/aktuell"
+                    # Füge neuen Key für Skip Processed hinzu wenn nicht vorhanden
+                    if "sd_skip_processed" not in settings:
+                        settings["sd_skip_processed"] = False
                     return settings
             except (json.JSONDecodeError, FileNotFoundError):
                 return self.get_default_settings()
@@ -48,6 +51,8 @@ class ConfigManager:
             "sd_auto_backup": False,
             "sd_clear_after_backup": False,
             "sd_auto_import": False,
+            "sd_skip_processed": False,  # Nur neue Dateien sichern/importieren
+            "sd_skip_processed_manual": False,  # Auch manuellen Import prüfen
             # Hardware-Beschleunigung
             "hardware_acceleration_enabled": True,  # Hardware-Beschleunigung standardmäßig aktiviert
             # Paralleles Processing

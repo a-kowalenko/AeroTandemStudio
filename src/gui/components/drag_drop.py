@@ -8,6 +8,7 @@ import subprocess
 import time
 
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
+from src.utils.media_history import MediaHistoryStore
 
 
 class DragDropFrame:
@@ -390,10 +391,27 @@ class DragDropFrame:
 
             imported_paths = []
             for video_path in new_videos:
+                # Prüfe ob Datei bereits importiert wurde (via MediaHistoryStore)
+                settings = self.app.config.get_settings()
+                skip_processed = settings.get("sd_skip_processed", False)
+                skip_processed_manual = settings.get("sd_skip_processed_manual", False)
+
+                # Nur prüfen wenn beide Optionen aktiv sind
+                if skip_processed and skip_processed_manual:
+                    history_store = MediaHistoryStore.instance()
+                    identity = history_store.compute_identity(video_path)
+
+                    if identity:
+                        identity_hash, _ = identity
+                        if history_store.was_imported(identity_hash):
+                            print(f"  ⚠️ Überspringe bereits importierte Datei: {os.path.basename(video_path)}")
+                            continue  # Datei überspringen, nicht importieren
+
                 # Importiere Video (kopiere in Working-Folder)
                 imported_path = self._import_video(video_path)
                 if imported_path:
-                    # Prüfe auf Duplikate (basierend auf Dateigröße und -inhalt)
+                    # Zusätzliche Duplikat-Prüfung innerhalb des aktuellen Imports
+                    # (falls gleiche Datei mehrmals gleichzeitig gedroppt wurde)
                     try:
                         imported_size = os.path.getsize(imported_path)
                         is_duplicate = False
@@ -401,8 +419,7 @@ class DragDropFrame:
                         for existing_path in self.video_paths:
                             try:
                                 if os.path.getsize(existing_path) == imported_size:
-                                    # Gleiche Größe - prüfe ob es wirklich die gleiche Datei ist
-                                    # (könnte auch unterschiedliche Dateien mit gleicher Größe sein)
+                                    # Gleiche Größe - prüfe Dateiname
                                     if os.path.basename(existing_path) == os.path.basename(imported_path):
                                         is_duplicate = True
                                         break
@@ -412,8 +429,23 @@ class DragDropFrame:
                         if not is_duplicate:
                             imported_paths.append(imported_path)
                             new_videos_added = True
+
+                            # Schreibe in Historie wenn Option aktiv
+                            if skip_processed and skip_processed_manual:
+                                from datetime import datetime
+                                history_store = MediaHistoryStore.instance()
+                                identity = history_store.compute_identity(video_path)
+                                if identity:
+                                    identity_hash, size_bytes = identity
+                                    history_store.upsert(
+                                        identity_hash=identity_hash,
+                                        filename=os.path.basename(video_path),
+                                        size_bytes=size_bytes,
+                                        media_type='video',
+                                        imported_at=datetime.now().isoformat()
+                                    )
                         else:
-                            print(f"  ⚠️ Überspringe Duplikat: {os.path.basename(imported_path)}")
+                            print(f"  ⚠️ Überspringe Duplikat in aktuellem Import: {os.path.basename(imported_path)}")
                             # Lösche die Kopie wieder
                             try:
                                 os.remove(imported_path)
@@ -431,11 +463,45 @@ class DragDropFrame:
             if imported_paths:
                 print(f"✅ {len(imported_paths)} Video(s) erfolgreich importiert")
 
-        # Fotos hinzufügen (ohne Duplikate)
-        for photo_path in new_photos:
-            if photo_path not in self.photo_paths:
-                self.photo_paths.append(photo_path)
-                new_photos_added = True
+        # Fotos hinzufügen (mit Duplikat-Prüfung)
+        if new_photos:
+            print(f"\n📸 Importiere {len(new_photos)} Foto(s)...")
+
+            settings = self.app.config.get_settings()
+            skip_processed = settings.get("sd_skip_processed", False)
+            skip_processed_manual = settings.get("sd_skip_processed_manual", False)
+
+            for photo_path in new_photos:
+                # Prüfe ob bereits importiert (nur wenn beide Optionen aktiv)
+                if skip_processed and skip_processed_manual:
+                    history_store = MediaHistoryStore.instance()
+                    identity = history_store.compute_identity(photo_path)
+
+                    if identity:
+                        identity_hash, _ = identity
+                        if history_store.was_imported(identity_hash):
+                            print(f"  ⚠️ Überspringe bereits importiertes Foto: {os.path.basename(photo_path)}")
+                            continue
+
+                # Prüfe auf Duplikate in aktueller Liste
+                if photo_path not in self.photo_paths:
+                    self.photo_paths.append(photo_path)
+                    new_photos_added = True
+
+                    # Schreibe in Historie wenn Option aktiv
+                    if skip_processed and skip_processed_manual:
+                        from datetime import datetime
+                        history_store = MediaHistoryStore.instance()
+                        identity = history_store.compute_identity(photo_path)
+                        if identity:
+                            identity_hash, size_bytes = identity
+                            history_store.upsert(
+                                identity_hash=identity_hash,
+                                filename=os.path.basename(photo_path),
+                                size_bytes=size_bytes,
+                                media_type='photo',
+                                imported_at=datetime.now().isoformat()
+                            )
 
         self._update_video_table()
         self._update_photo_table()

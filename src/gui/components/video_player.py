@@ -1,16 +1,15 @@
 ﻿import sys
 import tkinter as tk
 
+# VLC Import nur wenn benötigt (wird in __init__ geladen)
+vlc = None
+
 try:
     from src.utils.path_helper import setup_vlc_paths
     setup_vlc_paths()
 except ImportError:
     print("Warnung: path_helper nicht gefunden. VLC funktioniert möglicherweise nicht in der gebündelten App.")
 
-
-
-
-import vlc
 
 class VideoPlayer:
     """
@@ -19,6 +18,17 @@ class VideoPlayer:
     """
 
     def __init__(self, parent, app_instance):
+        global vlc
+
+        # Lazy VLC Import - erst hier, nicht beim Modul-Import
+        if vlc is None:
+            try:
+                import vlc as vlc_module
+                vlc = vlc_module
+            except ImportError:
+                print("⚠️ VLC Modul konnte nicht importiert werden")
+                vlc = None
+
         self.parent = parent
         self.app = app_instance
         self.clip_durations = []

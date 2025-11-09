@@ -80,7 +80,7 @@ class VideoGeneratorApp:
     def _init_step_1(self):
         """Schritt 1: GUI erstellen - aufgeteilt in Sub-Schritte"""
         if self.splash_callback:
-            self.splash_callback("Erstelle Benutzeroberfläche...")
+            self.splash_callback("Erstelle Fenster...")
 
         # Starte GUI-Erstellung in Chunks
         self._setup_gui_step_1()
@@ -104,14 +104,14 @@ class VideoGeneratorApp:
 
         self.root.config(padx=20, pady=0)
 
-        # Force update damit Spinner weiterläuft
-        self.root.update_idletasks()
-
         # Nächster Chunk
         self.root.after(1, self._setup_gui_step_2)
 
     def _setup_gui_step_2(self):
         """GUI Setup Teil 2: Header und Container"""
+        if self.splash_callback:
+            self.splash_callback("Erstelle Layout...")
+
         # Header
         self.create_header()
 
@@ -125,33 +125,27 @@ class VideoGeneratorApp:
         self.right_frame = tk.Frame(self.main_container, width=350)
         self.right_frame.pack(side="right", fill="y", padx=(20, 0))
 
-        # Force update
-        self.root.update_idletasks()
-
         # Nächster Chunk
         self.root.after(1, self._setup_gui_step_3)
 
     def _setup_gui_step_3(self):
         """GUI Setup Teil 3: Komponenten erstellen"""
-        # Dies ruft setup_gui() auf, das alle Komponenten erstellt
-        # Wir müssen die originale Methode aufrufen, aber Schritt für Schritt
+        if self.splash_callback:
+            self.splash_callback("Lade Formulare...")
 
         # Formular und Drag&Drop
         self.form_fields = FormFields(self.left_frame, self.config, self)
 
-        # Force update
-        self.root.update_idletasks()
-
         self.drag_drop = DragDropFrame(self.left_frame, self)
-
-        # Force update
-        self.root.update_idletasks()
 
         # Nächster Chunk
         self.root.after(1, self._setup_gui_step_4)
 
     def _setup_gui_step_4(self):
         """GUI Setup Teil 4: Tabs und Preview"""
+        if self.splash_callback:
+            self.splash_callback("Initialisiere Video Player...")
+
         # Tabs erstellen
         style = ttk.Style()
         style.configure('Preview.TNotebook.Tab', font=('Arial', 8, 'bold'), padding=[20, 5])
@@ -165,23 +159,18 @@ class VideoGeneratorApp:
         # Video Player und Preview
         self.video_player = VideoPlayer(self.video_tab, self)
 
-        # Force update
-        self.root.update_idletasks()
-
         self.video_preview = VideoPreview(self.video_tab, self)
-
-        # Force update
-        self.root.update_idletasks()
 
         # Nächster Chunk
         self.root.after(1, self._setup_gui_step_5)
 
     def _setup_gui_step_5(self):
         """GUI Setup Teil 5: Foto-Preview und Button"""
+        if self.splash_callback:
+            self.splash_callback("Initialisiere Foto Vorschau...")
+
         self.photo_preview = PhotoPreview(self.foto_tab, self)
 
-        # Force update
-        self.root.update_idletasks()
 
         # Rufe den Rest von setup_gui auf
         self._finish_setup_gui()
@@ -252,11 +241,12 @@ class VideoGeneratorApp:
         self.root.after(10, self._init_step_3)
 
     def _init_step_3(self):
-        """Schritt 3: SD-Monitor initialisieren"""
+        """Schritt 3: Finalisierung"""
         if self.splash_callback:
-            self.splash_callback("Initialisiere SD-Karten Monitor...")
+            self.splash_callback("Finalisiere...")
 
-        self.initialize_sd_card_monitor()
+        # SD-Monitor wird NACH Splash-Schließung gestartet (verzögert)
+        # Hier nur vorbereiten
         self.root.after(10, self._init_complete)
 
     def _init_complete(self):
@@ -274,6 +264,24 @@ class VideoGeneratorApp:
         self.update_watermark_column_visibility()
 
         print("✅ App-Initialisierung abgeschlossen")
+
+        # SD-Monitor verzögert starten (800ms nach Splash-Schließung)
+        self.root.after(800, self._delayed_sd_monitor_start)
+
+    def _delayed_sd_monitor_start(self):
+        """Startet SD-Monitor verzögert nach UI-Initialisierung"""
+        try:
+            if self.splash_callback:
+                # Splash könnte bereits geschlossen sein, ignoriere Fehler
+                try:
+                    self.splash_callback("Starte SD-Überwachung...")
+                except:
+                    pass
+
+            self.initialize_sd_card_monitor()
+            print("✅ SD-Karten Monitor gestartet")
+        except Exception as e:
+            print(f"⚠️ Fehler beim Starten des SD-Monitors: {e}")
 
 
     def setup_gui(self):

@@ -4,7 +4,12 @@ Erkennt automatisch verfügbare Hardware und gibt optimierte FFmpeg-Parameter zu
 """
 import subprocess
 import platform
-from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
+import threading
+import json
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW, CONFIG_DIR
 
 
 class HardwareAccelerationDetector:
@@ -14,6 +19,8 @@ class HardwareAccelerationDetector:
         self.system = platform.system()
         self.detected_hw = None
         self.hw_type = None
+        self._cache_file = os.path.join(CONFIG_DIR, 'hw_cache.json')
+        self._detection_timeout = 2.0  # Maximale Zeit für Hardware-Erkennung
 
     def detect_hardware(self):
         """
@@ -22,6 +29,14 @@ class HardwareAccelerationDetector:
         """
         if self.detected_hw is not None:
             return self.detected_hw
+
+        # Versuche aus Cache zu laden
+        cached_result = self._load_from_cache()
+        if cached_result:
+            print(f"✓ Hardware aus Cache geladen: {cached_result.get('type', 'unknown')}")
+            self.detected_hw = cached_result
+            self.hw_type = cached_result.get('type')
+            return cached_result
 
         result = {
             'available': False,
@@ -39,15 +54,104 @@ class HardwareAccelerationDetector:
         elif self.system == 'Linux':
             result = self._detect_linux_hardware()
 
+        # Cache das Ergebnis
+        self._save_to_cache(result)
+
         self.detected_hw = result
         self.hw_type = result.get('type')
         return result
 
-    def _detect_windows_hardware(self):
-        """Erkennt Hardware-Beschleunigung unter Windows"""
-        # Priorität: NVIDIA NVENC > AMD AMF > Intel Quick Sync
+    def detect_async(self, callback, timeout=None):
+        """
+        Asynchrone Hardware-Erkennung in eigenem Thread.
 
-        # 1. Prüfe NVIDIA NVENC (nur wenn NVIDIA GPU vorhanden)
+        Args:
+            callback: Funktion die mit dem Ergebnis aufgerufen wird (result_dict)
+            timeout: Maximale Wartezeit in Sekunden (default: self._detection_timeout)
+        """
+        if timeout is None:
+            timeout = self._detection_timeout
+
+        def detection_worker():
+            start_time = time.time()
+            try:
+                result = self.detect_hardware()
+                elapsed = time.time() - start_time
+                print(f"⏱️ Hardware-Erkennung abgeschlossen in {elapsed:.2f}s")
+                callback(result)
+            except Exception as e:
+                print(f"⚠️ Fehler bei Hardware-Erkennung: {e}")
+                # Fallback zu Software-Encoding
+                fallback = {
+                    'available': False,
+                    'type': None,
+                    'encoder': None,
+                    'decoder': None,
+                    'hwaccel': None,
+                    'device': None
+                }
+                callback(fallback)
+
+        thread = threading.Thread(target=detection_worker, daemon=True)
+        thread.start()
+
+    def _load_from_cache(self):
+        """Lädt Hardware-Info aus Cache-Datei"""
+        try:
+            if os.path.exists(self._cache_file):
+                # Prüfe Alter des Caches (max 7 Tage)
+                cache_age = time.time() - os.path.getmtime(self._cache_file)
+                if cache_age > 7 * 24 * 3600:  # 7 Tage
+                    print("🗑️ Hardware-Cache zu alt, wird neu erkannt")
+                    return None
+
+                with open(self._cache_file, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"⚠️ Fehler beim Laden des Hardware-Cache: {e}")
+        return None
+
+    def _save_to_cache(self, result):
+        """Speichert Hardware-Info in Cache-Datei"""
+        try:
+            os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
+            with open(self._cache_file, 'w') as f:
+                json.dump(result, f, indent=2)
+            print(f"💾 Hardware-Info gecacht: {result.get('type', 'none')}")
+        except Exception as e:
+            print(f"⚠️ Fehler beim Speichern des Hardware-Cache: {e}")
+
+    def _detect_windows_hardware(self):
+        """Erkennt Hardware-Beschleunigung unter Windows (parallel mit Early-Bailout)"""
+
+        # Parallele GPU-Checks mit ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                executor.submit(self._check_nvidia_hw): 'nvidia',
+                executor.submit(self._check_amd_hw): 'amd',
+                executor.submit(self._check_intel_hw): 'intel'
+            }
+
+            # Warte auf ersten erfolgreichen Check (Early-Bailout)
+            for future in as_completed(futures, timeout=self._detection_timeout):
+                try:
+                    result = future.result()
+                    if result and result.get('available'):
+                        # Ersten verfügbaren Encoder gefunden - breche ab
+                        print(f"✓ Hardware-Beschleunigung gefunden: {result.get('type')}")
+                        return result
+                except TimeoutError:
+                    print("⚠️ Hardware-Check Timeout")
+                    continue
+                except Exception as e:
+                    print(f"⚠️ Hardware-Check Fehler: {e}")
+                    continue
+
+        # Kein Hardware-Encoder gefunden
+        return {'available': False, 'type': None}
+
+    def _check_nvidia_hw(self):
+        """Prüft NVIDIA NVENC"""
         if self._has_nvidia_gpu() and self._check_nvenc_available():
             return {
                 'available': True,
@@ -60,8 +164,10 @@ class HardwareAccelerationDetector:
                 'device': None,
                 'extra_params': ['-preset', 'p4', '-tune', 'hq']
             }
+        return None
 
-        # 2. Prüfe AMD AMF (nur wenn AMD GPU vorhanden)
+    def _check_amd_hw(self):
+        """Prüft AMD AMF"""
         if self._has_amd_gpu() and self._check_amf_available():
             return {
                 'available': True,
@@ -73,8 +179,10 @@ class HardwareAccelerationDetector:
                 'device': None,
                 'extra_params': ['-usage', 'transcoding', '-quality', 'speed']
             }
+        return None
 
-        # 3. Prüfe Intel Quick Sync (nur wenn Intel GPU vorhanden)
+    def _check_intel_hw(self):
+        """Prüft Intel Quick Sync"""
         if self._has_intel_gpu() and self._check_qsv_available():
             return {
                 'available': True,
@@ -85,12 +193,9 @@ class HardwareAccelerationDetector:
                 'decoder_hevc': 'hevc_qsv',
                 'hwaccel': 'qsv',
                 'device': None,
-                # Für QSV: Verwende ICQ (Intelligent Constant Quality) für beste Qualität ohne Bitrate
-                # global_quality 23 entspricht ungefähr CRF 23 bei libx264
                 'extra_params': ['-global_quality', '23', '-preset', 'medium']
             }
-
-        return {'available': False, 'type': None}
+        return None
 
     def _has_nvidia_gpu(self):
         """Prüft ob eine NVIDIA GPU im System vorhanden ist"""
@@ -251,142 +356,45 @@ class HardwareAccelerationDetector:
         return False
 
     def _check_nvenc_available(self):
-        """Prüft ob NVIDIA NVENC verfügbar ist und funktionsfähig"""
+        """Prüft ob NVIDIA NVENC verfügbar ist (nur Encoder-Liste, kein Init-Test)"""
         try:
-            # Prüfe ob Encoder in FFmpeg verfügbar ist
+            # Nur prüfen ob Encoder in FFmpeg verfügbar ist
             result = subprocess.run(
                 ['ffmpeg', '-hide_banner', '-encoders'],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=3,
                 creationflags=SUBPROCESS_CREATE_NO_WINDOW
             )
-
-            if 'h264_nvenc' not in result.stdout:
-                return False
-
-            # Zusätzlicher Test: Versuche tatsächlich den Encoder zu initialisieren
-            # Dies erkennt Treiber-Probleme frühzeitig
-            test_result = subprocess.run(
-                ['ffmpeg', '-f', 'lavfi', '-i', 'nullsrc=s=256x256:d=0.1',
-                 '-c:v', 'h264_nvenc', '-f', 'null', '-'],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=SUBPROCESS_CREATE_NO_WINDOW
-            )
-
-            # Prüfe auf Treiber-Fehler oder fehlende Hardware
-            if test_result.returncode != 0:
-                stderr = test_result.stderr.lower()
-                error_indicators = [
-                    'driver does not support',
-                    'nvenc api version',
-                    'cannot load',
-                    'no nvenc capable devices found',
-                    'no device available',
-                    'failed loading nvcuda.dll'
-                ]
-                if any(err in stderr for err in error_indicators):
-                    print("⚠️ NVENC gefunden, aber nicht funktionsfähig")
-                    print(f"   Fehler: {test_result.stderr[:200]}")
-                    return False
-
-            return True
-
+            return 'h264_nvenc' in result.stdout
         except:
             return False
 
     def _check_amf_available(self):
-        """Prüft ob AMD AMF verfügbar ist und funktionsfähig"""
+        """Prüft ob AMD AMF verfügbar ist (nur Encoder-Liste, kein Init-Test)"""
         try:
-            # Prüfe ob Encoder in FFmpeg verfügbar ist
             result = subprocess.run(
                 ['ffmpeg', '-hide_banner', '-encoders'],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=3,
                 creationflags=SUBPROCESS_CREATE_NO_WINDOW
             )
-
-            if 'h264_amf' not in result.stdout:
-                return False
-
-            # Zusätzlicher Test: Versuche tatsächlich den Encoder zu initialisieren
-            # Teste mit minimalen Parametern (keine extra params)
-            test_result = subprocess.run(
-                ['ffmpeg', '-f', 'lavfi', '-i', 'nullsrc=s=256x256:d=0.1',
-                 '-c:v', 'h264_amf',
-                 '-f', 'null', '-'],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=SUBPROCESS_CREATE_NO_WINDOW
-            )
-
-            # Prüfe auf Encoder-Fehler
-            if test_result.returncode != 0:
-                stderr = test_result.stderr.lower()
-                amf_errors = [
-                    'could not open encoder',
-                    'unable to parse option',
-                    'error setting option',
-                    'amf encoder error',
-                    'no device found',
-                    'amf context not initialized'
-                ]
-
-                if any(err in stderr for err in amf_errors):
-                    print("⚠️ AMF Encoder gefunden, aber nicht funktionsfähig")
-                    print("   Mögliche Gründe: Treiber zu alt, GPU nicht kompatibel, oder AMD-Software fehlt")
-                    return False
-                # Andere Fehler ignorieren
-
-            return True
-
+            return 'h264_amf' in result.stdout
         except Exception:
             return False
 
     def _check_qsv_available(self):
-        """Prüft ob Intel Quick Sync verfügbar ist und funktionsfähig"""
+        """Prüft ob Intel Quick Sync verfügbar ist (nur Encoder-Liste, kein Init-Test)"""
         try:
-            # Prüfe ob Encoder in FFmpeg verfügbar ist
             result = subprocess.run(
                 ['ffmpeg', '-hide_banner', '-encoders'],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=3,
                 creationflags=SUBPROCESS_CREATE_NO_WINDOW
             )
-
-            if 'h264_qsv' not in result.stdout:
-                return False
-
-            # Zusätzlicher Test: Versuche tatsächlich den Encoder zu initialisieren
-            test_result = subprocess.run(
-                ['ffmpeg', '-f', 'lavfi', '-i', 'nullsrc=s=256x256:d=0.1',
-                 '-c:v', 'h264_qsv', '-f', 'null', '-'],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=SUBPROCESS_CREATE_NO_WINDOW
-            )
-
-            # Prüfe auf Encoder-Fehler
-            if test_result.returncode != 0:
-                stderr = test_result.stderr.lower()
-                qsv_errors = [
-                    'failed to initialize',
-                    'no device found',
-                    'cannot load',
-                    'not available'
-                ]
-                if any(err in stderr for err in qsv_errors):
-                    print("⚠️ QSV Encoder gefunden, aber nicht funktionsfähig")
-                    return False
-
-            return True
-
+            return 'h264_qsv' in result.stdout
         except:
             return False
 

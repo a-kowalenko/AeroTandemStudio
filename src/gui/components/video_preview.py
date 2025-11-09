@@ -75,42 +75,53 @@ class VideoPreview:
         self.create_widgets()
 
     def _init_hardware_acceleration(self):
-        """Initialisiert Hardware-Beschleunigung basierend auf Einstellungen"""
+        """Initialisiert Hardware-Beschleunigung basierend auf Einstellungen (asynchron)"""
+        # Sofortiger Software-Fallback - Hardware wird asynchron nachgeladen
         self.hw_accel_enabled = False
-        self.parallel_processing_enabled = True  # NEU: Default-Wert
+        self.parallel_processing_enabled = True
+        self.hw_detector = HardwareAccelerationDetector()
+        self.parallel_processor = None
 
         if self.app and hasattr(self.app, 'config'):
             settings = self.app.config.get_settings()
-            self.hw_accel_enabled = settings.get("hardware_acceleration_enabled", True)
-            self.parallel_processing_enabled = settings.get("parallel_processing_enabled", True)  # NEU
+            hw_accel_setting = settings.get("hardware_acceleration_enabled", True)
+            self.parallel_processing_enabled = settings.get("parallel_processing_enabled", True)
 
-            if self.hw_accel_enabled:
-                hw_info = self.hw_detector.detect_hardware()
-                if hw_info['available']:
-                    print(f"✓ VideoPreview: Hardware-Beschleunigung aktiviert: {self.hw_detector.get_hardware_info_string()}")
-                else:
-                    print("⚠ VideoPreview: Hardware-Beschleunigung aktiviert, aber keine kompatible Hardware gefunden")
-                    print("  → Fallback auf Software-Encoding für Vorschau")
+            if hw_accel_setting:
+                # Starte Hardware-Erkennung asynchron
+                print("🔄 Starte Hardware-Erkennung asynchron...")
+                self.hw_detector.detect_async(self._on_hardware_detected)
             else:
                 print("ℹ VideoPreview: Hardware-Beschleunigung deaktiviert (Software-Encoding)")
 
-            # NEU: Info über Paralleles Processing
+            # Initialisiere ParallelProcessor mit Software-Encoding
             if self.parallel_processing_enabled:
                 cpu_count = multiprocessing.cpu_count()
-                if self.hw_accel_enabled:
-                    workers = min(cpu_count, 4)
-                else:
-                    workers = max(1, cpu_count // 2)
-                print(f"🚀 VideoPreview: Paralleles Processing aktiviert: {workers} Worker-Threads ({cpu_count} CPU-Kerne)")
-                # Initialisiere ParallelVideoProcessor
-                self.parallel_processor = ParallelVideoProcessor(hw_accel_enabled=self.hw_accel_enabled)
+                workers = max(1, cpu_count // 2)
+                print(f"🚀 VideoPreview: Paralleles Processing aktiviert: {workers} Worker (Software-Modus)")
+                self.parallel_processor = ParallelVideoProcessor(hw_accel_enabled=False)
             else:
-                print("ℹ VideoPreview: Paralleles Processing deaktiviert (sequenziell)")
-                self.parallel_processor = None
+                print("ℹ VideoPreview: Paralleles Processing deaktiviert")
         else:
-            # Fallback wenn keine Config verfügbar
             print("ℹ VideoPreview: Keine Config verfügbar, verwende Software-Encoding")
-            self.parallel_processor = None
+
+    def _on_hardware_detected(self, hw_info):
+        """
+        Callback wenn Hardware-Erkennung abgeschlossen ist.
+        Wird asynchron aus Hardware-Thread aufgerufen.
+        """
+        if hw_info.get('available'):
+            self.hw_accel_enabled = True
+            print(f"✓ VideoPreview: Hardware-Beschleunigung aktiviert: {self.hw_detector.get_hardware_info_string()}")
+
+            # Update ParallelProcessor mit Hardware-Beschleunigung
+            if self.parallel_processing_enabled and self.parallel_processor:
+                cpu_count = multiprocessing.cpu_count()
+                workers = min(cpu_count, 4)
+                print(f"🔄 Update: Paralleles Processing mit Hardware: {workers} Worker")
+                self.parallel_processor = ParallelVideoProcessor(hw_accel_enabled=True)
+        else:
+            print("ℹ VideoPreview: Keine Hardware-Beschleunigung verfügbar, bleibe bei Software-Encoding")
 
     def reload_hardware_acceleration_settings(self):
         """

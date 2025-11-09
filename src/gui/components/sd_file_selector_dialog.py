@@ -28,8 +28,9 @@ class SDFileSelectorDialog:
         self.view_mode = "thumbnail"  # "thumbnail" oder "details"
         self.current_preview = None  # Aktuell angezeigtes Preview-Fenster
 
-        # NEU: Markierung durch Set statt Checkbox-Variablen
-        self.selected_paths = set()  # Set der ausgewählten Pfade
+        # NEU: Zwei-Stufen-Auswahl
+        self.markierte_paths = set()  # Set der markierten Pfade (temporär)
+        self.selected_paths = set()  # Set der FINAL selektierten Pfade (für Import)
 
         # NEU: Filter-Variablen
         self.filter_type_var = tk.StringVar(value="Alle")
@@ -63,7 +64,7 @@ class SDFileSelectorDialog:
         """Zeigt den Dialog an"""
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("Dateien auswählen")
-        self.dialog.geometry("1000x800")  # Erhöht von 700 auf 800
+        self.dialog.geometry("1200x800")  # Erhöht von 700 auf 800
         self.dialog.transient(self.parent)
         self.dialog.grab_set()
 
@@ -131,9 +132,9 @@ class SDFileSelectorDialog:
                                        font=("Arial", 10))
         self.selection_label.pack(side='left')
 
-        # Hinweis für Deselektierung
+        # Hinweis für Auswahl
         hint_label = tk.Label(info_frame,
-                             text="💡 Tipp: Klick = Toggle | Strg+Klick = Gezielt | Drag = Mehrfach",
+                             text="💡 Tipp: Klick/Drag = Markieren | Button = Zur Auswahl hinzufügen",
                              font=("Arial", 8), fg="#666")
         hint_label.pack(side='left', padx=15)
 
@@ -168,10 +169,19 @@ class SDFileSelectorDialog:
         button_group = tk.Frame(right_controls)
         button_group.pack(side='right', padx=(10, 0))
 
-        tk.Button(button_group, text="Alle auswählen",
-                 command=self.select_all, font=("Arial", 9)).pack(side='left', padx=2)
-        tk.Button(button_group, text="Alle abwählen",
-                 command=self.deselect_all, font=("Arial", 9)).pack(side='left', padx=2)
+        # NEU: Button "X Dateien auswählen" (nur sichtbar wenn markiert)
+        self.add_to_selection_button = tk.Button(button_group,
+                                                 text="0 Dateien auswählen",
+                                                 command=self.add_marked_to_selection,
+                                                 font=("Arial", 9, "bold"),
+                                                 bg="#4CAF50", fg="white")
+        # Initial versteckt
+        # self.add_to_selection_button.pack(side='left', padx=2)
+
+        tk.Button(button_group, text="Alle markieren",
+                 command=self.mark_all, font=("Arial", 9)).pack(side='left', padx=2)
+        tk.Button(button_group, text="Markierung aufheben",
+                 command=self.unmark_all, font=("Arial", 9)).pack(side='left', padx=2)
 
         # Filter (rechts, vor Buttons)
         filter_group = tk.Frame(right_controls)
@@ -206,9 +216,45 @@ class SDFileSelectorDialog:
         else:
             self.filter_sort_order_var.set("↓ Ab")
 
-        # Container für die Ansichten
-        self.view_container = tk.Frame(main_frame)
-        self.view_container.pack(fill='both', expand=True, pady=(0, 10))
+        # Container für die Ansichten - NEU: Split in Links (Tab-Content) und Rechts (Selektierte Files)
+        main_content_frame = tk.Frame(main_frame)
+        main_content_frame.pack(fill='both', expand=True, pady=(0, 10))
+
+        # Links: Tab-Content (Kacheln/Details)
+        self.view_container = tk.Frame(main_content_frame)
+        self.view_container.pack(side='left', fill='both', expand=True)
+
+        # Rechts: Selektierte Files Liste
+        self.selection_list_frame = tk.Frame(main_content_frame, bg='#f5f5f5', width=250)
+        self.selection_list_frame.pack(side='right', fill='y', padx=(10, 0))
+        self.selection_list_frame.pack_propagate(False)
+
+        # Header für Selektions-Liste
+        selection_header = tk.Frame(self.selection_list_frame, bg='#e0e0e0')
+        selection_header.pack(fill='x', pady=(0, 5))
+
+        tk.Label(selection_header, text="📋 Ausgewählte Dateien",
+                font=("Arial", 10, "bold"), bg='#e0e0e0').pack(side='left', padx=5, pady=5)
+
+        # Scrollbare Liste für selektierte Files
+        selection_canvas = tk.Canvas(self.selection_list_frame, bg='white', highlightthickness=0)
+        selection_scrollbar = ttk.Scrollbar(self.selection_list_frame, orient='vertical',
+                                           command=selection_canvas.yview)
+
+        self.selection_list_container = tk.Frame(selection_canvas, bg='white')
+        self.selection_list_container.bind(
+            "<Configure>",
+            lambda e: selection_canvas.configure(scrollregion=selection_canvas.bbox("all"))
+        )
+
+        selection_canvas.create_window((0, 0), window=self.selection_list_container, anchor="nw")
+        selection_canvas.configure(yscrollcommand=selection_scrollbar.set)
+
+        selection_canvas.pack(side='left', fill='both', expand=True)
+        selection_scrollbar.pack(side='right', fill='y')
+
+        # Speichere Canvas-Referenz
+        self.selection_canvas = selection_canvas
 
         # Buttons
         button_frame = tk.Frame(main_frame)
@@ -287,20 +333,13 @@ class SDFileSelectorDialog:
         self.is_drag_selecting = False
         self.drag_rect = None
 
-        # NEU: Drag-Selection - Rectangle wird über Widgets gezeichnet
-        def on_canvas_click(event):
-            # Nur auf leerem Canvas-Bereich
-            # Prüfe ob Canvas-Item unter Mauszeiger ist
-            x = canvas.canvasx(event.x)
-            y = canvas.canvasy(event.y)
+        # NEU: Drag-Selection direkt auf Haupt-Canvas
+        # Canvas-Items (create_rectangle) liegen ÜBER create_window Widgets!
 
-            # Finde alle Items an dieser Position
-            items = canvas.find_overlapping(x, y, x, y)
-
-            # Wenn nur scrollable_frame window vorhanden, dann leerer Bereich
-            # (Klick auf Widgets würde nicht hier ankommen)
-            self.drag_start_x = x
-            self.drag_start_y = y
+        def on_canvas_press(event):
+            # Speichere Start für Drag (in Canvas-Koordinaten mit Scroll-Offset)
+            self.drag_start_x = canvas.canvasx(event.x)
+            self.drag_start_y = canvas.canvasy(event.y)
             self.is_drag_selecting = False
             self.drag_rect = None
 
@@ -308,30 +347,32 @@ class SDFileSelectorDialog:
             if self.drag_start_x is None:
                 return
 
-            x = canvas.canvasx(event.x)
-            y = canvas.canvasy(event.y)
+            # Aktuelle Position (Canvas-Koordinaten)
+            current_x = canvas.canvasx(event.x)
+            current_y = canvas.canvasy(event.y)
 
             # Prüfe Mindestbewegung
             if not self.is_drag_selecting:
-                dx = abs(x - self.drag_start_x)
-                dy = abs(y - self.drag_start_y)
+                dx = abs(current_x - self.drag_start_x)
+                dy = abs(current_y - self.drag_start_y)
 
                 if dx > 10 or dy > 10:
                     self.is_drag_selecting = True
-                    # Erstelle Rectangle auf Canvas (wird über Widgets gezeichnet)
+                    # Erstelle Rectangle auf Haupt-Canvas (über Widgets!)
                     self.drag_rect = canvas.create_rectangle(
                         self.drag_start_x, self.drag_start_y,
-                        x, y,
+                        current_x, current_y,
                         outline='#2196F3', width=3,
                         fill='#BBDEFB',
-                        stipple='gray50'
+                        stipple='gray50',
+                        tags='drag_rect'
                     )
 
             # Update Rectangle
             if self.is_drag_selecting and self.drag_rect:
                 canvas.coords(self.drag_rect,
                              self.drag_start_x, self.drag_start_y,
-                             x, y)
+                             current_x, current_y)
 
         def on_canvas_release(event):
             if not self.is_drag_selecting:
@@ -339,26 +380,32 @@ class SDFileSelectorDialog:
                 self.drag_start_y = None
                 return
 
-            x = canvas.canvasx(event.x)
-            y = canvas.canvasy(event.y)
+            # Aktuelle Position (Canvas-Koordinaten)
+            current_x = canvas.canvasx(event.x)
+            current_y = canvas.canvasy(event.y)
 
             # Berechne Auswahlbereich
-            sel_x1 = min(self.drag_start_x, x)
-            sel_y1 = min(self.drag_start_y, y)
-            sel_x2 = max(self.drag_start_x, x)
-            sel_y2 = max(self.drag_start_y, y)
+            canvas_x1 = min(self.drag_start_x, current_x)
+            canvas_y1 = min(self.drag_start_y, current_y)
+            canvas_x2 = max(self.drag_start_x, current_x)
+            canvas_y2 = max(self.drag_start_y, current_y)
 
-            # Prüfe Überschneidungen
+            # Prüfe Überschneidungen und MARKIERE (nicht selektieren!)
             for path, (widget, bbox) in self.thumbnail_widgets.items():
                 widget_x1, widget_y1, widget_x2, widget_y2 = bbox
 
-                if not (sel_x2 < widget_x1 or sel_x1 > widget_x2 or
-                       sel_y2 < widget_y1 or sel_y1 > widget_y2):
-                    if path not in self.selected_paths:
-                        self.selected_paths.add(path)
+                if not (canvas_x2 < widget_x1 or canvas_x1 > widget_x2 or
+                       canvas_y2 < widget_y1 or canvas_y1 > widget_y2):
+                    # Widget ist im Auswahlbereich - MARKIERE es
+                    if path not in self.markierte_paths:
+                        self.markierte_paths.add(path)
                         if widget.winfo_children():
                             inner_frame = widget.winfo_children()[0]
-                            inner_frame.config(bg='#000000')
+                            # Prüfe ob bereits selektiert
+                            if path in self.selected_paths:
+                                inner_frame.config(bg='#4CAF50')  # Grün (selektiert)
+                            else:
+                                inner_frame.config(bg='#2196F3')  # Blau (markiert)
 
             # Cleanup
             if self.drag_rect:
@@ -368,10 +415,10 @@ class SDFileSelectorDialog:
             self.is_drag_selecting = False
             self.drag_start_x = None
             self.drag_start_y = None
-            self.update_selection_info()
+            self.update_mark_button()
 
-        # Binde nur auf Canvas (nicht auf Widgets)
-        canvas.bind('<Button-1>', on_canvas_click)
+        # Binde auf Haupt-Canvas (Events gehen auch zu Widgets durch)
+        canvas.bind('<Button-1>', on_canvas_press)
         canvas.bind('<B1-Motion>', on_canvas_drag)
         canvas.bind('<ButtonRelease-1>', on_canvas_release)
 
@@ -442,6 +489,7 @@ class SDFileSelectorDialog:
     def create_thumbnail_widget(self, parent, file_info, row, col):
         """Erstellt ein Thumbnail-Widget mit Rand-Markierung"""
         path = file_info['path']
+        is_marked = path in self.markierte_paths
         is_selected = path in self.selected_paths
 
         # Outer-Frame: Feste Größe mit festem Abstand, verhindert Verschiebung
@@ -450,8 +498,15 @@ class SDFileSelectorDialog:
         outer_frame.grid_propagate(False)  # WICHTIG: Verhindert automatische Größenanpassung
 
         # Inner-Frame: Immer mit Border-Space, aber Farbe ändert sich
-        # Border ist IMMER 2px, nur die Farbe wechselt zwischen weiß (unsichtbar) und Schwarz
-        border_color = '#000000' if is_selected else 'white'
+        # Border ist IMMER 2px
+        # Selektiert (grün) > Markiert (blau) > Normal (weiß/unsichtbar)
+        if is_selected:
+            border_color = '#4CAF50'  # Grün für selektiert
+        elif is_marked:
+            border_color = '#2196F3'  # Blau für markiert
+        else:
+            border_color = 'white'  # Unsichtbar
+
         frame = tk.Frame(outer_frame,
                         relief='solid',
                         borderwidth=2,
@@ -503,26 +558,27 @@ class SDFileSelectorDialog:
         size_label = tk.Label(inner_frame, text=f"{size_mb:.1f} MB", font=("Arial", 8), fg='gray', bg='white')
         size_label.pack()
 
-        # Events: Klick=Toggle, Doppelklick=Öffnen, Strg+Klick=Invertieren - DEFINIERE ZUERST!
+        # Events: Klick=Markieren (Toggle), Doppelklick=Vorschau
         def on_click(event):
-            # Strg+Klick: Toggle (markieren/demarkieren)
-            # Normaler Klick: Nur wenn nicht bereits ausgewählt, dann auswählen
-            if event.state & 0x0004:  # Strg gedrückt (Control-Taste)
-                # Toggle: Markieren wenn nicht markiert, demarkieren wenn markiert
-                self.toggle_selection(path)
+            # Toggle Markierung (nicht Selektion!)
+            if path in self.markierte_paths:
+                self.markierte_paths.remove(path)
             else:
-                # Normaler Klick: Auswählen (wie bisher)
-                if path not in self.selected_paths:
-                    self.selected_paths.add(path)
-                else:
-                    # Bereits ausgewählt: Demarkieren
-                    self.selected_paths.remove(path)
+                self.markierte_paths.add(path)
 
-            # Update Border-Color (Größe bleibt gleich!)
-            is_now_selected = path in self.selected_paths
-            border_color = '#000000' if is_now_selected else 'white'
+            # Update Border-Color
+            is_marked = path in self.markierte_paths
+            is_selected = path in self.selected_paths
+
+            if is_selected:
+                border_color = '#4CAF50'  # Grün
+            elif is_marked:
+                border_color = '#2196F3'  # Blau
+            else:
+                border_color = 'white'
+
             frame.config(bg=border_color)
-            self.update_selection_info()
+            self.update_mark_button()
 
         def on_double_click(event):
             self.show_preview(file_info)
@@ -685,7 +741,17 @@ class SDFileSelectorDialog:
 
         # Daten einfügen
         for file_info in filtered_files:
+            is_marked = file_info['path'] in self.markierte_paths
             is_selected = file_info['path'] in self.selected_paths
+
+            # Markierungs-Symbol
+            if is_selected:
+                mark_symbol = '✅'  # Grün: Selektiert
+            elif is_marked:
+                mark_symbol = '🔵'  # Blau: Markiert
+            else:
+                mark_symbol = ''
+
             size_mb = file_info['size_bytes'] / (1024 * 1024)
 
             # Filedatum
@@ -698,26 +764,40 @@ class SDFileSelectorDialog:
                 date_str = "Unbekannt"
 
             tree.insert('', 'end', values=(
-                '✓' if is_selected else '',
+                mark_symbol,
                 file_info['filename'],
                 'Video' if file_info['is_video'] else 'Foto',
                 f"{size_mb:.1f} MB",
+                date_str,
                 file_info['path']
             ), tags=(file_info['path'],))
 
-        # Click-Event zum Togglen
+        # Click-Event zum Togglen der Markierung
         def on_tree_click(event):
             item = tree.identify_row(event.y)
             if item:
                 path = tree.item(item)['tags'][0]
-                # Toggle Selection
-                self.toggle_selection(path)
+                # Toggle Markierung (nicht Selektion!)
+                if path in self.markierte_paths:
+                    self.markierte_paths.remove(path)
+                else:
+                    self.markierte_paths.add(path)
+
                 # Update Tree
+                is_marked = path in self.markierte_paths
                 is_selected = path in self.selected_paths
+
+                if is_selected:
+                    mark_symbol = '✅'
+                elif is_marked:
+                    mark_symbol = '🔵'
+                else:
+                    mark_symbol = ''
+
                 values = list(tree.item(item)['values'])
-                values[0] = '✓' if is_selected else ''
+                values[0] = mark_symbol
                 tree.item(item, values=values)
-                self.update_selection_info()
+                self.update_mark_button()
 
         tree.bind('<Button-1>', on_tree_click)
 
@@ -775,6 +855,99 @@ class SDFileSelectorDialog:
         self.selection_label.config(
             text=f"Ausgewählt: {selected_count} von {len(self.files_info)} Dateien ({selected_size:.0f} MB)"
         )
+
+        # Update Selektions-Liste rechts
+        self.update_selection_list()
+
+    def update_mark_button(self):
+        """Aktualisiert den 'X Dateien auswählen' Button"""
+        marked_count = len(self.markierte_paths)
+
+        if marked_count > 0:
+            # Button anzeigen und Text aktualisieren
+            self.add_to_selection_button.config(
+                text=f"{marked_count} {'Datei' if marked_count == 1 else 'Dateien'} auswählen"
+            )
+            if not self.add_to_selection_button.winfo_ismapped():
+                # Pack Button einfach (erscheint an erster Stelle wenn vorher pack_forget)
+                self.add_to_selection_button.pack(side='left', padx=2)
+        else:
+            # Button verstecken
+            self.add_to_selection_button.pack_forget()
+
+    def add_marked_to_selection(self):
+        """Fügt markierte Dateien zur Selektion hinzu"""
+        # Füge alle markierten zur Selektion hinzu
+        self.selected_paths.update(self.markierte_paths)
+
+        # Lösche Markierung
+        self.markierte_paths.clear()
+
+        # Update Button
+        self.update_mark_button()
+
+        # Update Info
+        self.update_selection_info()
+
+        # Refresh aktuelle Ansicht
+        self.apply_filters()
+
+    def mark_all(self):
+        """Markiert alle sichtbaren (gefilterten) Dateien"""
+        filtered_files = self.get_filtered_files()
+        for file_info in filtered_files:
+            self.markierte_paths.add(file_info['path'])
+
+        self.update_mark_button()
+        self.apply_filters()
+
+    def unmark_all(self):
+        """Hebt alle Markierungen auf"""
+        self.markierte_paths.clear()
+        self.update_mark_button()
+        self.apply_filters()
+
+    def update_selection_list(self):
+        """Aktualisiert die Liste der selektierten Dateien rechts"""
+        # Lösche alte Liste
+        for widget in self.selection_list_container.winfo_children():
+            widget.destroy()
+
+        # Erstelle Items für jede selektierte Datei
+        for idx, path in enumerate(sorted(self.selected_paths)):
+            # Finde file_info
+            file_info = next((f for f in self.files_info if f['path'] == path), None)
+            if not file_info:
+                continue
+
+            # Item-Frame
+            item_frame = tk.Frame(self.selection_list_container, bg='white', relief='solid', borderwidth=1)
+            item_frame.pack(fill='x', padx=5, pady=2)
+
+            # Icon + Filename
+            info_frame = tk.Frame(item_frame, bg='white')
+            info_frame.pack(side='left', fill='both', expand=True, padx=5, pady=3)
+
+            icon = "🎬" if file_info['is_video'] else "🖼️"
+            tk.Label(info_frame, text=icon, font=("Arial", 12), bg='white').pack(side='left', padx=(0, 5))
+
+            # Dateiname (gekürzt)
+            filename = file_info['filename']
+            if len(filename) > 20:
+                filename = filename[:17] + "..."
+            tk.Label(info_frame, text=filename, font=("Arial", 8), bg='white', anchor='w').pack(side='left', fill='x', expand=True)
+
+            # Entfernen-Button
+            def make_remove_handler(p):
+                def remove():
+                    self.selected_paths.remove(p)
+                    self.update_selection_info()
+                    self.apply_filters()
+                return remove
+
+            tk.Button(item_frame, text="✕", command=make_remove_handler(path),
+                     bg='#f44336', fg='white', font=("Arial", 8, "bold"),
+                     width=2, relief='flat').pack(side='right', padx=2)
 
     def select_all(self):
         """Wählt alle Dateien aus"""

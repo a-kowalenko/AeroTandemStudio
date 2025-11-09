@@ -1,0 +1,740 @@
+﻿"""
+Dialog zur Auswahl von Dateien von der SD-Karte mit Thumbnail- und Detail-Ansicht
+"""
+import tkinter as tk
+from tkinter import ttk
+import os
+from pathlib import Path
+from PIL import Image, ImageTk
+import subprocess
+import threading
+
+
+class SDFileSelectorDialog:
+    """Dialog zur Auswahl von Dateien von der SD-Karte"""
+
+    def __init__(self, parent, files_info, total_size_mb):
+        """
+        Args:
+            parent: Parent-Fenster
+            files_info: Liste von Dicts mit {path, size_bytes, filename, is_video}
+            total_size_mb: Gesamtgröße aller Dateien in MB
+        """
+        self.parent = parent
+        self.files_info = files_info
+        self.total_size_mb = total_size_mb
+        self.selected_files = []  # Liste der ausgewählten Pfade
+        self.dialog = None
+        self.view_mode = "thumbnail"  # "thumbnail" oder "details"
+        self.current_preview = None  # Aktuell angezeigtes Preview-Fenster
+
+        # NEU: Markierung durch Set statt Checkbox-Variablen
+        self.selected_paths = set()  # Set der ausgewählten Pfade
+
+        # NEU: Filter-Variablen
+        self.filter_type_var = tk.StringVar(value="Alle")
+        self.filter_sort_var = tk.StringVar(value="Name")
+
+        # Alle standardmäßig ausgewählt
+        for file_info in files_info:
+            self.selected_paths.add(file_info['path'])
+
+        # Thumbnail-Cache
+        self.thumbnail_cache = {}  # path -> PhotoImage
+
+        # NEU: Drag-Selection Variablen
+        self.drag_start_x = 0
+        self.drag_start_y = 0
+        self.drag_rect = None
+        self.is_drag_selecting = False
+        self.drag_canvas = None
+        self.thumbnail_widgets = {}  # path -> (frame_widget, bbox)
+
+        # NEU: Async Thumbnail-Loading
+        self.thumbnail_queue = []  # Queue von (file_info, thumb_label) Paaren
+        self.is_loading_thumbnails = False
+        self.loading_cancelled = False
+
+    def show(self):
+        """Zeigt den Dialog an"""
+        self.dialog = tk.Toplevel(self.parent)
+        self.dialog.title("Dateien auswählen")
+        self.dialog.geometry("1000x800")  # Erhöht von 700 auf 800
+        self.dialog.transient(self.parent)
+        self.dialog.grab_set()
+
+        self.create_widgets()
+        self.center_dialog()
+        self.update_selection_info()
+
+        # X-Button soll wie Abbrechen funktionieren
+        self.dialog.protocol("WM_DELETE_WINDOW", self.on_cancel)
+
+        # Initial Thumbnail-Ansicht laden
+        self.switch_to_thumbnails()
+
+    def center_dialog(self):
+        """Zentriert den Dialog über dem Parent-Fenster"""
+        self.dialog.update_idletasks()
+
+        # Parent-Position und -Größe
+        try:
+            parent_x = self.parent.winfo_x()
+            parent_y = self.parent.winfo_y()
+            parent_w = self.parent.winfo_width()
+            parent_h = self.parent.winfo_height()
+        except:
+            # Fallback wenn Parent nicht verfügbar
+            parent_x = 0
+            parent_y = 0
+            parent_w = self.dialog.winfo_screenwidth()
+            parent_h = self.dialog.winfo_screenheight()
+
+        # Dialog-Größe
+        w = self.dialog.winfo_width()
+        h = self.dialog.winfo_height()
+
+        # Berechne zentrierte Position
+        x = parent_x + (parent_w - w) // 2
+        y = parent_y + (parent_h - h) // 2
+
+        # Verhindere negative Koordinaten
+        x = max(0, x)
+        y = max(0, y)
+
+        self.dialog.geometry(f"{w}x{h}+{x}+{y}")
+
+    def create_widgets(self):
+        """Erstellt die Widgets"""
+        main_frame = tk.Frame(self.dialog, padx=15, pady=15)
+        main_frame.pack(fill='both', expand=True)
+
+        # Header
+        header_frame = tk.Frame(main_frame)
+        header_frame.pack(fill='x', pady=(0, 10))
+
+        tk.Label(header_frame,
+                text=f"⚠️ Zu viele Dateien auf SD-Karte ({self.total_size_mb:.0f} MB)",
+                font=("Arial", 12, "bold"),
+                fg="#f44336").pack(side='left')
+
+        # View-Umschalter
+        view_frame = tk.Frame(header_frame)
+        view_frame.pack(side='right')
+
+        self.thumbnail_btn = tk.Button(view_frame, text="🖼️ Thumbnails",
+                                      command=self.switch_to_thumbnails,
+                                      relief='sunken')
+        self.thumbnail_btn.pack(side='left', padx=2)
+
+        self.details_btn = tk.Button(view_frame, text="📋 Details",
+                                    command=self.switch_to_details,
+                                    relief='raised')
+        self.details_btn.pack(side='left', padx=2)
+
+        # Auswahl-Info
+        info_frame = tk.Frame(main_frame)
+        info_frame.pack(fill='x', pady=(0, 10))
+
+        self.selection_label = tk.Label(info_frame,
+                                       text="",
+                                       font=("Arial", 10))
+        self.selection_label.pack(side='left')
+
+        # Schnell-Auswahl Buttons
+        tk.Button(info_frame, text="Alle auswählen",
+                 command=self.select_all).pack(side='right', padx=2)
+        tk.Button(info_frame, text="Alle abwählen",
+                 command=self.deselect_all).pack(side='right', padx=2)
+
+        # NEU: Filter-Frame
+        filter_frame = tk.Frame(main_frame)
+        filter_frame.pack(fill='x', pady=(0, 10))
+
+        tk.Label(filter_frame, text="Filter:", font=("Arial", 10, "bold")).pack(side='left', padx=(0, 10))
+
+        # Typ-Filter
+        tk.Label(filter_frame, text="Typ:", font=("Arial", 9)).pack(side='left', padx=(0, 5))
+        type_combo = ttk.Combobox(filter_frame, textvariable=self.filter_type_var,
+                                  values=["Alle", "Videos", "Fotos"],
+                                  state='readonly', width=10)
+        type_combo.pack(side='left', padx=(0, 15))
+        type_combo.bind('<<ComboboxSelected>>', lambda e: self.apply_filters())
+
+        # Sortierung
+        tk.Label(filter_frame, text="Sortierung:", font=("Arial", 9)).pack(side='left', padx=(0, 5))
+        sort_combo = ttk.Combobox(filter_frame, textvariable=self.filter_sort_var,
+                                 values=["Name", "Größe", "Typ"],
+                                 state='readonly', width=10)
+        sort_combo.pack(side='left')
+        sort_combo.bind('<<ComboboxSelected>>', lambda e: self.apply_filters())
+
+        # Container für die Ansichten
+        self.view_container = tk.Frame(main_frame, relief='sunken', borderwidth=1)
+        self.view_container.pack(fill='both', expand=True, pady=(0, 10))
+
+        # Buttons
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill='x')
+
+        tk.Button(button_frame, text="Abbrechen",
+                 command=self.on_cancel,
+                 bg="#9E9E9E", fg="white", width=15).pack(side='right', padx=2)
+
+        tk.Button(button_frame, text="Ausgewählte importieren",
+                 command=self.on_import_selected,
+                 bg="#4CAF50", fg="white", width=20).pack(side='right', padx=2)
+
+    def switch_to_thumbnails(self):
+        """Wechselt zur Thumbnail-Ansicht"""
+        self.view_mode = "thumbnail"
+        self.thumbnail_btn.config(relief='sunken')
+        self.details_btn.config(relief='raised')
+
+        # Lösche alte Ansicht
+        for widget in self.view_container.winfo_children():
+            widget.destroy()
+
+        # Erstelle Thumbnail-Ansicht
+        canvas = tk.Canvas(self.view_container, bg='white')
+        scrollbar = ttk.Scrollbar(self.view_container, orient='vertical', command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg='white')
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # Speichere Canvas-Referenz für Drag-Selection
+        self.drag_canvas = canvas
+        self.thumbnail_widgets = {}
+
+        # Reset Thumbnail-Queue
+        self.thumbnail_queue = []
+        self.loading_cancelled = False
+
+        # Filtere und sortiere Dateien
+        filtered_files = self.get_filtered_files()
+
+        # Thumbnails in Grid anzeigen - SOFORT ohne auf Loading zu warten
+        cols = 4
+        for idx, file_info in enumerate(filtered_files):
+            row = idx // cols
+            col = idx % cols
+
+            frame_widget = self.create_thumbnail_widget(scrollable_frame, file_info, row, col)
+
+            # Speichere Widget und Position für Drag-Selection
+            if frame_widget:
+                # Warte bis Widget platziert ist
+                scrollable_frame.update_idletasks()
+                x = frame_widget.winfo_x()
+                y = frame_widget.winfo_y()
+                w = frame_widget.winfo_width()
+                h = frame_widget.winfo_height()
+                self.thumbnail_widgets[file_info['path']] = (frame_widget, (x, y, x+w, y+h))
+
+        # Starte asynchrones Thumbnail-Loading
+        self.start_thumbnail_loading()
+
+        canvas.pack(side='left', fill='both', expand=True)
+        scrollbar.pack(side='right', fill='y')
+
+        # NEU: Drag-Selection Events
+        def on_mouse_down(event):
+            # Konvertiere zu Canvas-Koordinaten
+            self.drag_start_x = canvas.canvasx(event.x)
+            self.drag_start_y = canvas.canvasy(event.y)
+            self.is_drag_selecting = True
+
+            # Erstelle Auswahlrechteck
+            self.drag_rect = canvas.create_rectangle(
+                self.drag_start_x, self.drag_start_y,
+                self.drag_start_x, self.drag_start_y,
+                outline='#2196F3', width=2, dash=(4, 4)
+            )
+
+        def on_mouse_move(event):
+            if not self.is_drag_selecting or not self.drag_rect:
+                return
+
+            # Aktualisiere Rechteck
+            current_x = canvas.canvasx(event.x)
+            current_y = canvas.canvasy(event.y)
+
+            canvas.coords(self.drag_rect,
+                         self.drag_start_x, self.drag_start_y,
+                         current_x, current_y)
+
+        def on_mouse_up(event):
+            if not self.is_drag_selecting:
+                return
+
+            self.is_drag_selecting = False
+
+            # Berechne Auswahlbereich
+            end_x = canvas.canvasx(event.x)
+            end_y = canvas.canvasy(event.y)
+
+            sel_x1 = min(self.drag_start_x, end_x)
+            sel_y1 = min(self.drag_start_y, end_y)
+            sel_x2 = max(self.drag_start_x, end_x)
+            sel_y2 = max(self.drag_start_y, end_y)
+
+            # Prüfe welche Thumbnails im Bereich sind
+            for path, (widget, bbox) in self.thumbnail_widgets.items():
+                widget_x1, widget_y1, widget_x2, widget_y2 = bbox
+
+                # Überschneidungs-Prüfung
+                if not (sel_x2 < widget_x1 or sel_x1 > widget_x2 or
+                       sel_y2 < widget_y1 or sel_y1 > widget_y2):
+                    # Widget ist im Auswahlbereich
+                    if path not in self.selected_paths:
+                        self.selected_paths.add(path)
+                        # Update Border
+                        widget.config(bg='#2196F3')
+
+            # Lösche Auswahlrechteck
+            if self.drag_rect:
+                canvas.delete(self.drag_rect)
+                self.drag_rect = None
+
+            self.update_selection_info()
+
+        # Binde Events
+        canvas.bind('<ButtonPress-1>', on_mouse_down)
+        canvas.bind('<B1-Motion>', on_mouse_move)
+        canvas.bind('<ButtonRelease-1>', on_mouse_up)
+
+        # Mausrad-Scrolling - nur für Canvas, nicht global!
+        def _on_mousewheel(event):
+            try:
+                if canvas.winfo_exists():
+                    canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            except:
+                pass  # Canvas existiert nicht mehr
+
+        # Binde NUR auf Canvas und scrollable_frame, NICHT bind_all!
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        scrollable_frame.bind("<MouseWheel>", _on_mousewheel)
+
+    def get_filtered_files(self):
+        """Gibt gefilterte und sortierte Dateiliste zurück"""
+        files = self.files_info.copy()
+
+        # Typ-Filter
+        filter_type = self.filter_type_var.get()
+        if filter_type == "Videos":
+            files = [f for f in files if f['is_video']]
+        elif filter_type == "Fotos":
+            files = [f for f in files if not f['is_video']]
+
+        # Sortierung
+        sort_by = self.filter_sort_var.get()
+        if sort_by == "Name":
+            files.sort(key=lambda f: f['filename'].lower())
+        elif sort_by == "Größe":
+            files.sort(key=lambda f: f['size_bytes'], reverse=True)
+        elif sort_by == "Typ":
+            files.sort(key=lambda f: (not f['is_video'], f['filename'].lower()))
+
+        return files
+
+    def apply_filters(self):
+        """Wendet Filter an und lädt Ansicht neu"""
+        if self.view_mode == "thumbnail":
+            self.switch_to_thumbnails()
+        else:
+            self.switch_to_details()
+
+    def create_thumbnail_widget(self, parent, file_info, row, col):
+        """Erstellt ein Thumbnail-Widget mit Rand-Markierung"""
+        path = file_info['path']
+        is_selected = path in self.selected_paths
+
+        # Container-Frame mit Border für Markierung
+        frame = tk.Frame(parent, relief='solid', borderwidth=3,
+                        bg='#2196F3' if is_selected else '#e0e0e0',
+                        padx=2, pady=2)
+        frame.grid(row=row, column=col, padx=5, pady=5, sticky='n')
+
+        # Innerer Frame (weiß)
+        inner_frame = tk.Frame(frame, bg='white', padx=5, pady=5)
+        inner_frame.pack()
+
+        # Thumbnail (echtes Bild oder Icon)
+        thumb_frame = tk.Frame(inner_frame, width=180, height=135, bg='#f0f0f0')
+        thumb_frame.pack()
+        thumb_frame.pack_propagate(False)
+
+        # NEU: Video/Foto-Icon in oberer rechter Ecke
+        icon_text = "🎬" if file_info['is_video'] else "🖼"
+        # Tkinter unterstützt kein rgba() - verwende halbtransparenten Effekt mit Frame
+        icon_bg_frame = tk.Frame(thumb_frame, bg='#333333')  # Dunkelgrau statt rgba
+        icon_bg_frame.place(relx=1.0, rely=0.0, anchor='ne', x=-5, y=5)
+
+        icon_label = tk.Label(icon_bg_frame, text=icon_text, font=("Arial", 14),
+                             bg='#333333', fg='white', padx=2, pady=2)
+        icon_label.pack()
+
+        # Dateiname (gekürzt)
+        filename = file_info['filename']
+        if len(filename) > 22:
+            filename = filename[:19] + "..."
+
+        filename_label = tk.Label(inner_frame, text=filename, font=("Arial", 9), bg='white')
+        filename_label.pack(pady=(5, 0))
+
+        # Größe
+        size_mb = file_info['size_bytes'] / (1024 * 1024)
+        size_label = tk.Label(inner_frame, text=f"{size_mb:.1f} MB", font=("Arial", 8), fg='gray', bg='white')
+        size_label.pack()
+
+        # Events: Klick=Toggle, Doppelklick=Öffnen - DEFINIERE ZUERST!
+        def on_click(event):
+            self.toggle_selection(path)
+            # Update Border-Color
+            frame.config(bg='#2196F3' if path in self.selected_paths else '#e0e0e0')
+            self.update_selection_info()
+
+        def on_double_click(event):
+            self.show_preview(file_info)
+
+        # JETZT anzeigen: Loading-Spinner oder Icon (wird später ersetzt)
+        # Prüfe ob bereits im Cache
+        if path in self.thumbnail_cache:
+            # Aus Cache laden
+            thumbnail_img = self.thumbnail_cache[path]
+            thumb_label = tk.Label(thumb_frame, image=thumbnail_img, bg='#f0f0f0')
+            thumb_label.image = thumbnail_img
+            thumb_label.place(relx=0.5, rely=0.5, anchor='center')
+        else:
+            # Zeige Platzhalter
+            if file_info['is_video']:
+                # Video: Zeige Loading-Animation
+                loading_text = "⏳\nLädt..."
+            else:
+                # Foto: Sollte schnell laden, zeige Icon
+                loading_text = "🖼️"
+
+            thumb_label = tk.Label(thumb_frame, text=loading_text, font=("Arial", 20),
+                                  bg='#f0f0f0', fg='#666')
+            thumb_label.place(relx=0.5, rely=0.5, anchor='center')
+
+            # Füge zur Thumbnail-Queue hinzu für asynchrones Laden
+            # Speichere auch Click-Handler und Widgets für späteren Zugriff
+            self.thumbnail_queue.append((file_info, thumb_label, thumb_frame, frame, on_click, on_double_click))
+
+        # Binde Events an ALLE Widgets im Frame (inkl. Labels!)
+        for widget in [frame, inner_frame, thumb_frame, thumb_label, icon_bg_frame, icon_label, filename_label, size_label]:
+            widget.bind('<Button-1>', on_click)
+            widget.bind('<Double-Button-1>', on_double_click)
+
+        # Gebe Frame zurück für Drag-Selection
+        return frame
+
+    def generate_thumbnail(self, file_info):
+        """Generiert echtes Thumbnail für Datei"""
+        path = file_info['path']
+
+        # Prüfe Cache
+        if path in self.thumbnail_cache:
+            return self.thumbnail_cache[path]
+
+        try:
+            if file_info['is_video']:
+                # Video-Thumbnail: Extrahiere ersten Frame mit FFmpeg
+                import tempfile
+                import subprocess
+
+                # Erstelle temporäres Bild
+                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                    tmp_path = tmp.name
+
+                try:
+                    # FFmpeg-Kommando: Extrahiere Frame bei 1 Sekunde
+                    cmd = [
+                        'ffmpeg',
+                        '-ss', '1',  # Springe zu 1 Sekunde
+                        '-i', path,  # Input-Video
+                        '-vframes', '1',  # Nur 1 Frame
+                        '-vf', 'scale=180:135:force_original_aspect_ratio=decrease',  # Skaliere
+                        '-y',  # Überschreibe
+                        tmp_path
+                    ]
+
+                    # Führe FFmpeg aus (leise)
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+
+                    # Lade generiertes Bild
+                    img = Image.open(tmp_path)
+                    photo = ImageTk.PhotoImage(img)
+                    self.thumbnail_cache[path] = photo
+
+                    # Lösche temporäre Datei
+                    import os
+                    os.unlink(tmp_path)
+
+                    return photo
+                except Exception as e:
+                    print(f"FFmpeg-Fehler für {file_info['filename']}: {e}")
+                    # Cleanup
+                    try:
+                        import os
+                        os.unlink(tmp_path)
+                    except:
+                        pass
+                    return None
+            else:
+                # Foto-Thumbnail
+                img = Image.open(path)
+                img.thumbnail((180, 135), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                self.thumbnail_cache[path] = photo
+                return photo
+        except Exception as e:
+            print(f"Fehler beim Thumbnail-Generieren für {file_info['filename']}: {e}")
+            return None
+
+    def toggle_selection(self, path):
+        """Togglet Auswahl einer Datei"""
+        if path in self.selected_paths:
+            self.selected_paths.remove(path)
+        else:
+            self.selected_paths.add(path)
+
+    def switch_to_details(self):
+        """Wechselt zur Detail-Ansicht"""
+        self.view_mode = "details"
+        self.thumbnail_btn.config(relief='raised')
+        self.details_btn.config(relief='sunken')
+
+        # Lösche alte Ansicht
+        for widget in self.view_container.winfo_children():
+            widget.destroy()
+
+        # Erstelle Detail-Ansicht
+        tree_frame = tk.Frame(self.view_container)
+        tree_frame.pack(fill='both', expand=True)
+
+        scrollbar = ttk.Scrollbar(tree_frame, orient='vertical')
+        scrollbar.pack(side='right', fill='y')
+
+        tree = ttk.Treeview(tree_frame,
+                           columns=('select', 'filename', 'type', 'size', 'path'),
+                           show='headings',
+                           yscrollcommand=scrollbar.set)
+        tree.pack(side='left', fill='both', expand=True)
+
+        scrollbar.config(command=tree.yview)
+
+        # Spalten
+        tree.heading('select', text='✓')
+        tree.heading('filename', text='Dateiname')
+        tree.heading('type', text='Typ')
+        tree.heading('size', text='Größe')
+        tree.heading('path', text='Pfad')
+
+        tree.column('select', width=40, anchor='center')
+        tree.column('filename', width=250)
+        tree.column('type', width=80, anchor='center')
+        tree.column('size', width=100, anchor='e')
+        tree.column('path', width=300)
+
+        # Filtere und sortiere Dateien
+        filtered_files = self.get_filtered_files()
+
+        # Daten einfügen
+        for file_info in filtered_files:
+            is_selected = file_info['path'] in self.selected_paths
+            size_mb = file_info['size_bytes'] / (1024 * 1024)
+
+            tree.insert('', 'end', values=(
+                '✓' if is_selected else '',
+                file_info['filename'],
+                'Video' if file_info['is_video'] else 'Foto',
+                f"{size_mb:.1f} MB",
+                file_info['path']
+            ), tags=(file_info['path'],))
+
+        # Click-Event zum Togglen
+        def on_tree_click(event):
+            item = tree.identify_row(event.y)
+            if item:
+                path = tree.item(item)['tags'][0]
+                # Toggle Selection
+                self.toggle_selection(path)
+                # Update Tree
+                is_selected = path in self.selected_paths
+                values = list(tree.item(item)['values'])
+                values[0] = '✓' if is_selected else ''
+                tree.item(item, values=values)
+                self.update_selection_info()
+
+        tree.bind('<Button-1>', on_tree_click)
+
+        # Doppelklick für Preview
+        def on_double_click(event):
+            item = tree.identify_row(event.y)
+            if item:
+                path = tree.item(item)['tags'][0]
+                file_info = next(f for f in self.files_info if f['path'] == path)
+                self.show_preview(file_info)
+
+        tree.bind('<Double-Button-1>', on_double_click)
+
+    def show_preview(self, file_info):
+        """Zeigt Vorschau für eine Datei"""
+        if file_info['is_video']:
+            # Video mit Standard-Player öffnen
+            try:
+                if os.name == 'nt':  # Windows
+                    os.startfile(file_info['path'])
+                else:  # Linux/Mac
+                    subprocess.Popen(['xdg-open', file_info['path']])
+            except Exception as e:
+                print(f"Fehler beim Öffnen der Vorschau: {e}")
+        else:
+            # Foto in neuem Fenster anzeigen
+            self.show_image_preview(file_info)
+
+    def show_image_preview(self, file_info):
+        """Zeigt Bild-Vorschau in neuem Fenster"""
+        preview_window = tk.Toplevel(self.dialog)
+        preview_window.title(f"Vorschau: {file_info['filename']}")
+        preview_window.geometry("800x600")
+
+        try:
+            img = Image.open(file_info['path'])
+            # Skaliere auf maximal 780x580
+            img.thumbnail((780, 580), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+
+            label = tk.Label(preview_window, image=photo)
+            label.image = photo  # Referenz behalten
+            label.pack(expand=True)
+        except Exception as e:
+            tk.Label(preview_window, text=f"Fehler beim Laden: {e}").pack(expand=True)
+
+    def update_selection_info(self):
+        """Aktualisiert die Auswahl-Info"""
+        selected_count = len(self.selected_paths)
+        selected_size = sum(
+            f['size_bytes'] for f in self.files_info
+            if f['path'] in self.selected_paths
+        ) / (1024 * 1024)
+
+        self.selection_label.config(
+            text=f"Ausgewählt: {selected_count} von {len(self.files_info)} Dateien ({selected_size:.0f} MB)"
+        )
+
+    def select_all(self):
+        """Wählt alle Dateien aus"""
+        for file_info in self.files_info:
+            self.selected_paths.add(file_info['path'])
+        self.update_selection_info()
+        # Aktualisiere aktuelle Ansicht
+        self.apply_filters()
+
+    def deselect_all(self):
+        """Wählt alle Dateien ab"""
+        self.selected_paths.clear()
+        self.update_selection_info()
+        # Aktualisiere aktuelle Ansicht
+        self.apply_filters()
+
+    def on_import_selected(self):
+        """Bestätigt Auswahl und schließt Dialog"""
+        self.selected_files = list(self.selected_paths)
+
+        if not self.selected_files:
+            tk.messagebox.showwarning("Keine Auswahl",
+                                     "Bitte wählen Sie mindestens eine Datei aus.",
+                                     parent=self.dialog)
+            return
+
+        # Stoppe Thumbnail-Loading
+        self.loading_cancelled = True
+        self.dialog.destroy()
+
+    def on_cancel(self):
+        """Bricht ab ohne Auswahl"""
+        self.selected_files = None
+        # Stoppe Thumbnail-Loading
+        self.loading_cancelled = True
+        self.dialog.destroy()
+
+    def get_selected_files(self):
+        """Gibt ausgewählte Dateien zurück (nach Dialog-Schließung)"""
+        return self.selected_files
+
+    def start_thumbnail_loading(self):
+        """Startet asynchrones Laden der Thumbnails in einem Background-Thread"""
+        if self.is_loading_thumbnails or not self.thumbnail_queue:
+            return
+
+        self.is_loading_thumbnails = True
+
+        # Starte Thread für Thumbnail-Generierung
+        thread = threading.Thread(target=self._load_thumbnails_worker, daemon=True)
+        thread.start()
+
+    def _load_thumbnails_worker(self):
+        """Worker-Thread: Lädt Thumbnails nacheinander und aktualisiert UI"""
+        while self.thumbnail_queue and not self.loading_cancelled:
+            # Hole nächstes Item aus Queue
+            file_info, thumb_label, thumb_frame, container_frame, on_click, on_double_click = self.thumbnail_queue.pop(0)
+
+            # Generiere Thumbnail
+            thumbnail_img = self.generate_thumbnail(file_info)
+
+            # Aktualisiere UI im Haupt-Thread
+            if thumbnail_img and not self.loading_cancelled:
+                try:
+                    self.dialog.after(0, self._update_thumbnail_ui, thumb_label, thumb_frame,
+                                    thumbnail_img, on_click, on_double_click)
+                except:
+                    # Dialog wurde geschlossen
+                    break
+            elif not self.loading_cancelled:
+                # Fallback wenn Thumbnail-Generierung fehlschlägt
+                icon = "🎬" if file_info['is_video'] else "🖼️"
+                try:
+                    self.dialog.after(0, self._update_thumbnail_fallback, thumb_label, icon)
+                except:
+                    break
+
+        self.is_loading_thumbnails = False
+
+    def _update_thumbnail_ui(self, thumb_label, thumb_frame, thumbnail_img, on_click, on_double_click):
+        """Aktualisiert Thumbnail im UI (läuft im Haupt-Thread)"""
+        try:
+            # Lösche alten Platzhalter
+            thumb_label.destroy()
+
+            # Erstelle neues Label mit Thumbnail
+            new_label = tk.Label(thumb_frame, image=thumbnail_img, bg='#f0f0f0')
+            new_label.image = thumbnail_img  # Referenz behalten
+            new_label.place(relx=0.5, rely=0.5, anchor='center')
+
+            # WICHTIG: Binde Click-Events auf das neue Label
+            new_label.bind('<Button-1>', on_click)
+            new_label.bind('<Double-Button-1>', on_double_click)
+
+            # Stelle sicher dass Icon-Frame über dem Thumbnail bleibt
+            # Finde alle Kinder von thumb_frame und bringe Icon nach vorne
+            for child in thumb_frame.winfo_children():
+                if isinstance(child, tk.Frame):  # Das ist der icon_bg_frame
+                    child.lift()  # Bringe nach vorne
+        except:
+            pass  # Widget existiert nicht mehr
+
+    def _update_thumbnail_fallback(self, thumb_label, icon):
+        """Zeigt Fallback-Icon wenn Thumbnail-Generierung fehlschlägt"""
+        try:
+            thumb_label.config(text=icon, font=("Arial", 40), fg='#999')
+        except:
+            pass  # Widget existiert nicht mehr

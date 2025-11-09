@@ -1,4 +1,4 @@
-﻿import tkinter as tk
+import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
 import webbrowser
 
@@ -40,7 +40,9 @@ class SettingsDialog:
         self.sd_clear_var = tk.BooleanVar()
         self.sd_auto_import_var = tk.BooleanVar()
         self.sd_skip_processed_var = tk.BooleanVar()
-        self.sd_skip_processed_manual_var = tk.BooleanVar()  # NEU: Manuellen Import auch prüfen  # NEU
+        self.sd_skip_processed_manual_var = tk.BooleanVar()
+        self.sd_size_limit_enabled_var = tk.BooleanVar()  # NEU: Größen-Limit
+        self.sd_size_limit_mb_var = tk.StringVar(value="2000")  # NEU: Limit in MB
         # Variable für Hardware-Beschleunigung
         self.hardware_acceleration_var = tk.BooleanVar()
         # Variable für Paralleles Processing
@@ -234,13 +236,8 @@ class SettingsDialog:
         self.sd_auto_backup_checkbox.grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
         # Abhängige Checkboxen (nur sichtbar wenn Auto-Backup aktiviert)
-        self.sd_clear_checkbox = tk.Checkbutton(
-            backup_frame,
-            text="SD-Karte nach Backup leeren",
-            variable=self.sd_clear_var,
-            font=("Arial", 10)
-        )
 
+        # 1. Automatisch importieren (ERSTE Option)
         self.sd_auto_import_checkbox = tk.Checkbutton(
             backup_frame,
             text="Automatisch importieren in Aero Tandem Studio",
@@ -248,8 +245,37 @@ class SettingsDialog:
             font=("Arial", 10)
         )
 
+        # 2. Größen-Limit Option
+        self.sd_size_limit_checkbox = tk.Checkbutton(
+            backup_frame,
+            text="Warnung bei zu vielen Dateien auf SD-Karte",
+            variable=self.sd_size_limit_enabled_var,
+            font=("Arial", 10),
+            command=self.on_size_limit_toggle
+        )
+
+        # Sub-Option: Größen-Eingabe (noch mehr eingerückt)
+        size_limit_frame = tk.Frame(backup_frame)
+        self.sd_size_limit_frame = size_limit_frame  # Referenz speichern
+
+        tk.Label(size_limit_frame, text="Maximale Dateigröße (MB):", font=("Arial", 9)).pack(side='left', padx=(0, 5))
+
+        size_limit_entry = tk.Entry(size_limit_frame, textvariable=self.sd_size_limit_mb_var,
+                                    font=("Arial", 9), width=10)
+        size_limit_entry.pack(side='left')
+
+        tk.Label(size_limit_frame, text="(z.B. 2000 für 2GB)", font=("Arial", 8), fg="gray").pack(side='left', padx=(5, 0))
+
+        # 3. SD-Karte nach Backup leeren
+        self.sd_clear_checkbox = tk.Checkbutton(
+            backup_frame,
+            text="SD-Karte nach Backup leeren",
+            variable=self.sd_clear_var,
+            font=("Arial", 10)
+        )
+
         # NEU: Nur-neue-Dateien Checkbox + Verlauf-Button (gleiche Ebene)
-        row_idx = 4
+        row_idx = 7
         self.sd_skip_checkbox = tk.Checkbutton(
             backup_frame,
             text="Nur neue Dateien sichern/importieren (Duplikate überspringen)",
@@ -276,6 +302,7 @@ class SettingsDialog:
             font=("Arial", 9),
         )
         # Wird nur angezeigt wenn sd_skip_processed aktiv ist
+
 
     def _open_processed_history_dialog(self):
         try:
@@ -499,21 +526,31 @@ class SettingsDialog:
         is_enabled = self.sd_auto_backup_var.get()
 
         if is_enabled:
-            # Zeige abhängige Checkboxen (eingerückt mit padx=30)
-            self.sd_clear_checkbox.grid(row=2, column=0, columnspan=2, sticky="w", padx=30, pady=2)
-            self.sd_auto_import_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", padx=30, pady=2)
+            # Zeige abhängige Checkboxen in neuer Reihenfolge (alle eingerückt mit padx=30)
+            # 1. Automatisch importieren (ERSTE Option)
+            self.sd_auto_import_checkbox.grid(row=2, column=0, columnspan=2, sticky="w", padx=30, pady=2)
+
+            # 2. Größen-Limit Option
+            self.sd_size_limit_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", padx=30, pady=(8, 2))
+            self.on_size_limit_toggle()  # Zeige/Verstecke Eingabefeld
+
+            # 3. SD-Karte leeren
+            self.sd_clear_checkbox.grid(row=5, column=0, columnspan=2, sticky="w", padx=30, pady=2)
         else:
-            # Verstecke und deaktiviere abhängige Checkboxen
-            self.sd_clear_checkbox.grid_forget()
+            # Verstecke und deaktiviere alle abhängigen Checkboxen
             self.sd_auto_import_checkbox.grid_forget()
+            self.sd_size_limit_checkbox.grid_forget()
+            self.sd_size_limit_frame.grid_forget()
+            self.sd_clear_checkbox.grid_forget()
             self.sd_skip_manual_checkbox.grid_forget()
-            self.sd_clear_var.set(False)
             self.sd_auto_import_var.set(False)
+            self.sd_size_limit_enabled_var.set(False)
+            self.sd_clear_var.set(False)
             self.sd_skip_processed_manual_var.set(False)
 
         # "Nur neue Dateien" Checkbox und Verlauf-Button IMMER anzeigen
-        self.sd_skip_checkbox.grid(row=4, column=0, sticky="w", padx=5, pady=(8, 2))
-        self.history_button.grid(row=4, column=1, sticky="e", padx=5, pady=(8, 2))
+        self.sd_skip_checkbox.grid(row=7, column=0, sticky="w", padx=5, pady=(8, 2))
+        self.history_button.grid(row=7, column=1, sticky="e", padx=5, pady=(8, 2))
 
         # Sub-Option für manuellen Import (conditional)
         self.on_skip_processed_toggle()
@@ -524,14 +561,22 @@ class SettingsDialog:
 
         if is_enabled:
             # Zeige Sub-Option für manuellen Import (eingerückt)
-            self.sd_skip_manual_checkbox.grid(row=5, column=0, columnspan=2, sticky="w", padx=30, pady=(0, 2))
+            self.sd_skip_manual_checkbox.grid(row=8, column=0, columnspan=2, sticky="w", padx=30, pady=(0, 2))
         else:
             # Verstecke Sub-Option
             self.sd_skip_manual_checkbox.grid_forget()
             self.sd_skip_processed_manual_var.set(False)
-            self.sd_clear_var.set(False)
-            self.sd_auto_import_var.set(False)
-            self.sd_skip_processed_var.set(False)
+
+    def on_size_limit_toggle(self):
+        """Wird aufgerufen wenn die Größen-Limit Checkbox geändert wird"""
+        is_enabled = self.sd_size_limit_enabled_var.get()
+
+        if is_enabled:
+            # Zeige Eingabefeld (noch mehr eingerückt als Checkbox)
+            self.sd_size_limit_frame.grid(row=4, column=0, columnspan=2, sticky="w", padx=50, pady=(0, 2))
+        else:
+            # Verstecke Eingabefeld
+            self.sd_size_limit_frame.grid_forget()
 
     def on_parallel_processing_toggle(self):
         """Wird aufgerufen wenn die Paralleles Processing Checkbox geändert wird"""
@@ -685,6 +730,8 @@ class SettingsDialog:
         self.sd_auto_import_var.set(settings.get("sd_auto_import", False))
         self.sd_skip_processed_var.set(settings.get("sd_skip_processed", False))  # NEU
         self.sd_skip_processed_manual_var.set(settings.get("sd_skip_processed_manual", False))  # NEU
+        self.sd_size_limit_enabled_var.set(settings.get("sd_size_limit_enabled", False))  # NEU
+        self.sd_size_limit_mb_var.set(str(settings.get("sd_size_limit_mb", 2000)))  # NEU
 
         # Hardware-Beschleunigung
         self.hardware_acceleration_var.set(settings.get("hardware_acceleration_enabled", True))
@@ -721,6 +768,20 @@ class SettingsDialog:
         sd_auto_import = self.sd_auto_import_var.get()
         sd_skip_processed = self.sd_skip_processed_var.get()  # NEU
         sd_skip_processed_manual = self.sd_skip_processed_manual_var.get()  # NEU
+        sd_size_limit_enabled = self.sd_size_limit_enabled_var.get()  # NEU
+
+        # Validiere Größen-Limit
+        sd_size_limit_mb = 2000  # Default
+        if sd_size_limit_enabled:
+            try:
+                sd_size_limit_mb = int(self.sd_size_limit_mb_var.get())
+                if sd_size_limit_mb <= 0:
+                    raise ValueError("Wert muss größer als 0 sein")
+            except ValueError:
+                messagebox.showwarning("Ungültige Eingabe",
+                                      "Bitte geben Sie eine gültige Zahl für das Größen-Limit ein (z.B. 2000).",
+                                      parent=self.dialog)
+                return
 
         # Hardware-Beschleunigung
         hardware_acceleration_enabled = self.hardware_acceleration_var.get()
@@ -764,6 +825,8 @@ class SettingsDialog:
             current_settings["sd_auto_import"] = sd_auto_import
             current_settings["sd_skip_processed"] = sd_skip_processed  # NEU
             current_settings["sd_skip_processed_manual"] = sd_skip_processed_manual  # NEU
+            current_settings["sd_size_limit_enabled"] = sd_size_limit_enabled  # NEU
+            current_settings["sd_size_limit_mb"] = sd_size_limit_mb  # NEU
 
             # Hardware-Beschleunigung
             current_settings["hardware_acceleration_enabled"] = hardware_acceleration_enabled

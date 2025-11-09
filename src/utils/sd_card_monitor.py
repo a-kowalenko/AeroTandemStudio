@@ -7,6 +7,7 @@ import time
 import threading
 import shutil
 import string
+import tkinter as tk
 
 try:
     import win32api
@@ -50,6 +51,11 @@ class SDCardMonitor:
         self.known_drives = set()
         self.backup_in_progress = False
         self.history = MediaHistoryStore.instance()  # NEU
+
+        # NEU: Event-System für Größen-Limit-Dialog
+        self.size_limit_decision_event = threading.Event()
+        self.size_limit_decision = None  # Wird vom Haupt-Thread gesetzt
+        self.pending_files_info = None  # Gespeicherte Datei-Infos für Dialog
 
     def start_monitoring(self):
         """Startet die Überwachung von SD-Karten"""
@@ -193,8 +199,31 @@ class SDCardMonitor:
             self.on_status_change('backup_started', drive)
 
         try:
-            # Erstelle Backup
-            backup_path, error_message = self._create_backup(drive, backup_folder)
+            # NEU: Prüfe Größen-Limit bevor Backup startet
+            if settings.get("sd_size_limit_enabled", False):
+                result = self._check_size_limit_and_select_files(drive, settings)
+
+                if result == "cancel":
+                    # User hat abgebrochen - KEINE Fehlermeldung anzeigen
+                    print("Backup abgebrochen durch User (Größen-Limit)")
+                    # Rufe Callback auf aber ohne Fehlermeldung (stiller Abbruch)
+                    # on_backup_complete wird NICHT aufgerufen bei User-Abbruch
+                    return
+                elif result == "proceed_all":
+                    # User will alle Dateien importieren (trotz Limit)
+                    selected_files = None
+                elif isinstance(result, list):
+                    # User hat Dateien ausgewählt
+                    selected_files = result
+                    print(f"User hat {len(selected_files)} Dateien ausgewählt")
+                else:
+                    # Unter Limit oder Fehler - normal weitermachen
+                    selected_files = None
+            else:
+                selected_files = None
+
+            # Erstelle Backup (mit optionaler Dateiauswahl)
+            backup_path, error_message = self._create_backup(drive, backup_folder, selected_files)
 
             if backup_path:
                 print(f"Backup erfolgreich: {backup_path}")
@@ -229,16 +258,148 @@ class SDCardMonitor:
             if self.on_backup_complete:
                 self.on_backup_complete(None, False, error_message)
         finally:
+            # Setze backup_in_progress IMMER zurück (auch bei Fehler oder SD-Entfernung)
             self.backup_in_progress = False
 
-            # Status-Callback: Backup beendet
+            # Status-Callback: Backup beendet (auch bei Fehler/Abbruch)
             if self.on_status_change:
-                self.on_status_change('backup_finished', backup_path if backup_path else None)
+                self.on_status_change('backup_finished', None)
 
-    def _create_backup(self, drive, backup_folder):
+            # Entferne Drive aus known_drives, damit es beim nächsten Einstecken neu erkannt wird
+            try:
+                if drive in self.known_drives:
+                    self.known_drives.discard(drive)
+                    print(f"Drive {drive} aus known_drives entfernt")
+            except:
+                pass
+
+    def _check_size_limit_and_select_files(self, drive, settings):
+        """
+        Prüft Größen-Limit und zeigt ggf. Dateiauswahl-Dialog via Haupt-Thread.
+
+        Returns:
+            "cancel": User hat abgebrochen
+            "proceed_all": Alle Dateien importieren
+            list: Liste der ausgewählten Dateipfade
+            None: Unter Limit, normal fortfahren
+        """
+        try:
+            limit_mb = settings.get("sd_size_limit_mb", 2000)
+            skip_processed = settings.get("sd_skip_processed", False)
+
+            # Scanne Dateien
+            dcim_source = os.path.join(drive, "DCIM")
+            if not os.path.isdir(dcim_source):
+                return None  # Kein DCIM Ordner, normal fortfahren
+
+            # Sammle alle Mediendateien
+            valid_video_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.m4v', '.mpg', '.mpeg', '.wmv', '.flv', '.webm'}
+            valid_photo_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.gif', '.webp', '.heic', '.raw', '.cr2', '.nef', '.arw', '.dng'}
+            valid_extensions = valid_video_extensions | valid_photo_extensions
+
+            files_info = []
+            total_size = 0
+
+            for root, dirs, files in os.walk(dcim_source):
+                for file in files:
+                    file_lower = file.lower()
+                    file_ext = os.path.splitext(file_lower)[1]
+
+                    if file_ext in valid_extensions:
+                        file_path = os.path.join(root, file)
+
+                        try:
+                            size_bytes = os.path.getsize(file_path)
+
+                            # Filtere bereits verarbeitete Dateien wenn Option aktiv
+                            if skip_processed:
+                                ident = self.history.compute_identity(file_path)
+                                if ident:
+                                    identity_hash, _ = ident
+                                    if self.history.contains(identity_hash):
+                                        continue  # Überspringe bereits verarbeitete Datei
+
+                            files_info.append({
+                                'path': file_path,
+                                'filename': file,
+                                'size_bytes': size_bytes,
+                                'is_video': file_ext in valid_video_extensions
+                            })
+                            total_size += size_bytes
+                        except Exception as e:
+                            print(f"Fehler beim Lesen von {file_path}: {e}")
+                            continue
+
+            if not files_info:
+                return None  # Keine Dateien, normal fortfahren
+
+            total_size_mb = total_size / (1024 * 1024)
+            print(f"Gesamtgröße der importierbaren Dateien: {total_size_mb:.1f} MB (Limit: {limit_mb} MB)")
+
+            # Prüfe Limit
+            if total_size_mb <= limit_mb:
+                return None  # Unter Limit, normal fortfahren
+
+            # Über Limit - benachrichtige Haupt-Thread via Callback
+            print(f"⚠️ Größen-Limit überschritten! Warte auf User-Entscheidung...")
+
+            # Speichere Datei-Infos für späteren Zugriff
+            self.pending_files_info = files_info
+
+            # Reset Event und Decision
+            self.size_limit_decision_event.clear()
+            self.size_limit_decision = None
+
+            # Sende Callback an Haupt-Thread
+            if self.on_status_change:
+                self.on_status_change('size_limit_exceeded', {
+                    'files_info': files_info,
+                    'total_size_mb': total_size_mb,
+                    'limit_mb': limit_mb
+                })
+
+            # Warte auf User-Entscheidung (max 60 Sekunden)
+            print("Warte auf User-Entscheidung...")
+            decision_received = self.size_limit_decision_event.wait(timeout=60)
+
+            if not decision_received:
+                print("⚠️ Timeout: Keine User-Entscheidung (möglicherweise SD entfernt), breche ab")
+                # Bei Timeout: Als Abbruch behandeln statt alle zu importieren
+                return "cancel"
+
+            decision = self.size_limit_decision
+            print(f"User-Entscheidung erhalten: {decision}")
+
+            return decision
+
+        except Exception as e:
+            print(f"Fehler bei Größen-Prüfung: {e}")
+            import traceback
+            traceback.print_exc()
+            return None  # Bei Fehler normal fortfahren
+
+    def set_size_limit_decision(self, decision):
+        """
+        Wird vom Haupt-Thread aufgerufen um die User-Entscheidung zu setzen.
+
+        Args:
+            decision: "cancel", "proceed_all" oder liste von Dateipfaden
+        """
+        self.size_limit_decision = decision
+        self.size_limit_decision_event.set()
+        print(f"Size-Limit-Entscheidung gesetzt: {type(decision).__name__}")
+
+
+    def _create_backup(self, drive, backup_folder, selected_files=None):
         """
         Erstellt ein Backup von der SD-Karte
         Kopiert nur vollwertige Mediendateien direkt in den Backup-Ordner (flache Struktur)
+
+        Args:
+            drive: Laufwerksbuchstabe
+            backup_folder: Zielordner
+            selected_files: Optional Liste von Dateipfaden die kopiert werden sollen.
+                           Wenn None, werden alle Dateien kopiert.
 
         Returns:
             Tuple (backup_path, error_message):
@@ -252,6 +413,9 @@ class SDCardMonitor:
             backup_path = os.path.join(backup_folder, f"SD_Backup_{timestamp}")
 
             print(f"Starte Backup von {drive} nach {backup_path}...")
+
+            if selected_files:
+                print(f"  → Nur {len(selected_files)} ausgewählte Dateien werden kopiert")
 
             # DCIM Ordner
             dcim_source = os.path.join(drive, "DCIM")
@@ -269,17 +433,25 @@ class SDCardMonitor:
             valid_photo_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.gif', '.webp', '.heic', '.raw', '.cr2', '.nef', '.arw', '.dng'}
             valid_extensions = valid_video_extensions | valid_photo_extensions
 
-            # Sammle alle Mediendateien
+            # Sammle alle Mediendateien (oder nur ausgewählte)
             media_files = []
-            for root, dirs, files in os.walk(dcim_source):
-                for file in files:
-                    file_lower = file.lower()
-                    file_ext = os.path.splitext(file_lower)[1]
 
-                    # Nur vollwertige Mediendateien (keine .lrf, .thm, etc.)
-                    if file_ext in valid_extensions:
-                        src_file = os.path.join(root, file)
-                        media_files.append(src_file)
+            if selected_files:
+                # Nur ausgewählte Dateien
+                for file_path in selected_files:
+                    if os.path.exists(file_path):
+                        media_files.append(file_path)
+            else:
+                # Alle Dateien sammeln
+                for root, dirs, files in os.walk(dcim_source):
+                    for file in files:
+                        file_lower = file.lower()
+                        file_ext = os.path.splitext(file_lower)[1]
+
+                        # Nur vollwertige Mediendateien (keine .lrf, .thm, etc.)
+                        if file_ext in valid_extensions:
+                            src_file = os.path.join(root, file)
+                            media_files.append(src_file)
 
             if not media_files:
                 error_msg = "Keine Mediendateien auf der SD-Karte gefunden"
@@ -368,8 +540,14 @@ class SDCardMonitor:
                         speed_mbps = current_mb / elapsed_time if elapsed_time > 0 else 0
                         self.on_progress_update(current_mb, total_mb, speed_mbps)
 
+                except (IOError, OSError, FileNotFoundError) as e:
+                    # IO-Fehler deutet auf SD-Entfernung hin
+                    error_msg = f"SD-Karte wurde während des Backups entfernt: {str(e)}"
+                    print(f"  ⚠️ {error_msg}")
+                    return None, error_msg
                 except Exception as e:
-                    print(f"Fehler beim Kopieren von {src_file}: {e}")
+                    print(f"  ⚠️ Fehler beim Kopieren von {src_file}: {e}")
+                    # Weiter mit nächster Datei
 
             print(f"Backup abgeschlossen: {copied_count} neue Mediendateien kopiert")
 

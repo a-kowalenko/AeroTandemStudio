@@ -1669,8 +1669,123 @@ class VideoGeneratorApp:
                 self.sd_status_indicator.set_clearing_active(False)
                 self.progress_handler.set_status("Status: SD-Karte geleert")
 
+            elif status_type == 'size_limit_exceeded':
+                # NEU: Größen-Limit überschritten - zeige Dialog
+                self._show_size_limit_dialog(data)
+
         # UI-Update im Haupt-Thread
         self.root.after(0, update_ui)
+
+    def _show_size_limit_dialog(self, data):
+        """
+        Zeigt Dialog für Größen-Limit-Überschreitung (läuft im Haupt-Thread).
+
+        Args:
+            data: Dict mit files_info, total_size_mb, limit_mb
+        """
+        from tkinter import messagebox
+
+        files_info = data['files_info']
+        total_size_mb = data['total_size_mb']
+        limit_mb = data['limit_mb']
+
+        # Zeige custom Dialog mit 3 Optionen
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Größen-Limit überschritten")
+        dialog.geometry("550x400")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # Zentriere Dialog
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        # Inhalt
+        main_frame = tk.Frame(dialog, padx=20, pady=20)
+        main_frame.pack(fill='both', expand=True)
+
+        # Warnung
+        tk.Label(main_frame,
+                text="⚠️ Zu viele Dateien auf SD-Karte!",
+                font=("Arial", 14, "bold"),
+                fg="#f44336").pack(pady=(0, 15))
+
+        # Info
+        info_text = (
+            f"Gefundene Dateien: {len(files_info)}\n"
+            f"Gesamtgröße: {total_size_mb:.0f} MB\n"
+            f"Eingestelltes Limit: {limit_mb} MB\n\n"
+            f"Was möchten Sie tun?"
+        )
+        tk.Label(main_frame, text=info_text, font=("Arial", 10), justify='left').pack(pady=(0, 20))
+
+        # Buttons
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill='x')
+
+        def on_proceed_all():
+            self.sd_card_monitor.set_size_limit_decision("proceed_all")
+            dialog.destroy()
+
+        def on_select_files():
+            dialog.destroy()
+            # Zeige Dateiauswahl-Dialog
+            self._show_file_selector_dialog(files_info, total_size_mb)
+
+        def on_cancel():
+            self.sd_card_monitor.set_size_limit_decision("cancel")
+            dialog.destroy()
+
+        tk.Button(button_frame, text="Trotzdem alle importieren",
+                 command=on_proceed_all, bg="#FF9800", fg="white",
+                 font=("Arial", 10), width=25, height=2).pack(pady=5)
+
+        tk.Button(button_frame, text="Dateien auswählen...",
+                 command=on_select_files, bg="#2196F3", fg="white",
+                 font=("Arial", 10), width=25, height=2).pack(pady=5)
+
+        tk.Button(button_frame, text="Abbrechen",
+                 command=on_cancel, bg="#9E9E9E", fg="white",
+                 font=("Arial", 10), width=25, height=2).pack(pady=5)
+
+        # X-Button soll wie Abbrechen funktionieren
+        dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+
+    def _show_file_selector_dialog(self, files_info, total_size_mb):
+        """
+        Zeigt Dateiauswahl-Dialog.
+
+        Args:
+            files_info: Liste von Datei-Infos
+            total_size_mb: Gesamtgröße in MB
+        """
+        try:
+            from src.gui.components.sd_file_selector_dialog import SDFileSelectorDialog
+
+            selector = SDFileSelectorDialog(self.root, files_info, total_size_mb)
+            selector.show()
+
+            # Warte bis Dialog geschlossen
+            self.root.wait_window(selector.dialog)
+
+            # Hole Auswahl
+            selected_files = selector.get_selected_files()
+
+            if selected_files is None:
+                # User hat abgebrochen
+                self.sd_card_monitor.set_size_limit_decision("cancel")
+            else:
+                # User hat Dateien ausgewählt
+                self.sd_card_monitor.set_size_limit_decision(selected_files)
+
+        except Exception as e:
+            print(f"Fehler beim Dateiauswahl-Dialog: {e}")
+            import traceback
+            traceback.print_exc()
+            # Bei Fehler: Alle importieren
+            self.sd_card_monitor.set_size_limit_decision("proceed_all")
 
     def on_sd_progress_update(self, current_mb, total_mb, speed_mbps):
         """

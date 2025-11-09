@@ -53,6 +53,8 @@ class ConfigManager:
             "sd_auto_import": False,
             "sd_skip_processed": False,  # Nur neue Dateien sichern/importieren
             "sd_skip_processed_manual": False,  # Auch manuellen Import prüfen
+            "sd_size_limit_enabled": False,  # Größen-Limit aktivieren
+            "sd_size_limit_mb": 2000,  # Größen-Limit in MB
             # Hardware-Beschleunigung
             "hardware_acceleration_enabled": True,  # Hardware-Beschleunigung standardmäßig aktiviert
             # Paralleles Processing

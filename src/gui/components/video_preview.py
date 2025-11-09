@@ -639,8 +639,11 @@ class VideoPreview:
 
             # NEU: Prüfe ob die Datei bereits im Working-Folder liegt
             # (wurde von drag_drop.py importiert)
-            if self.temp_dir and os.path.normpath(os.path.dirname(original_path)) == os.path.normpath(self.temp_dir):
-                # Video ist bereits im Working-Folder!
+            is_in_working_folder = (self.temp_dir and
+                                   os.path.normpath(os.path.dirname(original_path)) == os.path.normpath(self.temp_dir))
+
+            if is_in_working_folder and not needs_reencoding:
+                # Video ist bereits im Working-Folder UND kein Re-Encoding nötig!
                 print(f"✅ Video bereits im Working-Folder: {os.path.basename(original_path)}")
 
                 # Verwende die Datei direkt
@@ -661,6 +664,10 @@ class VideoPreview:
 
                 self.parent.after(0, self.progress_handler.update_progress, i + 1, total_clips)
                 continue  # Überspringe weitere Verarbeitung für dieses Video
+
+            # Wenn needs_reencoding=True: Datei muss neu kodiert werden, auch wenn im Working-Folder
+            if is_in_working_folder and needs_reencoding:
+                print(f"🔄 Video im Working-Folder wird neu kodiert (Format-Unterschiede): {os.path.basename(original_path)}")
 
             filename = os.path.basename(original_path)
             # Ersetze ungültige Zeichen im Dateinamen für den Fall der Fälle
@@ -2111,6 +2118,27 @@ class VideoPreview:
     def get_combined_video_path(self):
         """Gibt den Pfad des kombinierten Videos zurück"""
         return self.combined_video_path
+
+    def update_encoding_progress(self, progress, fps=None, eta=None):
+        """
+        Aktualisiert die Encoding-Fortschrittsanzeige in der Video-Preview.
+
+        Args:
+            progress: Fortschritt in Prozent (0-100)
+            fps: Optional FPS-Wert
+            eta: Optional ETA-String
+        """
+        # Update Encoding-Label mit Fortschrittsanzeige
+        if progress is not None:
+            status_text = f"Encoding: {int(progress)}%"
+            if fps and fps > 0:
+                status_text += f" ({fps:.1f} fps)"
+            if eta:
+                status_text += f" - {eta}"
+
+            self.encoding_label.config(text=status_text, fg="#2196F3")  # Blau während Encoding
+
+        self.parent.update_idletasks()
 
     # --- NEUE METHODEN (Cache-Verwaltung) ---
 

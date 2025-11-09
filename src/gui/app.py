@@ -1264,8 +1264,22 @@ class VideoGeneratorApp:
     def _update_encoding_progress(self, task_name="Encoding", progress=None, fps=0.0, eta=None,
                                   current_time=0.0, total_time=None, task_id=None):
         """Callback für Live-Encoding-Fortschritt"""
+        # Update ProgressHandler
         self.root.after(0, self.progress_handler.update_encoding_progress,
                        task_name, progress, fps, eta, current_time, total_time, task_id)
+
+        # Update Drag&Drop Tabelle wenn task_id vorhanden (= Video-Index)
+        if task_id is not None and progress is not None:
+            # Aktiviere Progress-Modus beim ersten Update
+            if not self.drag_drop.is_encoding:
+                self.root.after(0, self.drag_drop.show_progress_mode)
+
+            # Update Progress für das Video
+            self.root.after(0, self.drag_drop.update_video_progress, task_id, progress, fps, eta)
+
+        # Update Video-Preview
+        if hasattr(self, 'video_preview') and self.video_preview and progress is not None:
+            self.root.after(0, self.video_preview.update_encoding_progress, progress, fps, eta)
 
     def _handle_status_update(self, status_type, message):
         """Callback für Statusupdates"""
@@ -1285,6 +1299,10 @@ class VideoGeneratorApp:
         elif status_type == "update":
             self.root.after(0, self.progress_handler.set_status, f"Status: {message}.")
             return
+
+        # Zurück zu Normal-Modus in Drag&Drop
+        if hasattr(self, 'drag_drop') and self.drag_drop and self.drag_drop.is_encoding:
+            self.root.after(0, self.drag_drop.show_normal_mode)
 
         self.root.after(0, self._switch_to_create_mode)
 

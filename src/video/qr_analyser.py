@@ -102,3 +102,78 @@ def analysiere_ersten_clip(video_pfad: str) -> Tuple[Optional[Kunde], bool]:
     print("Analyse der ersten 5 Sekunden beendet. Keinen gültigen QR-Code gefunden.")
     cap.release()
     return None, False
+
+
+def analysiere_foto(foto_pfad: str) -> Tuple[Optional[Kunde], bool]:
+    """
+    Analysiert ein Foto auf einen QR-Code, parst diesen in das Kunde-Modell
+    und gibt das Modell sowie einen Erfolgsstatus zurück.
+
+    Args:
+        foto_pfad (str): Der Dateipfad zum Foto.
+
+    Returns:
+        Tuple[Optional[Kunde], bool]: Ein Tupel, bestehend aus dem
+                                            geparsten Datenobjekt (oder None) und einem
+                                            booleschen Erfolgsstatus.
+    """
+    try:
+        # Lade das Bild mit OpenCV
+        image = cv2.imread(foto_pfad)
+
+        if image is None:
+            print(f"Fehler: Foto konnte nicht geladen werden: {foto_pfad}")
+            return None, False
+
+        # Finde und dekodiere QR-Codes im Bild
+        gefundene_codes = decode(image)
+
+        if not gefundene_codes:
+            print(f"Kein QR-Code im Foto gefunden: {foto_pfad}")
+            return None, False
+
+        # Versuche den ersten gefundenen Code zu parsen
+        for code in gefundene_codes:
+            try:
+                # Dekodiere die Daten (sind Bytes) in einen String
+                qr_daten_str = code.data.decode('utf-8')
+
+                # Parse den String (vermutlich JSON) in ein Dictionary
+                daten_dict = json.loads(qr_daten_str)
+
+                # Versuche, das Dictionary in unser Datenmodell zu parsen
+                # Dies validiert auch, ob alle Felder vorhanden und vom richtigen Typ sind
+                kunden_obj = Kunde(
+                    kunde_id=int(daten_dict.get('kunde_id')),
+                    email=str(daten_dict.get('email')),
+                    vorname=str(daten_dict.get('vorname')),
+                    nachname=str(daten_dict.get('nachname')),
+                    telefon=str(daten_dict.get('telefon')),
+                    handcam_foto=bool(daten_dict.get('handcam_foto')),
+                    handcam_video=bool(daten_dict.get('handcam_video')),
+                    outside_foto=bool(daten_dict.get('outside_foto')),
+                    outside_video=bool(daten_dict.get('outside_video')),
+                    ist_bezahlt_handcam_foto=bool(daten_dict.get('ist_bezahlt_handcam_foto')),
+                    ist_bezahlt_handcam_video=bool(daten_dict.get('ist_bezahlt_handcam_video')),
+                    ist_bezahlt_outside_foto=bool(daten_dict.get('ist_bezahlt_outside_foto')),
+                    ist_bezahlt_outside_video=bool(daten_dict.get('ist_bezahlt_outside_video'))
+                )
+
+                # Erfolgreich gefunden UND geparst!
+                print(f"QR-Code im Foto gefunden und erfolgreich geparst: {foto_pfad}")
+                return kunden_obj, True
+
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                # Der QR-Code wurde gefunden, aber die Daten waren ungültig
+                print(f"QR-Code im Foto gefunden, aber Parsing fehlgeschlagen: {e}")
+                # Versuche nächsten Code falls mehrere vorhanden
+                continue
+
+        # Alle gefundenen Codes waren ungültig
+        print(f"QR-Code(s) gefunden, aber keine gültigen Kundendaten im Foto: {foto_pfad}")
+        return None, False
+
+    except Exception as e:
+        print(f"Ein unerwarteter Fehler beim Analysieren des Fotos ist aufgetreten: {e}")
+        return None, False
+

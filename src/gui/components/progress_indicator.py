@@ -20,12 +20,25 @@ class ProgressHandler:
                                      bd=1, relief=tk.SUNKEN, anchor=tk.W)
 
     def pack_progress_bar(self):
-        self.progress_bar.pack(pady=5)
-        self.eta_label.pack(pady=2)
-        self.encoding_details_label.pack(pady=2)  # NEU
+        # Container für Progress Bar und Prozentanzeige nebeneinander
+        if not hasattr(self, 'progress_container') or not self.progress_container.winfo_exists():
+            self.progress_container = tk.Frame(self.parent)
+            self.progress_container.pack(pady=0)
+
+        self.progress_bar.pack(in_=self.progress_container, side=tk.LEFT, padx=(0, 10))
+        self.eta_label.pack(in_=self.progress_container, side=tk.LEFT)
+
+        # Encoding-Details Label darunter (direkt im parent, nicht im Container)
+        self.encoding_details_label.pack(in_=self.parent, pady=0)
+
+    def pack_progress_bar_right(self):
+        """Packt die Progress-Bar-Elemente rechts ausgerichtet"""
+        self.progress_bar.pack(side=tk.RIGHT, padx=(10, 0))
+        self.eta_label.pack(side=tk.RIGHT, padx=(5, 0))
+        self.encoding_details_label.pack(side=tk.RIGHT, padx=(5, 0))
 
     def pack_status_label(self):
-        self.status_label.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
+        self.status_label.pack(side=tk.BOTTOM, fill=tk.X, pady=0)
 
     def update_progress(self, step, total_steps=7):
         progress = (step / total_steps) * 100
@@ -93,7 +106,15 @@ class ProgressHandler:
         self.progress_bar.pack_forget()
         self.eta_label.pack_forget()
         self.encoding_details_label.pack_forget()  # NEU
-        self.status_label.config(text="Status: Bereit.")
+
+        # Container entfernen falls vorhanden
+        if hasattr(self, 'progress_container') and self.progress_container.winfo_exists():
+            self.progress_container.pack_forget()
+
+        self.progress_bar['value'] = 0
+        self.eta_label.config(text="")
+        self.encoding_details_label.config(text="")  # NEU
 
     def set_status(self, text):
         self.status_label.config(text=text)
+

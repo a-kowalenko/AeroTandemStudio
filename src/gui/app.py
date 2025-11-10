@@ -3,9 +3,9 @@ from tkinter import messagebox, ttk
 import threading
 import os
 import queue
-import uuid  # NEU
 from typing import List
 from tkinterdnd2 import TkinterDnD
+from datetime import datetime
 
 from .components.form_fields import FormFields
 from .components.drag_drop import DragDropFrame
@@ -24,6 +24,7 @@ from ..video.processor import VideoProcessor
 from ..utils.config import ConfigManager
 from ..utils.validation import validate_form_data
 from ..utils.sd_card_monitor import SDCardMonitor
+from ..utils.media_history import MediaHistoryStore
 from ..installer.ffmpeg_installer import ensure_ffmpeg_installed
 from ..utils.file_utils import test_server_connection
 from ..installer.updater import initialize_updater
@@ -32,8 +33,16 @@ from ..utils.constants import APP_VERSION
 
 class VideoGeneratorApp:
 
-    def __init__(self):
-        self.root = TkinterDnD.Tk()
+    def __init__(self, root=None, splash_callback=None):
+        """
+        Args:
+            root: Optionales bestehendes TkinterDnD.Tk() Fenster.
+                  Wenn None, wird ein neues erstellt.
+            splash_callback: Optional - Callback für Splash-Screen Status-Updates
+        """
+        # Verwende übergebenes Root oder erstelle neues
+        self.root = root if root is not None else TkinterDnD.Tk()
+        self.splash_callback = splash_callback
         self.config = ConfigManager()
         self.video_processor = None
         self.erstellen_button = None
@@ -64,16 +73,231 @@ class VideoGeneratorApp:
         self.old_button_bg = ""
         self.old_button_cursor = ""
 
-        self.setup_gui()
+        # Flag für Initialisierungsstatus
+        self.initialization_complete = False
+
+        # Starte asynchrone Initialisierung
+        self._init_step_1()
+
+    def _init_step_1(self):
+        """Schritt 1: GUI erstellen - aufgeteilt in Sub-Schritte"""
+        if self.splash_callback:
+            self.splash_callback("Erstelle Fenster...")
+
+        # Starte GUI-Erstellung in Chunks
+        self._setup_gui_step_1()
+
+    def _setup_gui_step_1(self):
+        """GUI Setup Teil 1: Grundkonfiguration"""
+        # WICHTIG: Stelle sicher dass Fenster versteckt bleibt!
+        if not self.root.wm_state() == 'withdrawn':
+            self.root.withdraw()
+
+        self.root.title("Aero Tandem Studio")
+
+        # Zentriere Fenster auf dem Bildschirm
+        window_width = 1400
+        window_height = 800
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
+        self.root.config(padx=20, pady=0)
+
+        # Nächster Chunk
+        self.root.after(1, self._setup_gui_step_2)
+
+    def _setup_gui_step_2(self):
+        """GUI Setup Teil 2: Header und Container"""
+        if self.splash_callback:
+            self.splash_callback("Erstelle Layout...")
+
+        # Header
+        self.create_header()
+
+        # Container
+        self.main_container = tk.Frame(self.root)
+        self.main_container.pack(fill="both", expand=True)
+
+        self.left_frame = tk.Frame(self.main_container, width=600)
+        self.left_frame.pack(side="left", fill="both", expand=True, padx=(0, 20))
+
+        self.right_frame = tk.Frame(self.main_container, width=350)
+        self.right_frame.pack(side="right", fill="y", padx=(20, 0))
+
+        # Nächster Chunk
+        self.root.after(1, self._setup_gui_step_3)
+
+    def _setup_gui_step_3(self):
+        """GUI Setup Teil 3: Komponenten erstellen"""
+        if self.splash_callback:
+            self.splash_callback("Lade Formulare...")
+
+        # Formular und Drag&Drop
+        self.form_fields = FormFields(self.left_frame, self.config, self)
+
+        self.drag_drop = DragDropFrame(self.left_frame, self)
+
+        # Nächster Chunk
+        self.root.after(1, self._setup_gui_step_4)
+
+    def _setup_gui_step_4(self):
+        """GUI Setup Teil 4: Tabs und Preview"""
+        if self.splash_callback:
+            self.splash_callback("Initialisiere Video Player...")
+
+        # Tabs erstellen
+        style = ttk.Style()
+        style.configure('Preview.TNotebook.Tab', font=('Arial', 8, 'bold'), padding=[20, 5])
+
+        self.preview_notebook = ttk.Notebook(self.right_frame, style='Preview.TNotebook')
+        self.video_tab = ttk.Frame(self.preview_notebook)
+        self.preview_notebook.add(self.video_tab, text="Video Vorschau")
+        self.foto_tab = ttk.Frame(self.preview_notebook)
+        self.preview_notebook.add(self.foto_tab, text="Foto Vorschau")
+
+        # Video Player und Preview
+        self.video_player = VideoPlayer(self.video_tab, self)
+
+        self.video_preview = VideoPreview(self.video_tab, self)
+
+        # Nächster Chunk
+        self.root.after(1, self._setup_gui_step_5)
+
+    def _setup_gui_step_5(self):
+        """GUI Setup Teil 5: Foto-Preview und Button"""
+        if self.splash_callback:
+            self.splash_callback("Initialisiere Foto Vorschau...")
+
+        self.photo_preview = PhotoPreview(self.foto_tab, self)
+
+
+        # Rufe den Rest von setup_gui auf
+        self._finish_setup_gui()
+
+        # Weiter mit nächstem Init-Schritt
+        self.root.after(10, self._init_step_2)
+
+    def _finish_setup_gui(self):
+        """Finalisiert setup_gui - erstellt Upload-Frame etc."""
+        # Event-Binding
+        self.preview_notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        # Upload Frame erstellen (aus original setup_gui kopiert)
+        self.upload_frame = tk.Frame(self.right_frame)
+        progress_row = tk.Frame(self.upload_frame)
+        progress_row.pack(fill="x", side="top")
+
+        self.progress_handler = ProgressHandler(self.root, progress_row)
+
+        controls_row = tk.Frame(self.upload_frame)
+        controls_row.pack(fill="x", side="top", pady=(5, 0))
+
+        checkboxes_frame = tk.Frame(controls_row)
+        checkboxes_frame.pack(side="left", fill="both", expand=True)
+
+        upload_row = tk.Frame(checkboxes_frame)
+        upload_row.pack(fill="x", pady=(0, 3))
+
+        self.upload_to_server_var = tk.BooleanVar()
+        self.upload_checkbox = tk.Checkbutton(upload_row, text="Auf Server laden",
+                                               variable=self.upload_to_server_var,
+                                               font=("Arial", 11),
+                                               command=self.on_upload_checkbox_toggle)
+        self.upload_checkbox.pack(side="left")
+
+        self.server_status_label = tk.Label(upload_row, text="Prüfe...",
+                                            font=("Arial", 9, "bold"), fg="orange")
+        self.server_status_label.pack(side="left", padx=(5, 0))
+
+        autoclear_row = tk.Frame(checkboxes_frame)
+        autoclear_row.pack(fill="x")
+
+        self.auto_clear_files_var = tk.BooleanVar()
+        self.auto_clear_checkbox = tk.Checkbutton(autoclear_row,
+                                                   text="Nach Erstellen zurücksetzen",
+                                                   variable=self.auto_clear_files_var,
+                                                   font=("Arial", 11),
+                                                   command=self._on_auto_clear_toggle)
+        self.auto_clear_checkbox.pack(side="left")
+
+        self.erstellen_button = tk.Button(controls_row, text="Erstellen",
+                                          font=("Arial", 12, "bold"),
+                                          command=self.erstelle_video,
+                                          bg="#4CAF50", fg="white",
+                                          width=36, height=2)
+        self.erstellen_button.pack(side="right", padx=(10, 0))
+
+        self.pack_components()
+        self.load_settings()
+        self.test_server_connection_async()
+
+    def _init_step_2(self):
+        """Schritt 2: Dependencies prüfen"""
+        if self.splash_callback:
+            self.splash_callback("Prüfe FFmpeg Installation...")
+
         self.ensure_dependencies()
-        self.initialize_sd_card_monitor()
+        self.root.after(10, self._init_step_3)
+
+    def _init_step_3(self):
+        """Schritt 3: Finalisierung"""
+        if self.splash_callback:
+            self.splash_callback("Finalisiere...")
+
+        # SD-Monitor wird NACH Splash-Schließung gestartet (verzögert)
+        # Hier nur vorbereiten
+        self.root.after(10, self._init_complete)
+
+    def _init_complete(self):
+        """Initialisierung abgeschlossen"""
+        if self.splash_callback:
+            self.splash_callback("Bereit!")
 
         # NEU: Schließ-Ereignis abfangen
         self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
 
+        # Markiere Initialisierung als abgeschlossen
+        self.initialization_complete = True
+
+        # NEU: Initial WM-Button-Sichtbarkeit setzen
+        self.update_watermark_column_visibility()
+
+        print("✅ App-Initialisierung abgeschlossen")
+
+        # SD-Monitor verzögert starten (800ms nach Splash-Schließung)
+        self.root.after(800, self._delayed_sd_monitor_start)
+
+    def _delayed_sd_monitor_start(self):
+        """Startet SD-Monitor verzögert nach UI-Initialisierung"""
+        try:
+            if self.splash_callback:
+                # Splash könnte bereits geschlossen sein, ignoriere Fehler
+                try:
+                    self.splash_callback("Starte SD-Überwachung...")
+                except:
+                    pass
+
+            self.initialize_sd_card_monitor()
+            print("✅ SD-Karten Monitor gestartet")
+        except Exception as e:
+            print(f"⚠️ Fehler beim Starten des SD-Monitors: {e}")
+
+
     def setup_gui(self):
         self.root.title("Aero Tandem Studio")
-        self.root.geometry("1400x800")
+
+        # Zentriere Fenster auf dem Bildschirm
+        window_width = 1400
+        window_height = 800
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
         self.root.config(padx=20, pady=0)
 
         # Header mit Titel und Settings-Button
@@ -130,42 +354,74 @@ class VideoGeneratorApp:
         self.preview_notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         # Server-Upload Frame mit Status-Anzeige
+        # Neues Layout: Progress ganz rechts oben, darunter Checkboxen links und Button rechts
         self.upload_frame = tk.Frame(self.right_frame)
 
-        # Checkbox für Server-Upload
+        # Obere Zeile: Progress Handler ganz rechts
+        progress_row = tk.Frame(self.upload_frame)
+        progress_row.pack(fill="x", side="top")
+
+        # Progress Handler (wird hier initialisiert, aber später gepackt)
+        self.progress_handler = ProgressHandler(self.root, progress_row)
+
+        # Untere Zeile: Checkboxen links, Button rechts
+        controls_row = tk.Frame(self.upload_frame)
+        controls_row.pack(fill="x", side="top", pady=(0, 0))
+
+        # Linke Seite: Frame für Checkboxen (untereinander)
+        checkboxes_frame = tk.Frame(controls_row)
+        checkboxes_frame.pack(side="left", fill="both", expand=True)
+
+        # Erste Zeile: Server-Upload Checkbox und Status
+        upload_row = tk.Frame(checkboxes_frame)
+        upload_row.pack(fill="x", pady=(0, 0))
+
         self.upload_to_server_var = tk.BooleanVar()
         self.upload_checkbox = tk.Checkbutton(
-            self.upload_frame,
+            upload_row,
             text="Auf Server laden",
             variable=self.upload_to_server_var,
-            font=("Arial", 12),
+            font=("Arial", 11),
             command=self.on_upload_checkbox_toggle
         )
-        self.upload_checkbox.pack(side="left", padx=(0, 5))
+        self.upload_checkbox.pack(side="left")
 
         # Server Status Label
         self.server_status_label = tk.Label(
-            self.upload_frame,
+            upload_row,
             text="Prüfe...",
-            font=("Arial", 10, "bold"),
+            font=("Arial", 9, "bold"),
             fg="orange"
         )
-        self.server_status_label.pack(side="left")
+        self.server_status_label.pack(side="left", padx=(5, 0))
 
-        # Erstellen-Button
+        # Zweite Zeile: Auto-Clear Checkbox
+        autoclear_row = tk.Frame(checkboxes_frame)
+        autoclear_row.pack(fill="x")
+
+        self.auto_clear_files_var = tk.BooleanVar()
+        self.auto_clear_checkbox = tk.Checkbutton(
+            autoclear_row,
+            text="Nach Erstellen zurücksetzen",
+            variable=self.auto_clear_files_var,
+            font=("Arial", 11),
+            command=self._on_auto_clear_toggle
+        )
+        self.auto_clear_checkbox.pack(side="left")
+
+        # Rechte Seite: Erstellen-Button (kleiner, kompakter)
         self.erstellen_button = tk.Button(
-            self.right_frame,
+            controls_row,
             text="Erstellen",
-            font=("Arial", 14, "bold"),
+            font=("Arial", 12, "bold"),
             command=self.erstelle_video,
             bg="#4CAF50",
             fg="white",
-            width=20,
+            width=36,
             height=2
         )
+        self.erstellen_button.pack(side="right", padx=(10, 0))
 
-        # Progress Handler (unten über beiden Spalten)
-        self.progress_handler = ProgressHandler(self.root, self.upload_frame)
 
         self.pack_components()
         self.load_settings()
@@ -185,7 +441,7 @@ class VideoGeneratorApp:
             try:
                 from PIL import Image, ImageTk
                 img = Image.open(img_path).convert("RGBA")
-                img = img.resize((60, 60), Image.LANCZOS)
+                img = img.resize((50, 50), Image.LANCZOS)
                 self.logo_image = ImageTk.PhotoImage(img)
             except Exception:
                 try:
@@ -201,7 +457,7 @@ class VideoGeneratorApp:
         title_label = tk.Label(
             header_frame,
             text="Aero Tandem Studio",
-            font=("Arial", 18, "bold"),
+            font=("Arial", 16, "bold"),
             fg="#009d8b"
         )
         title_label.pack(side="left")
@@ -215,7 +471,7 @@ class VideoGeneratorApp:
         self.settings_button = tk.Button(
             header_frame,
             text="⚙",  # Gear Icon
-            font=("Arial", 18),
+            font=("Arial", 16),
             command=self.show_settings,
             bg="#f0f0f0",
             relief="flat",
@@ -288,25 +544,40 @@ class VideoGeneratorApp:
         widget.bind("<Leave>", hide_tooltip)
 
     def show_settings(self):
-        """Zeigt den Einstellungs-Dialog"""
-        SettingsDialog(self.root, self.config, on_settings_saved=self.on_settings_saved).show()
+        """
+        Zeigt den Einstellungs-Dialog
+
+        Öffnet ein modales Fenster mit allen Konfigurationsoptionen.
+        Nach dem Speichern wird on_settings_saved() automatisch aufgerufen.
+        """
+        SettingsDialog(
+            self.root,
+            self.config,
+            on_settings_saved=self.on_settings_saved
+        ).show()
 
     def on_settings_saved(self):
-        """Wird aufgerufen nachdem Settings gespeichert wurden"""
-        # WICHTIG: Config neu laden, damit Änderungen wirksam werden
+        """
+        Wird aufgerufen nachdem Settings gespeichert wurden
+
+        Lädt alle notwendigen Komponenten neu, damit Änderungen
+        sofort wirksam werden ohne die App neu starten zu müssen.
+        """
+        # Config neu laden für aktuelle Einstellungen
         self.config.reload_settings()
 
-        # WICHTIG: Hardware-Beschleunigung in VideoPreview neu laden
+        # Hardware-Beschleunigung in VideoPreview neu laden
         if hasattr(self, 'video_preview') and self.video_preview:
             self.video_preview.reload_hardware_acceleration_settings()
 
-        # WICHTIG: Wenn ein VideoProcessor existiert, auch dort neu laden
+        # Wenn VideoProcessor existiert, auch dort neu laden
         if hasattr(self, 'video_processor') and self.video_processor:
             self.video_processor.reload_hardware_acceleration_settings()
 
-        # Server-Verbindung testen
+        # Server-Verbindung asynchron testen
         self.test_server_connection_async()
-        # SD-Monitor sofort neu starten
+
+        # SD-Monitor sofort neu starten (wenn Auto-Backup aktiviert/deaktiviert wurde)
         self._restart_sd_monitor_if_needed()
 
     def pack_components(self):
@@ -316,22 +587,24 @@ class VideoGeneratorApp:
 
         # Rechte Spalte
         # Tab-View packen
-        self.preview_notebook.pack(fill="both", expand=True, pady=(0, 10))
+        self.preview_notebook.pack(fill="both", expand=True, pady=(0, 0))
 
         # Video-Tab Inhalt packen
         # self.title_label.pack(pady=0)
         # self.preview_separator.pack(fill='x', pady=5)
-        self.video_player.pack(fill="x", pady=(0, 10), side="top")
-        self.video_preview.pack(fill="x", pady=(0, 8), side="top")
+        self.video_player.pack(fill="x", pady=(0, 0), side="top")
+        self.video_preview.pack(fill="x", pady=(0, 0), side="top")
 
         # Foto-Tab Inhalt packen
-        self.photo_preview.pack(fill="both", expand=True, padx=5, pady=5)
+        self.photo_preview.pack(fill="both", expand=True, padx=5, pady=0)
 
-        # Upload-Frame und Button bleiben außerhalb der Tabs
+        # Upload-Frame (enthält jetzt Progress oben rechts, Checkboxen und Button)
         self.upload_frame.pack(pady=0, fill="x", side="top")
-        self.erstellen_button.pack(pady=10, fill="x", side="top")
 
-        # Progress unten
+        # Progress Bar NICHT hier packen - wird nur während Erstellung angezeigt
+        # self.progress_handler.pack_progress_bar_right()
+
+        # Status-Label ganz unten
         self.progress_handler.pack_status_label()
 
         # Initialer Focus: Wenn Video-Tab aktiv ist, kein Focus setzen
@@ -355,8 +628,10 @@ class VideoGeneratorApp:
         try:
             settings = self.config.get_settings()
             self.upload_to_server_var.set(settings.get("upload_to_server", False))
+            self.auto_clear_files_var.set(settings.get("auto_clear_files_after_creation", False))
         except:
             self.upload_to_server_var.set(False)
+            self.auto_clear_files_var.set(False)
 
     def test_server_connection_async(self):
         """Testet die Server-Verbindung asynchron"""
@@ -417,6 +692,17 @@ class VideoGeneratorApp:
             )
             # Starte erneuten Verbindungstest
             self.test_server_connection_async()
+
+    def _on_auto_clear_toggle(self):
+        """Wird aufgerufen wenn die Auto-Clear-Checkbox geändert wird"""
+        # Speichere die Einstellung in der Config
+        try:
+            settings = self.config.get_settings()
+            settings["auto_clear_files_after_creation"] = self.auto_clear_files_var.get()
+            self.config.save_settings(settings)
+            print(f"Auto-Clear Einstellung gespeichert: {self.auto_clear_files_var.get()}")
+        except Exception as e:
+            print(f"Fehler beim Speichern der Auto-Clear Einstellung: {e}")
 
     def ensure_dependencies(self):
         """Stellt sicher, dass FFmpeg installiert ist"""
@@ -616,6 +902,30 @@ class VideoGeneratorApp:
         # Polling-Funktion starten
         self.root.after(100, self._check_analysis_result, video_paths)
 
+    def run_photo_qr_analysis(self, photo_path: str):
+        """
+        Startet QR-Code-Analyse für ein Foto in separatem Thread.
+        Verwendet das gleiche Loading Window wie bei Videos.
+        """
+        # Ladefenster anzeigen
+        self.loading_window = LoadingWindow(self.root, text="Analysiere QR-Code im Foto...")
+
+        # Queue erstellen für Ergebnis-Kommunikation
+        self.analysis_queue = queue.Queue()
+
+        print(f"QR-Analyse Foto: {os.path.basename(photo_path)}")
+
+        # Analyse-Thread starten
+        analysis_thread = threading.Thread(
+            target=self._run_photo_analysis_thread,
+            args=(photo_path, self.analysis_queue),
+            daemon=True
+        )
+        analysis_thread.start()
+
+        # Polling-Funktion starten
+        self.root.after(100, self._check_photo_analysis_result, photo_path)
+
     def _run_analysis_thread(self, video_path: str, result_queue: queue.Queue):
         """
         Diese Funktion läuft im separaten Thread.
@@ -629,6 +939,21 @@ class VideoGeneratorApp:
 
         except Exception as e:
             print(f"Fehler im Analyse-Thread: {e}")
+            result_queue.put(("error", e))
+
+    def _run_photo_analysis_thread(self, photo_path: str, result_queue: queue.Queue):
+        """
+        Diese Funktion läuft im separaten Thread für Foto-QR-Code-Analyse.
+        Sie führt die blockierende Analyse aus und legt das Ergebnis in die Queue.
+        """
+        try:
+            from src.video.qr_analyser import analysiere_foto
+
+            kunde, qr_scan_success = analysiere_foto(photo_path)
+            result_queue.put(("success", (kunde, qr_scan_success, photo_path)))
+
+        except Exception as e:
+            print(f"Fehler im Foto-Analyse-Thread: {e}")
             result_queue.put(("error", e))
 
     def _check_analysis_result(self, video_paths: List[str]):
@@ -669,6 +994,43 @@ class VideoGeneratorApp:
                 self.loading_window = None
             messagebox.showerror("Fehler", f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}")
             # Kein _restore_button_state - Preview läuft parallel!
+            self.form_fields.update_form_layout(False, None)
+
+    def _check_photo_analysis_result(self, photo_path: str):
+        """
+        Überprüft alle 100ms, ob ein Ergebnis der Foto-QR-Analyse in der Queue liegt.
+        Diese Funktion läuft im Haupt-Thread und kann die GUI sicher aktualisieren.
+        """
+        try:
+            # Versuchen, ein Ergebnis zu holen, ohne zu blockieren
+            status, result = self.analysis_queue.get_nowait()
+
+            # --- Ergebnis ist da ---
+
+            # 1. Ladefenster schließen
+            if self.loading_window:
+                self.loading_window.destroy()
+                self.loading_window = None
+
+            # 2. Ergebnis verarbeiten
+            if status == "success":
+                kunde, qr_scan_success, source_path = result
+                self._process_photo_analysis_result(kunde, qr_scan_success, source_path)
+            elif status == "error":
+                messagebox.showerror("Analyse-Fehler",
+                                     f"Ein unerwarteter Fehler bei der Foto-Analyse ist aufgetreten:\n{result}")
+                self.form_fields.update_form_layout(False, None)
+
+        except queue.Empty:
+            # Wenn die Queue leer ist, erneut in 100ms prüfen
+            self.root.after(100, self._check_photo_analysis_result, photo_path)
+
+        except Exception as e:
+            # Allgemeiner Fehler beim Abrufen
+            if self.loading_window:
+                self.loading_window.destroy()
+                self.loading_window = None
+            messagebox.showerror("Fehler", f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}")
             self.form_fields.update_form_layout(False, None)
 
     def _process_analysis_result(self, kunde, qr_scan_success, video_paths):
@@ -715,6 +1077,34 @@ class VideoGeneratorApp:
             # Nur wenn Preview NICHT läuft, Button wiederherstellen
             if not (self.video_preview and self.video_preview.processing_thread):
                 self._restore_button_state()
+            self.form_fields.update_form_layout(False, None)
+
+    def _process_photo_analysis_result(self, kunde, qr_scan_success, photo_path):
+        """
+        Verarbeitet das erfolgreiche Foto-QR-Code-Analyseergebnis (im Haupt-Thread).
+        """
+        try:
+            if qr_scan_success and kunde:
+                print(f"QR-Code im Foto gescannt: Kunde ID {kunde.kunde_id}, Email: {kunde.email}, "
+                      f"Name: {kunde.vorname} {kunde.nachname}")
+
+                # Formular automatisch füllen
+                self.form_fields.update_form_layout(qr_scan_success, kunde)
+
+            elif qr_scan_success and not kunde:
+                messagebox.showwarning("Ungültiger QR-Code",
+                                      f"Ein QR-Code wurde im Foto erkannt, aber die Daten sind ungültig.")
+                self.form_fields.update_form_layout(False, None)
+
+            else:
+                messagebox.showwarning(
+                    "Kein QR-Code gefunden",
+                    f"Kein gültiger QR-Code im Foto gefunden:\n{os.path.basename(photo_path)}"
+                )
+                self.form_fields.update_form_layout(False, None)
+
+        except Exception as e:
+            print(f"Fehler in _process_photo_analysis_result: {e}")
             self.form_fields.update_form_layout(False, None)
 
     def erstelle_video(self):
@@ -771,6 +1161,19 @@ class VideoGeneratorApp:
         # Zeige Fehler, wenn Produkt ausgewählt, aber Datei fehlt
         if error_messages:
             messagebox.showwarning("Fehlende Dateien", "\n\n".join(error_messages))
+            return
+
+        # NEU: Foto-Wasserzeichen-Validierung
+        foto_gewaehlt = form_data.get("handcam_foto", False) or form_data.get("outside_foto", False)
+        foto_bezahlt = form_data.get("ist_bezahlt_handcam_foto", False) or form_data.get("ist_bezahlt_outside_foto", False)
+        foto_wm_erforderlich = foto_gewaehlt and not foto_bezahlt
+
+        watermark_photo_indices = self.drag_drop.get_watermark_photo_indices()
+
+        if foto_wm_erforderlich and not watermark_photo_indices:
+            messagebox.showwarning("Fehlende Auswahl",
+                                   "Sie haben ein Foto-Produkt als 'nicht bezahlt' markiert, aber kein Foto für das Wasserzeichen ausgewählt.\n\n"
+                                   "Bitte wählen Sie mindestens ein Foto in der '💧' Spalte aus.")
             return
 
         # Parse Kundendaten aus der Formular-Eingabe
@@ -842,7 +1245,8 @@ class VideoGeneratorApp:
             "photo_paths": photo_paths,
             "settings": self.config.get_settings(),
             "create_watermark_version": video_gewaehlt_aber_nicht_bezahlt,
-            "watermark_clip_index": self.drag_drop.get_watermark_clip_index()  # NEU: Index des ausgewählten Clips
+            "watermark_clip_index": self.drag_drop.get_watermark_clip_index(),  # NEU: Index des ausgewählten Clips
+            "watermark_photo_indices": watermark_photo_indices  # NEU: Foto-Indizes
         }
 
         print('kunde in erstelle_video:', kunde)
@@ -860,14 +1264,33 @@ class VideoGeneratorApp:
     def _update_encoding_progress(self, task_name="Encoding", progress=None, fps=0.0, eta=None,
                                   current_time=0.0, total_time=None, task_id=None):
         """Callback für Live-Encoding-Fortschritt"""
+        # Update ProgressHandler
         self.root.after(0, self.progress_handler.update_encoding_progress,
                        task_name, progress, fps, eta, current_time, total_time, task_id)
+
+        # Update Drag&Drop Tabelle wenn task_id vorhanden (= Video-Index)
+        if task_id is not None and progress is not None:
+            # Aktiviere Progress-Modus beim ersten Update
+            if not self.drag_drop.is_encoding:
+                self.root.after(0, self.drag_drop.show_progress_mode)
+
+            # Update Progress für das Video
+            self.root.after(0, self.drag_drop.update_video_progress, task_id, progress, fps, eta)
+
+        # Update Video-Preview
+        if hasattr(self, 'video_preview') and self.video_preview and progress is not None:
+            self.root.after(0, self.video_preview.update_encoding_progress, progress, fps, eta)
 
     def _handle_status_update(self, status_type, message):
         """Callback für Statusupdates"""
         if status_type == "success":
             self.root.after(0, lambda: messagebox.showinfo("Fertig", message))
             self.root.after(0, self.progress_handler.set_status, "Status: Fertig.")
+
+            # NEU: Auto-Clear nach erfolgreichem Erstellen
+            if self.auto_clear_files_var.get():
+                self.root.after(0, self._clear_all_files_after_success)
+
         elif status_type == "error":
             self.root.after(0, lambda: messagebox.showerror("Fehler", message))
             self.root.after(0, self.progress_handler.set_status, "Status: Fehler aufgetreten.")
@@ -877,7 +1300,49 @@ class VideoGeneratorApp:
             self.root.after(0, self.progress_handler.set_status, f"Status: {message}.")
             return
 
+        # Zurück zu Normal-Modus in Drag&Drop
+        if hasattr(self, 'drag_drop') and self.drag_drop and self.drag_drop.is_encoding:
+            self.root.after(0, self.drag_drop.show_normal_mode)
+
         self.root.after(0, self._switch_to_create_mode)
+
+    def _clear_all_files_after_success(self):
+        """Löscht alle importierten Videos und Fotos nach erfolgreichem Erstellen"""
+        try:
+            print("🗑️ Auto-Clear: Lösche alle importierten Dateien...")
+
+            # Lösche alle Videos
+            if self.drag_drop.video_paths:
+                video_count = len(self.drag_drop.video_paths)
+                self.drag_drop.clear_videos()
+                print(f"   ✓ {video_count} Video(s) gelöscht")
+
+            # Lösche alle Fotos
+            if self.drag_drop.photo_paths:
+                photo_count = len(self.drag_drop.photo_paths)
+                self.drag_drop.clear_photos()
+                print(f"   ✓ {photo_count} Foto(s) gelöscht")
+
+            # Setze drop_label zurück
+            if hasattr(self, 'drag_drop') and self.drag_drop:
+                self.drag_drop.drop_label.config(
+                    text="Videos (.mp4) und Fotos (.jpg, .png) hierher ziehen",
+                    fg="black"
+                )
+                print(f"   ✓ Drop-Label zurückgesetzt")
+
+            # Aktualisiere Video Preview
+            if hasattr(self, 'video_preview') and self.video_preview:
+                self.video_preview.clear_preview()
+
+            # Aktualisiere Photo Preview
+            if hasattr(self, 'photo_preview') and self.photo_preview:
+                self.photo_preview.set_photos([])
+
+            print("✅ Auto-Clear abgeschlossen")
+
+        except Exception as e:
+            print(f"⚠️ Fehler beim Auto-Clear: {e}")
 
     def on_files_added(self, has_videos, has_photos):
         """Wird von DragDropFrame aufgerufen, um FormFields zu aktualisieren."""
@@ -888,24 +1353,49 @@ class VideoGeneratorApp:
         """Aktualisiert die Sichtbarkeit der Wasserzeichen-Spalte basierend auf Kunde-Status"""
         form_data = self.form_fields.get_form_data()
 
-        # Prüfe, ob Video gewählt aber nicht bezahlt ist
-        video_gewaehlt_aber_nicht_bezahlt = (
-                (form_data.get("handcam_video", False) and not form_data.get("ist_bezahlt_handcam_video", False)) or
-                (form_data.get("outside_video", False) and not form_data.get("ist_bezahlt_outside_video", False))
-        )
+        # --- Video-Logik ---
+        video_gewaehlt = form_data.get("handcam_video", False) or form_data.get("outside_video", False)
+        video_bezahlt = form_data.get("ist_bezahlt_handcam_video", False) or form_data.get("ist_bezahlt_outside_video", False)
+        video_wm_sichtbar = video_gewaehlt and not video_bezahlt
 
         # Debug-Ausgabe
-        print(f"🔍 Wasserzeichen-Spalte Update:")
+        print(f"🔍 Video-Wasserzeichen-Spalte Update:")
         print(f"   Handcam Video: {form_data.get('handcam_video', False)}, Bezahlt: {form_data.get('ist_bezahlt_handcam_video', False)}")
         print(f"   Outside Video: {form_data.get('outside_video', False)}, Bezahlt: {form_data.get('ist_bezahlt_outside_video', False)}")
-        print(f"   → Spalte sichtbar: {video_gewaehlt_aber_nicht_bezahlt}")
+        print(f"   → Spalte sichtbar: {video_wm_sichtbar}")
 
         # Zeige Spalte wenn Video ausgewählt aber nicht bezahlt ist
-        self.drag_drop.set_watermark_column_visible(video_gewaehlt_aber_nicht_bezahlt)
+        self.drag_drop.set_watermark_column_visible(video_wm_sichtbar)
 
-        # Wenn Spalte nicht mehr sichtbar, lösche Auswahl
-        if not video_gewaehlt_aber_nicht_bezahlt:
+        # Wenn spalte nicht mehr sichtbar, lösche Auswahl
+        if not video_wm_sichtbar:
             self.drag_drop.clear_watermark_selection()
+
+        # NEU: Button in VideoPreview steuern
+        if hasattr(self, 'video_preview'):
+            self.video_preview.set_wm_button_visibility(video_wm_sichtbar)
+            self.video_preview.update_wm_button_state()  # Status aktualisieren
+
+        # --- NEU: Foto-Logik ---
+        foto_gewaehlt = form_data.get("handcam_foto", False) or form_data.get("outside_foto", False)
+        foto_bezahlt = form_data.get("ist_bezahlt_handcam_foto", False) or form_data.get("ist_bezahlt_outside_foto", False)
+        foto_wm_sichtbar = foto_gewaehlt and not foto_bezahlt
+
+        print(f"🔍 Foto-Wasserzeichen-Spalte Update:")
+        print(f"   Foto gewählt: {foto_gewaehlt}, Foto bezahlt: {foto_bezahlt}")
+        print(f"   → Spalte sichtbar: {foto_wm_sichtbar}")
+
+        # Rufe die neue Methode in drag_drop auf
+        self.drag_drop.set_photo_watermark_column_visible(foto_wm_sichtbar)
+
+        # Wenn spalte nicht mehr sichtbar, lösche Auswahl
+        if not foto_wm_sichtbar:
+            self.drag_drop.clear_photo_watermark_selection()
+
+        # NEU: Button in PhotoPreview steuern
+        if hasattr(self, 'photo_preview'):
+            self.photo_preview.set_wm_button_visibility(foto_wm_sichtbar)
+            self.photo_preview.update_wm_button_state()  # Status aktualisieren
 
 
     def _switch_to_cancel_mode(self):
@@ -929,9 +1419,8 @@ class VideoGeneratorApp:
         # Aktiviere den Abbrechen-Button nach 500ms
         self.root.after(500, enable_cancel_button)
 
-        self.progress_handler.progress_bar.pack(side="right", padx=(0, 5), pady=5)
-        self.progress_handler.eta_label.pack(side="right", pady=5)
-
+        # Zeige Progress-Elemente rechts oben
+        self.progress_handler.pack_progress_bar_right()
         self.progress_handler.progress_bar['value'] = 0
 
     def _switch_to_create_mode(self):
@@ -951,6 +1440,32 @@ class VideoGeneratorApp:
 
         if self.video_processor:
             self.video_processor.cancel_process()
+
+    # --- NEUE WASSERZEICHEN-PROXY-METHODEN ---
+
+    def toggle_video_watermark(self, index):
+        """Wird von VideoPreview aufgerufen, leitet an DragDrop weiter."""
+        if not hasattr(self, 'drag_drop'):
+            return
+
+        # 1. Status in drag_drop ändern
+        self.drag_drop.toggle_video_watermark_at_index(index)
+
+        # 2. Button-Status in video_preview aktualisieren
+        if hasattr(self, 'video_preview'):
+            self.video_preview.update_wm_button_state()
+
+    def toggle_photo_watermark(self, index):
+        """Wird von PhotoPreview aufgerufen, leitet an DragDrop weiter."""
+        if not hasattr(self, 'drag_drop'):
+            return
+
+        # 1. Status in drag_drop ändern
+        self.drag_drop.toggle_photo_watermark_at_index(index)
+
+        # 2. Button-Status in photo_preview aktualisieren
+        if hasattr(self, 'photo_preview'):
+            self.photo_preview.update_wm_button_state()
 
     # --- NEUE METHODEN FÜR DEN SCHNEIDE-DIALOG ---
 
@@ -992,26 +1507,50 @@ class VideoGeneratorApp:
 
         if action == "cut":
             print(f"App: Clip '{os.path.basename(original_path)}' wurde geschnitten (getrimmt).")
+
+            # Registriere das getrimmte Video als seine eigene Kopie
+            # (Das Video wurde in-place ersetzt, hat aber neuen Inhalt)
+            if self.video_preview:
+                self.video_preview.register_new_copy(original_path, original_path)
+                print(f"Getrimmtes Video registriert: {os.path.basename(original_path)}")
+
             paths_to_refresh.append(original_path)
 
         elif action == "split":
-            new_copy_path = result.get("new_copy_path")
-            print(f"App: Clip '{os.path.basename(original_path)}' wurde geteilt. Neuer Clip: {new_copy_path}")
+            # NEU: VideoCutter gibt jetzt part1_path und part2_path zurück
+            part1_path = result.get("part1_path")
+            part2_path = result.get("part2_path")
+            print(f"App: Clip '{os.path.basename(original_path)}' wurde geteilt.")
+            print(f"     Teil 1: {os.path.basename(part1_path) if part1_path else 'N/A'}")
+            print(f"     Teil 2: {os.path.basename(part2_path) if part2_path else 'N/A'}")
 
-            # 1. Neuen (Platzhalter) Originalpfad erstellen
-            base, ext = os.path.splitext(original_path)
-            new_original_placeholder = f"{base}_split_{uuid.uuid4().hex[:6]}{ext}"
+            if not part1_path or not part2_path:
+                print("⚠️ Fehler: Split-Pfade nicht verfügbar")
+                return
 
-            # 2. Neuen Pfad in der DragDrop-Liste an der richtigen Stelle einfügen
+            # WICHTIG: Verwende die ECHTEN Dateipfade, nicht Placeholders!
+            # Nach dem Split existieren:
+            #   - part1_path (z.B. 000_1_1.MP4)
+            #   - part2_path (z.B. 000_1_2.MP4)
+            # Das Original (000_1.MP4) existiert NICHT mehr!
+
             if self.drag_drop:
-                self.drag_drop.insert_video_path_at_index(new_original_placeholder, index + 1)
+                # 1. Ersetze das Original (an index) durch part1_path
+                self.drag_drop.video_paths[index] = part1_path
+                print(f"DragDrop: Ersetze Original an Index {index} durch Teil 1: {os.path.basename(part1_path)}")
 
-            # 3. Die neue Kopie in der Vorschau-Map registrieren
+                # 2. Füge part2_path direkt danach ein
+                self.drag_drop.insert_video_path_at_index(part2_path, index + 1)
+
+            # 3. Registriere die gesplitteten Videos als Kopien im Vorschau-System
+            # Da die Dateien ihre finalen Namen haben, registrieren wir sie als ihre eigenen Kopien
             if self.video_preview:
-                self.video_preview.register_new_copy(new_original_placeholder, new_copy_path)
+                self.video_preview.register_new_copy(part1_path, part1_path)
+                self.video_preview.register_new_copy(part2_path, part2_path)
 
-            paths_to_refresh.append(original_path)
-            paths_to_refresh.append(new_original_placeholder)
+            # 4. Für Metadaten-Refresh: Verwende die echten Pfade
+            paths_to_refresh.append(part1_path)
+            paths_to_refresh.append(part2_path)
 
         elif action == "cancel":
             print(f"App: Schneiden von '{os.path.basename(original_path)}' abgebrochen.")
@@ -1116,10 +1655,28 @@ class VideoGeneratorApp:
             elif status_type == 'backup_finished':
                 self.sd_status_indicator.set_backup_active(False)
                 self.sd_status_indicator.set_sd_detected(False)
-                if data:  # Erfolg
-                    self.progress_handler.set_status("Status: Backup abgeschlossen")
-                else:  # Fehler
-                    self.progress_handler.set_status("Status: Backup fehlgeschlagen")
+
+                # Prüfe Backup-Typ aus data
+                if data and isinstance(data, dict):
+                    backup_type = data.get('type', 'full')
+                    file_count = data.get('file_count')
+
+                    if backup_type == 'selective' and file_count:
+                        self.progress_handler.set_status(f"Status: {file_count} Dateien erfolgreich importiert")
+                    elif backup_type == 'full':
+                        self.progress_handler.set_status("Status: Backup abgeschlossen")
+                    elif backup_type == 'cancelled':
+                        self.progress_handler.set_status("Status: Import abgebrochen")
+                    elif backup_type == 'failed':
+                        self.progress_handler.set_status("Status: Backup fehlgeschlagen")
+                    else:
+                        self.progress_handler.set_status("Status: Backup abgeschlossen")
+                else:
+                    # Fallback für alte Logik (wenn data None oder nicht Dict)
+                    if data:  # Erfolg
+                        self.progress_handler.set_status("Status: Backup abgeschlossen")
+                    else:  # Fehler
+                        self.progress_handler.set_status("Status: Backup fehlgeschlagen")
 
             elif status_type == 'clearing_started':
                 self.sd_status_indicator.set_clearing_active(True)
@@ -1130,8 +1687,130 @@ class VideoGeneratorApp:
                 self.sd_status_indicator.set_clearing_active(False)
                 self.progress_handler.set_status("Status: SD-Karte geleert")
 
+            elif status_type == 'size_limit_exceeded':
+                # NEU: Größen-Limit überschritten - zeige Dialog
+                self._show_size_limit_dialog(data)
+
         # UI-Update im Haupt-Thread
         self.root.after(0, update_ui)
+
+    def _show_size_limit_dialog(self, data):
+        """
+        Zeigt Dialog für Größen-Limit-Überschreitung (läuft im Haupt-Thread).
+
+        Args:
+            data: Dict mit files_info, total_size_mb, limit_mb
+        """
+        from tkinter import messagebox
+
+        files_info = data['files_info']
+        total_size_mb = data['total_size_mb']
+        limit_mb = data['limit_mb']
+
+        # Zeige custom Dialog mit 3 Optionen
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Größen-Limit überschritten")
+        dialog.geometry("550x400")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        # Zentriere Dialog
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        # Inhalt
+        main_frame = tk.Frame(dialog, padx=20, pady=20)
+        main_frame.pack(fill='both', expand=True)
+
+        # Warnung
+        tk.Label(main_frame,
+                text="⚠️ Zu viele Dateien auf SD-Karte!",
+                font=("Arial", 14, "bold"),
+                fg="#f44336").pack(pady=(0, 15))
+
+        # Info
+        info_text = (
+            f"Gefundene Dateien: {len(files_info)}\n"
+            f"Gesamtgröße: {total_size_mb:.0f} MB\n"
+            f"Eingestelltes Limit: {limit_mb} MB\n\n"
+            f"Was möchten Sie tun?"
+        )
+        tk.Label(main_frame, text=info_text, font=("Arial", 10), justify='left').pack(pady=(0, 10))
+
+        # NEU: Hinweis wenn Auto-Import deaktiviert ist
+        settings = self.config.get_settings()
+        if not settings.get("sd_auto_import", False):
+            hint_text = "ℹ️ Hinweis: Automatischer Import ist deaktiviert.\nDateien werden nur gesichert, nicht importiert."
+            tk.Label(main_frame, text=hint_text, font=("Arial", 9, "bold"), fg="#D84315",
+                    justify='left', bg='#FFE0B2', padx=10, pady=8, relief='solid', borderwidth=1).pack(pady=(0, 15), fill='x')
+
+        # Buttons
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill='x')
+
+        def on_proceed_all():
+            self.sd_card_monitor.set_size_limit_decision("proceed_all")
+            dialog.destroy()
+
+        def on_select_files():
+            dialog.destroy()
+            # Zeige Dateiauswahl-Dialog
+            self._show_file_selector_dialog(files_info, total_size_mb)
+
+        def on_cancel():
+            self.sd_card_monitor.set_size_limit_decision("cancel")
+            dialog.destroy()
+
+        tk.Button(button_frame, text="Trotzdem alle importieren",
+                 command=on_proceed_all, bg="#FF9800", fg="white",
+                 font=("Arial", 10), width=25, height=2).pack(pady=5)
+
+        tk.Button(button_frame, text="Dateien auswählen...",
+                 command=on_select_files, bg="#2196F3", fg="white",
+                 font=("Arial", 10), width=25, height=2).pack(pady=5)
+
+        tk.Button(button_frame, text="Abbrechen",
+                 command=on_cancel, bg="#9E9E9E", fg="white",
+                 font=("Arial", 10), width=25, height=2).pack(pady=5)
+
+        # X-Button soll wie Abbrechen funktionieren
+        dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+
+    def _show_file_selector_dialog(self, files_info, total_size_mb):
+        """
+        Zeigt Dateiauswahl-Dialog.
+
+        Args:
+            files_info: Liste von Datei-Infos
+            total_size_mb: Gesamtgröße in MB
+        """
+        try:
+            from src.gui.components.sd_file_selector_dialog import SDFileSelectorDialog
+
+            selector = SDFileSelectorDialog(self.root, files_info, total_size_mb)
+            selector.show()
+
+            # Warte bis Dialog geschlossen
+            self.root.wait_window(selector.dialog)
+
+            # Hole Auswahl
+            selected_files = selector.get_selected_files()
+
+            if selected_files is None:
+                # User hat abgebrochen
+                self.sd_card_monitor.set_size_limit_decision("cancel")
+            else:
+                # User hat Dateien ausgewählt
+                self.sd_card_monitor.set_size_limit_decision(selected_files)
+
+        except Exception as e:
+            print(f"Fehler beim Dateiauswahl-Dialog: {e}")
+            import traceback
+            traceback.print_exc()
+            # Bei Fehler: Alle importieren
+            self.sd_card_monitor.set_size_limit_decision("proceed_all")
 
     def on_sd_progress_update(self, current_mb, total_mb, speed_mbps):
         """
@@ -1145,14 +1824,10 @@ class VideoGeneratorApp:
         def update_ui():
             if self.sd_status_indicator:
                 self.sd_status_indicator.update_backup_progress(current_mb, total_mb, speed_mbps)
-
-            # Auch in der Status-Bar anzeigen
             progress_percent = (current_mb / total_mb * 100) if total_mb > 0 else 0
             self.progress_handler.set_status(
                 f"Status: SD-Backup {progress_percent:.0f}% ({current_mb:.0f}/{total_mb:.0f} MB, {speed_mbps:.1f} MB/s)"
             )
-
-        # UI-Update im Haupt-Thread
         self.root.after(0, update_ui)
 
     def _restart_sd_monitor_if_needed(self):
@@ -1164,51 +1839,70 @@ class VideoGeneratorApp:
             is_monitoring = self.sd_card_monitor.monitoring
 
             if should_monitor and not is_monitoring:
-                # Monitoring wurde aktiviert
                 self.sd_card_monitor.start_monitoring()
             elif not should_monitor and is_monitoring:
-                # Monitoring wurde deaktiviert
                 self.sd_card_monitor.stop_monitoring()
                 if self.sd_status_indicator:
                     self.sd_status_indicator.hide()
                 self.progress_handler.set_status("Status: Bereit.")
 
-    def on_sd_backup_complete(self, backup_path, success):
+    def on_sd_backup_complete(self, backup_path, success, error_message=None):
         """
         Wird aufgerufen wenn SD-Karten Backup abgeschlossen ist
 
+        Callback-Methode vom SD-Card-Monitor. Zeigt Benachrichtigung
+        und startet optional automatischen Import wenn aktiviert.
+
         Args:
-            backup_path: Pfad zum Backup-Ordner oder None bei Fehler
-            success: True wenn Backup erfolgreich war
+            backup_path: Pfad zum erstellten Backup-Ordner (oder None bei Fehler)
+            success: True wenn Backup erfolgreich, False bei Fehler
+            error_message: Fehlermeldung bei Fehler, None bei Erfolg
         """
+        # Fehlerfall behandeln
         if not success:
-            print("SD-Karten Backup fehlgeschlagen")
-            messagebox.showerror("Backup Fehler",
-                               "Das Backup von der SD-Karte ist fehlgeschlagen.",
-                               parent=self.root)
+            print(f"SD-Karten Backup fehlgeschlagen: {error_message}")
+
+            # Zeige detaillierte Fehlermeldung
+            error_text = "Das Backup von der SD-Karte ist fehlgeschlagen."
+            if error_message:
+                error_text += f"\n\nGrund:\n{error_message}"
+
+            messagebox.showerror(
+                "Backup Fehler",
+                error_text,
+                parent=self.root
+            )
             return
 
+        # Erfolgsfall
         print(f"SD-Karten Backup erfolgreich: {backup_path}")
 
         settings = self.config.get_settings()
 
         # Prüfe ob automatischer Import aktiviert ist
         if settings.get("sd_auto_import", False):
+            # Starte automatischen Import
             self.import_from_backup(backup_path)
         else:
-            # Zeige Info-Nachricht
-            messagebox.showinfo("Backup erfolgreich",
-                              f"SD-Karten Backup wurde erfolgreich erstellt:\n{backup_path}",
-                              parent=self.root)
+            # Zeige nur Erfolgs-Benachrichtigung
+            messagebox.showinfo(
+                "Backup erfolgreich",
+                f"SD-Karten Backup wurde erfolgreich erstellt:\n{backup_path}",
+                parent=self.root
+            )
 
     def import_from_backup(self, backup_path):
         """
-        Importiert Dateien aus dem Backup-Ordner (simuliert Drag&Drop)
+        Importiert Dateien aus dem Backup-Ordner in die Anwendung
+
+        Simuliert Drag&Drop durch direktes Hinzufügen der Dateien.
+        Wenn "Nur neue Dateien" aktiviert ist, werden bereits importierte
+        Dateien automatisch übersprungen.
 
         Args:
-            backup_path: Pfad zum Backup-Ordner
+            backup_path: Pfad zum Backup-Ordner mit Mediendateien
         """
-        # Merke QR-Check Status und deaktiviere temporär
+        # QR-Check Status merken und temporär deaktivieren
         qr_check_was_enabled = False
         if self.drag_drop and hasattr(self.drag_drop, 'qr_check_enabled'):
             qr_check_was_enabled = self.drag_drop.qr_check_enabled.get()
@@ -1216,15 +1910,15 @@ class VideoGeneratorApp:
                 print("QR-Code-Prüfung temporär deaktiviert für Auto-Import")
                 self.drag_drop.qr_check_enabled.set(False)
 
-        # Variable für finally-Block
+        # Flag für finally-Block
         videos_imported = False
 
         try:
-            # Sammle alle Dateien aus dem Backup
+            # Sammle alle Dateien aus dem Backup-Ordner
             video_files = []
             photo_files = []
 
-            # Dateien liegen jetzt direkt im Backup-Ordner (flache Struktur)
+            # Dateien liegen direkt im Backup-Ordner (flache Struktur)
             if os.path.isdir(backup_path):
                 for file in os.listdir(backup_path):
                     file_lower = file.lower()
@@ -1235,12 +1929,64 @@ class VideoGeneratorApp:
                         continue
 
                     # Video-Formate
-                    if file_lower.endswith(('.mp4', '.mov', '.avi', '.mkv', '.m4v', '.mpg', '.mpeg', '.wmv', '.flv', '.webm')):
+                    if file_lower.endswith(('.mp4', '.mov', '.avi', '.mkv', '.m4v',
+                                          '.mpg', '.mpeg', '.wmv', '.flv', '.webm')):
                         video_files.append(file_path)
                     # Foto-Formate
-                    elif file_lower.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.gif', '.webp', '.heic', '.raw', '.cr2', '.nef', '.arw', '.dng')):
+                    elif file_lower.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tif',
+                                            '.tiff', '.gif', '.webp', '.heic', '.raw',
+                                            '.cr2', '.nef', '.arw', '.dng')):
                         photo_files.append(file_path)
 
+            # Prüfe Einstellung für Duplikate-Filter
+            settings = self.config.get_settings()
+            skip_processed = settings.get("sd_skip_processed", False)
+
+            if skip_processed and (video_files or photo_files):
+                # Filtere bereits importierte Dateien
+                history_store = MediaHistoryStore.instance()
+
+                filtered_videos = []
+                filtered_photos = []
+                skipped_count = 0
+
+                print("Prüfe auf bereits importierte Dateien...")
+
+                # Videos filtern - nur importierte überspringen, nicht gesicherte
+                for file_path in video_files:
+                    identity = history_store.compute_identity(file_path)
+                    if identity:
+                        identity_hash, _ = identity
+                        # Prüfe ob bereits IMPORTIERT (nicht nur gesichert)
+                        if not history_store.was_imported(identity_hash):
+                            filtered_videos.append(file_path)
+                        else:
+                            skipped_count += 1
+                    else:
+                        # Bei Hash-Fehler: Datei trotzdem importieren
+                        filtered_videos.append(file_path)
+
+                # Fotos filtern - nur importierte überspringen, nicht gesicherte
+                for file_path in photo_files:
+                    identity = history_store.compute_identity(file_path)
+                    if identity:
+                        identity_hash, _ = identity
+                        # Prüfe ob bereits IMPORTIERT (nicht nur gesichert)
+                        if not history_store.was_imported(identity_hash):
+                            filtered_photos.append(file_path)
+                        else:
+                            skipped_count += 1
+                    else:
+                        # Bei Hash-Fehler: Datei trotzdem importieren
+                        filtered_photos.append(file_path)
+
+                print(f"Import-Filter: {len(video_files) + len(photo_files)} Dateien, "
+                      f"{len(filtered_videos) + len(filtered_photos)} neu, {skipped_count} übersprungen")
+
+                video_files = filtered_videos
+                photo_files = filtered_photos
+
+            # Importiere gefilterte Dateien
             if video_files or photo_files:
                 # Füge Dateien zum Drag&Drop hinzu
                 if self.drag_drop:
@@ -1249,43 +1995,140 @@ class VideoGeneratorApp:
                 if video_files:
                     videos_imported = True
 
+                # Füge zur Historie hinzu wenn Option aktiviert
+                if skip_processed:
+                    history_store = MediaHistoryStore.instance()
+                    now = datetime.now().isoformat()
+
+                    # Videos zur Historie hinzufügen
+                    for file_path in video_files:
+                        identity = history_store.compute_identity(file_path)
+                        if identity:
+                            identity_hash, size_bytes = identity
+                            filename = os.path.basename(file_path)
+                            history_store.upsert(
+                                identity_hash=identity_hash,
+                                filename=filename,
+                                size_bytes=size_bytes,
+                                media_type='video',
+                                imported_at=now
+                            )
+
+                    # Fotos zur Historie hinzufügen
+                    for file_path in photo_files:
+                        identity = history_store.compute_identity(file_path)
+                        if identity:
+                            identity_hash, size_bytes = identity
+                            filename = os.path.basename(file_path)
+                            history_store.upsert(
+                                identity_hash=identity_hash,
+                                filename=filename,
+                                size_bytes=size_bytes,
+                                media_type='photo',
+                                imported_at=now
+                            )
+
                 print(f"Auto-Import: {len(video_files)} Videos und {len(photo_files)} Fotos importiert")
 
-                # messagebox.showinfo("Import erfolgreich",
-                #                   f"SD-Karten Backup erfolgreich importiert:\n"
-                #                   f"{len(video_files)} Videos und {len(photo_files)} Fotos",
-                #                   parent=self.root)
+                # Öffne passenden Tab (Video oder Foto) basierend auf Mehrheit
+                self._switch_to_predominant_tab(len(video_files), len(photo_files))
+
             else:
-                print("Keine Dateien zum Importieren gefunden")
-                messagebox.showwarning("Keine Dateien",
-                                     "Im Backup wurden keine Videos oder Fotos gefunden.",
-                                     parent=self.root)
+                # Keine neuen Dateien gefunden
+                print("Keine neuen Dateien zum Importieren gefunden")
+                if skip_processed:
+                    messagebox.showinfo(
+                        "Keine neuen Dateien",
+                        "Alle Dateien im Backup wurden bereits früher importiert.",
+                        parent=self.root
+                    )
+                else:
+                    messagebox.showwarning(
+                        "Keine Dateien",
+                        "Im Backup wurden keine Videos oder Fotos gefunden.",
+                        parent=self.root
+                    )
 
         except Exception as e:
             print(f"Fehler beim Importieren aus Backup: {e}")
-            messagebox.showerror("Import Fehler",
-                               f"Fehler beim Importieren der Dateien:\n{str(e)}",
-                               parent=self.root)
+            messagebox.showerror(
+                "Import Fehler",
+                f"Fehler beim Importieren der Dateien:\n{str(e)}",
+                parent=self.root
+            )
+
         finally:
-            # Stelle QR-Check Status wieder her
+            # QR-Check Status wiederherstellen
             if qr_check_was_enabled and self.drag_drop and hasattr(self.drag_drop, 'qr_check_enabled'):
                 print("QR-Code-Prüfung wieder aktiviert nach Auto-Import")
                 self.drag_drop.qr_check_enabled.set(True)
 
-                # Trigger QR-Analyse für das erste importierte Video
+                # Trigger QR-Analyse für erstes importiertes Video
                 if videos_imported:
                     print("Starte QR-Analyse für erstes importiertes Video")
                     video_paths = self.drag_drop.get_video_paths()
                     if video_paths:
                         self.run_qr_analysis(video_paths)
 
+    def _switch_to_predominant_tab(self, video_count: int, photo_count: int):
+        """
+        Wechselt automatisch zum Video- oder Foto-Tab basierend darauf,
+        welcher Medientyp häufiger importiert wurde.
+
+        Wechselt beide Notebooks:
+        - Preview-Notebook (Video-/Foto-Preview)
+        - Drag&Drop-Notebook (Video-/Foto-Liste)
+
+        Args:
+            video_count: Anzahl importierter Videos
+            photo_count: Anzahl importierter Fotos
+        """
+        if video_count == 0 and photo_count == 0:
+            return  # Nichts zu tun
+
+        # Bestimme welcher Tab geöffnet werden soll
+        if video_count > photo_count:
+            # Mehr Videos → Video-Tab
+            target_tab = "video"
+            target_index = 0
+            print(f"→ Öffne Video-Tabs (Auto-Import: {video_count} Videos > {photo_count} Fotos)")
+        elif photo_count > video_count:
+            # Mehr Fotos → Foto-Tab
+            target_tab = "photo"
+            target_index = 1
+            print(f"→ Öffne Foto-Tabs (Auto-Import: {photo_count} Fotos > {video_count} Videos)")
+        else:
+            # Gleich viele → Video-Tab als Standard
+            target_tab = "video"
+            target_index = 0
+            print(f"→ Öffne Video-Tabs (Auto-Import: gleich viele - {video_count} Videos = {photo_count} Fotos)")
+
+        # Wechsle zum passenden Tab im Preview-Notebook
+        if self.preview_notebook and hasattr(self.preview_notebook, 'select'):
+            try:
+                if target_tab == "video" and self.video_tab:
+                    self.preview_notebook.select(self.video_tab)
+                    print("  ✅ Preview: Video-Tab aktiviert")
+                elif target_tab == "photo" and self.foto_tab:
+                    self.preview_notebook.select(self.foto_tab)
+                    print("  ✅ Preview: Foto-Tab aktiviert")
+            except Exception as e:
+                print(f"  ⚠️ Fehler beim Preview-Tab-Wechsel: {e}")
+
+        # Wechsle zum passenden Tab im Drag&Drop-Notebook
+        if self.drag_drop and hasattr(self.drag_drop, 'notebook'):
+            try:
+                # Verwende Index für einfacheren Zugriff (0=Videos, 1=Fotos)
+                self.drag_drop.notebook.select(target_index)
+                print(f"  ✅ Drag&Drop: {'Video' if target_index == 0 else 'Foto'}-Tab aktiviert")
+            except Exception as e:
+                print(f"  ⚠️ Fehler beim Drag&Drop-Tab-Wechsel: {e}")
+
     def run(self):
         """Startet die Hauptloop der Anwendung"""
-
         try:
             initialize_updater(self.root, self.APP_VERSION)
         except Exception as e:
             print(f"Fehler beim Initialisieren des Updaters: {e}")
-
         self.root.mainloop()
 

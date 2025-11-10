@@ -8,6 +8,7 @@ import subprocess
 import time
 
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
+from src.utils.media_history import MediaHistoryStore
 
 
 class DragDropFrame:
@@ -24,6 +25,7 @@ class DragDropFrame:
         self.qr_check_enabled = tk.BooleanVar(value=qr_check_initial)  # NEU: Checkbox-Variable für QR-Prüfung
 
         self.watermark_clip_index = None  # NEU: Index des Clips für Wasserzeichen
+        self.watermark_photo_indices = []  # NEU: Liste für Foto-Mehrfachauswahl
         self.show_watermark_column = False  # NEU: Steuert Sichtbarkeit der Wasserzeichen-Spalte
         self.is_encoding = False  # NEU: Steuert Sichtbarkeit der Progress-Spalte vs. Datum/Uhrzeit
         self.create_widgets()
@@ -31,7 +33,7 @@ class DragDropFrame:
     def create_widgets(self):
         # Oberer Frame für Label und Checkbox in einer Reihe
         top_frame = tk.Frame(self.frame)
-        top_frame.pack(pady=10, fill="x")
+        top_frame.pack(pady=0, fill="x")
 
         # Checkbox für QR-Code-Prüfung (rechts)
         self.qr_check_checkbox = tk.Checkbutton(
@@ -46,7 +48,7 @@ class DragDropFrame:
         # Haupt-Label (links)
         self.drop_label = tk.Label(top_frame,
                                    text="Videos (.mp4) und Fotos (.jpg, .png) hierher ziehen",
-                                   font=("Arial", 12))
+                                   font=("Arial", 10))
         self.drop_label.pack(side=tk.LEFT)
 
         # Notebook (Tabs) erstellen mit größerem Style
@@ -158,7 +160,7 @@ class DragDropFrame:
         # Treeview für Fotos
         self.photo_tree = ttk.Treeview(
             photo_table_frame,
-            columns=("Nr", "Dateiname", "Größe", "Datum", "Uhrzeit"),
+            columns=("Nr", "Dateiname", "Größe", "Datum", "Uhrzeit", "WM"),
             show="headings",
             height=6,
             yscrollcommand=photo_scrollbar.set
@@ -170,18 +172,23 @@ class DragDropFrame:
         self.photo_tree.heading("Größe", text="Größe")
         self.photo_tree.heading("Datum", text="Datum")
         self.photo_tree.heading("Uhrzeit", text="Uhrzeit")
+        self.photo_tree.heading("WM", text="💧")
 
         self.photo_tree.column("Nr", width=10, anchor="center")
         self.photo_tree.column("Dateiname", width=250)
         self.photo_tree.column("Größe", width=100, anchor="center")
         self.photo_tree.column("Datum", width=100, anchor="center")
         self.photo_tree.column("Uhrzeit", width=100, anchor="center")
+        self.photo_tree.column("WM", width=0, minwidth=0, stretch=False, anchor="center")  # Initial versteckt
 
         self.photo_tree.pack(side=tk.LEFT, fill="both", expand=True)
         photo_scrollbar.config(command=self.photo_tree.yview)
 
         # Doppelklick-Event für Fotos
         self.photo_tree.bind("<Double-1>", self._on_photo_double_click)
+
+        # NEU: Event für Checkbox-Klicks in der Foto-Wasserzeichen-Spalte
+        self.photo_tree.bind("<ButtonRelease-1>", self._on_photo_watermark_checkbox_click)
 
         # Rechtsklick-Event für Kontextmenü
         self.photo_tree.bind("<Button-3>", self._show_photo_context_menu)
@@ -374,7 +381,7 @@ class DragDropFrame:
         new_videos_added = False
         new_photos_added = False
 
-        # Videos IMPORTIEREN (in Working-Folder kopieren)
+        # Videos IMPORTIEREN (sofort in Working-Folder kopieren)
         if new_videos and self.app and hasattr(self.app, 'video_preview'):
             print(f"\n📥 Importiere {len(new_videos)} Video(s) in Working-Folder...")
 
@@ -384,23 +391,71 @@ class DragDropFrame:
 
             imported_paths = []
             for video_path in new_videos:
+                # Prüfe ob Datei bereits importiert wurde (via MediaHistoryStore)
+                settings = self.app.config.get_settings()
+                skip_processed = settings.get("sd_skip_processed", False)
+                skip_processed_manual = settings.get("sd_skip_processed_manual", False)
+
+                # Nur prüfen wenn beide Optionen aktiv sind
+                if skip_processed and skip_processed_manual:
+                    history_store = MediaHistoryStore.instance()
+                    identity = history_store.compute_identity(video_path)
+
+                    if identity:
+                        identity_hash, _ = identity
+                        if history_store.was_imported(identity_hash):
+                            print(f"  ⚠️ Überspringe bereits importierte Datei: {os.path.basename(video_path)}")
+                            continue  # Datei überspringen, nicht importieren
+
                 # Importiere Video (kopiere in Working-Folder)
                 imported_path = self._import_video(video_path)
                 if imported_path:
-                    # Prüfe auf Duplikate (basierend auf Dateinamen)
-                    filename = os.path.basename(imported_path)
-                    is_duplicate = any(os.path.basename(p) == filename for p in self.video_paths)
+                    # Zusätzliche Duplikat-Prüfung innerhalb des aktuellen Imports
+                    # (falls gleiche Datei mehrmals gleichzeitig gedroppt wurde)
+                    try:
+                        imported_size = os.path.getsize(imported_path)
+                        is_duplicate = False
 
-                    if not is_duplicate:
+                        for existing_path in self.video_paths:
+                            try:
+                                if os.path.getsize(existing_path) == imported_size:
+                                    # Gleiche Größe - prüfe Dateiname
+                                    if os.path.basename(existing_path) == os.path.basename(imported_path):
+                                        is_duplicate = True
+                                        break
+                            except:
+                                pass
+
+                        if not is_duplicate:
+                            imported_paths.append(imported_path)
+                            new_videos_added = True
+
+                            # Schreibe in Historie wenn Option aktiv
+                            if skip_processed and skip_processed_manual:
+                                from datetime import datetime
+                                history_store = MediaHistoryStore.instance()
+                                identity = history_store.compute_identity(video_path)
+                                if identity:
+                                    identity_hash, size_bytes = identity
+                                    history_store.upsert(
+                                        identity_hash=identity_hash,
+                                        filename=os.path.basename(video_path),
+                                        size_bytes=size_bytes,
+                                        media_type='video',
+                                        imported_at=datetime.now().isoformat()
+                                    )
+                        else:
+                            print(f"  ⚠️ Überspringe Duplikat in aktuellem Import: {os.path.basename(imported_path)}")
+                            # Lösche die Kopie wieder
+                            try:
+                                os.remove(imported_path)
+                            except:
+                                pass
+                    except Exception as e:
+                        print(f"  ⚠️ Fehler bei Duplikat-Prüfung: {e}")
+                        # Im Fehlerfall trotzdem hinzufügen
                         imported_paths.append(imported_path)
                         new_videos_added = True
-                    else:
-                        print(f"  ⚠️ Überspringe Duplikat: {filename}")
-                        # Lösche die Kopie wieder
-                        try:
-                            os.remove(imported_path)
-                        except:
-                            pass
 
             # Füge importierte Pfade zu video_paths hinzu
             self.video_paths.extend(imported_paths)
@@ -408,11 +463,45 @@ class DragDropFrame:
             if imported_paths:
                 print(f"✅ {len(imported_paths)} Video(s) erfolgreich importiert")
 
-        # Fotos hinzufügen (ohne Duplikate)
-        for photo_path in new_photos:
-            if photo_path not in self.photo_paths:
-                self.photo_paths.append(photo_path)
-                new_photos_added = True
+        # Fotos hinzufügen (mit Duplikat-Prüfung)
+        if new_photos:
+            print(f"\n📸 Importiere {len(new_photos)} Foto(s)...")
+
+            settings = self.app.config.get_settings()
+            skip_processed = settings.get("sd_skip_processed", False)
+            skip_processed_manual = settings.get("sd_skip_processed_manual", False)
+
+            for photo_path in new_photos:
+                # Prüfe ob bereits importiert (nur wenn beide Optionen aktiv)
+                if skip_processed and skip_processed_manual:
+                    history_store = MediaHistoryStore.instance()
+                    identity = history_store.compute_identity(photo_path)
+
+                    if identity:
+                        identity_hash, _ = identity
+                        if history_store.was_imported(identity_hash):
+                            print(f"  ⚠️ Überspringe bereits importiertes Foto: {os.path.basename(photo_path)}")
+                            continue
+
+                # Prüfe auf Duplikate in aktueller Liste
+                if photo_path not in self.photo_paths:
+                    self.photo_paths.append(photo_path)
+                    new_photos_added = True
+
+                    # Schreibe in Historie wenn Option aktiv
+                    if skip_processed and skip_processed_manual:
+                        from datetime import datetime
+                        history_store = MediaHistoryStore.instance()
+                        identity = history_store.compute_identity(photo_path)
+                        if identity:
+                            identity_hash, size_bytes = identity
+                            history_store.upsert(
+                                identity_hash=identity_hash,
+                                filename=os.path.basename(photo_path),
+                                size_bytes=size_bytes,
+                                media_type='photo',
+                                imported_at=datetime.now().isoformat()
+                            )
 
         self._update_video_table()
         self._update_photo_table()
@@ -427,7 +516,8 @@ class DragDropFrame:
 
     def _import_video(self, source_path):
         """
-        Importiert ein Video in den Working-Folder.
+        Importiert ein Video in den Working-Folder mit Original-Dateinamen.
+        Bei Namenskollision wird ein Suffix (_1, _2, etc.) hinzugefügt.
 
         Returns:
             Working-Folder-Pfad oder None bei Fehler
@@ -441,13 +531,21 @@ class DragDropFrame:
                 return None
 
             filename = os.path.basename(source_path)
-            # Erstelle eindeutigen Pfad mit Index
-            index = len(self.video_paths)
             safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-            dest_path = os.path.join(temp_dir, f"{index:03d}_{safe_filename}")
+            dest_path = os.path.join(temp_dir, safe_filename)
+
+            # Bei Namenskollision: Füge Suffix hinzu
+            if os.path.exists(dest_path):
+                base_name, ext = os.path.splitext(safe_filename)
+                counter = 1
+                while os.path.exists(dest_path):
+                    dest_path = os.path.join(temp_dir, f"{base_name}_{counter}{ext}")
+                    counter += 1
+                print(f"  📋 {filename} → {os.path.basename(dest_path)} (Namenskollision)")
+            else:
+                print(f"  📋 {filename} → Working-Folder")
 
             # Kopiere Datei
-            print(f"  📋 {filename} → Working-Folder")
             shutil.copy2(source_path, dest_path)
 
             return dest_path
@@ -455,11 +553,6 @@ class DragDropFrame:
         except Exception as e:
             print(f"  ❌ Fehler beim Importieren von {os.path.basename(source_path)}: {e}")
             return None
-
-        # App über *alle* neuen Dateien benachrichtigen
-        if new_videos_added or new_photos_added:
-            if hasattr(self.app, 'on_files_added'):
-                self.app.on_files_added(new_videos_added, new_photos_added)
 
     def _update_app_preview(self, video_paths=None):
         """
@@ -571,7 +664,10 @@ class DragDropFrame:
             date = self._get_file_date_fallback(photo_path)
             timestamp = self._get_file_time_fallback(photo_path)
 
-            self.photo_tree.insert("", "end", values=(i, filename, size, date, timestamp))
+            # NEU: Wasserzeichen-Status bestimmen
+            watermark_value = "☑" if (i - 1) in self.watermark_photo_indices else "☐"
+
+            self.photo_tree.insert("", "end", values=(i, filename, size, date, timestamp, watermark_value))
 
     # --- NEU: Fallback-Methoden für Metadaten (sync ffprobe) ---
     # (Dies sind die alten Methoden, umbenannt)
@@ -746,6 +842,21 @@ class DragDropFrame:
         if selection:
             index = self.photo_tree.index(selection[0])
             self.photo_paths.pop(index)
+
+            # NEU: Wasserzeichen-Indizes aktualisieren
+            # Wenn der gelöschte Index markiert war, entferne ihn
+            if index in self.watermark_photo_indices:
+                self.watermark_photo_indices.remove(index)
+
+            # Indizes verschieben, die größer als der entfernte Index sind
+            updated_indices = []
+            for i in self.watermark_photo_indices:
+                if i > index:
+                    updated_indices.append(i - 1)
+                else:
+                    updated_indices.append(i)
+            self.watermark_photo_indices = updated_indices
+
             self._update_photo_table()
             self._update_photo_preview()
 
@@ -767,6 +878,7 @@ class DragDropFrame:
     def clear_photos(self):
         """Entfernt alle Fotos"""
         self.photo_paths.clear()
+        self.clear_photo_watermark_selection()  # NEU
         self._update_photo_table()
         self._update_photo_preview()
 
@@ -1031,6 +1143,9 @@ class DragDropFrame:
                 context_menu.add_command(label="▶ Öffnen", command=lambda: self._open_file_with_default_app(photo_path))
                 context_menu.add_command(label="📁 Im Verzeichnis öffnen", command=lambda: self._open_in_directory(photo_path))
                 context_menu.add_separator()
+                context_menu.add_command(label="🔍 Auf QR-Code prüfen",
+                                         command=lambda: self._scan_photo_qr_code(photo_path))
+                context_menu.add_separator()
                 context_menu.add_command(label="✕ Löschen", command=lambda: self._delete_photo_from_context(index))
 
                 # Zeige Menü an Mausposition
@@ -1095,6 +1210,15 @@ class DragDropFrame:
             # Rufe normale Lösch-Funktion auf
             self.remove_selected_photo()
 
+    def _scan_photo_qr_code(self, photo_path):
+        """Scannt ein Foto nach QR-Code und füllt das Formular"""
+        # Nutze die App-Methode mit Loading Window und Thread
+        if self.app and hasattr(self.app, 'run_photo_qr_analysis'):
+            self.app.run_photo_qr_analysis(photo_path)
+        else:
+            from tkinter import messagebox
+            messagebox.showerror("Fehler", "QR-Code-Scanner nicht verfügbar")
+
     def _handle_video_table_drop(self, event):
         """Verarbeitet das Ablegen von Dateien in die Video-Tabelle"""
         self.handle_drop(event)
@@ -1132,6 +1256,94 @@ class DragDropFrame:
         """Löscht die Wasserzeichen-Auswahl"""
         self.watermark_clip_index = None
         self._update_video_table()
+
+    # NEU: Methoden für Foto-Wasserzeichen
+    def set_photo_watermark_column_visible(self, visible: bool):
+        """Zeigt oder verbirgt die Wasserzeichen-Spalte für Fotos"""
+        if visible:
+            self.photo_tree.column("WM", width=20, minwidth=30, stretch=False)
+        else:
+            self.photo_tree.column("WM", width=0, minwidth=0, stretch=False)
+        self.photo_tree.update_idletasks()
+
+    def get_watermark_photo_indices(self):
+        """Gibt die Liste der für Wasserzeichen ausgewählten Foto-Indizes zurück"""
+        return self.watermark_photo_indices
+
+    def clear_photo_watermark_selection(self):
+        """Löscht die Foto-Wasserzeichen-Auswahl"""
+        self.watermark_photo_indices = []
+        self._update_photo_table()
+
+    # --- NEUE ÖFFENTLICHE METHODEN FÜR WASSERZEICHEN-STEUERUNG ---
+
+    def toggle_video_watermark_at_index(self, index):
+        """
+        Schaltet die Wasserzeichen-Markierung für einen bestimmten Video-Index um.
+        Wird von app.py aufgerufen.
+        """
+        if self.watermark_clip_index == index:
+            # Bereits ausgewählt -> abwählen
+            self.watermark_clip_index = None
+        else:
+            # Anderes oder keins ausgewählt -> dieses auswählen
+            self.watermark_clip_index = index
+
+        self._update_video_table()
+
+    def is_video_watermarked(self, index):
+        """Prüft, ob ein bestimmter Video-Index als Wasserzeichen markiert ist."""
+        return self.watermark_clip_index == index
+
+    def toggle_photo_watermark_at_index(self, index):
+        """
+        Schaltet die Wasserzeichen-Markierung für einen bestimmten Foto-Index um.
+        Wird von app.py aufgerufen.
+        """
+        if index in self.watermark_photo_indices:
+            # Bereits in der Liste -> entfernen
+            self.watermark_photo_indices.remove(index)
+        else:
+            # Nicht in der Liste -> hinzufügen
+            self.watermark_photo_indices.append(index)
+
+        self._update_photo_table()
+
+    def is_photo_watermarked(self, index):
+        """Prüft, ob ein bestimmter Foto-Index als Wasserzeichen markiert ist."""
+        return index in self.watermark_photo_indices
+
+    def _on_photo_watermark_checkbox_click(self, event):
+        """Verarbeitet Klicks auf die Foto-Wasserzeichen-Spalte (Mehrfachauswahl)"""
+        # Prüfen, ob Spalte überhaupt sichtbar ist
+        if self.photo_tree.column("WM", "width") == 0:
+            return
+
+        region = self.photo_tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+
+        column = self.photo_tree.identify_column(event.x)
+        # Spalten: #0 (tree), #1 (Nr), #2 (Datei), #3 (Größe), #4 (Datum), #5 (Uhrzeit), #6 (WM)
+        if column != "#6":
+            return
+
+        item = self.photo_tree.identify_row(event.y)
+        if not item:
+            return
+
+        index = self.photo_tree.index(item)
+
+        # Multi-Auswahl-Logik (Toggle):
+        if index in self.watermark_photo_indices:
+            self.watermark_photo_indices.remove(index)
+        else:
+            self.watermark_photo_indices.append(index)
+
+        self._update_photo_table()
+
+        # Verhindere, dass die Reihe ausgewählt wird (optional, aber gut für Checkbox-Feeling)
+        self.photo_tree.selection_remove(self.photo_tree.selection())
 
     def _on_watermark_checkbox_click(self, event):
         """Verarbeitet Klicks auf die Wasserzeichen-Spalte"""

@@ -1,4 +1,4 @@
-﻿import tkinter as tk
+import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
 import webbrowser
 
@@ -20,7 +20,7 @@ class SettingsDialog:
         """Zeigt den Einstellungs-Dialog"""
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("Einstellungen")
-        self.dialog.geometry("550x650")  # Größe angepasst
+        self.dialog.geometry("750x680")  # Höhe erhöht
         self.dialog.resizable(False, False)
         self.dialog.transient(self.parent)
 
@@ -39,10 +39,16 @@ class SettingsDialog:
         self.sd_auto_backup_var = tk.BooleanVar()
         self.sd_clear_var = tk.BooleanVar()
         self.sd_auto_import_var = tk.BooleanVar()
+        self.sd_skip_processed_var = tk.BooleanVar()
+        self.sd_skip_processed_manual_var = tk.BooleanVar()
+        self.sd_size_limit_enabled_var = tk.BooleanVar()  # NEU: Größen-Limit
+        self.sd_size_limit_mb_var = tk.StringVar(value="2000")  # NEU: Limit in MB
         # Variable für Hardware-Beschleunigung
         self.hardware_acceleration_var = tk.BooleanVar()
         # Variable für Paralleles Processing
         self.parallel_processing_var = tk.BooleanVar()
+        # Variable für Codec-Auswahl
+        self.codec_var = tk.StringVar(value="auto")
 
         self.create_widgets()
         self.load_settings()
@@ -66,7 +72,7 @@ class SettingsDialog:
         parent_height = self.parent.winfo_height()
 
         # Dialog-Dimensionen (fest definiert)
-        w, h = 550, 650
+        w, h = 750, 680
 
         x = parent_x + (parent_width - w) // 2
         y = parent_y + (parent_height - h) // 2
@@ -98,12 +104,17 @@ class SettingsDialog:
         self.notebook.add(self.tab_allgemein, text="Allgemein")
         self.create_allgemein_tab()
 
-        # --- Tab 2: Server ---
+        # --- Tab 2: Encoding ---
+        self.tab_encoding = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.tab_encoding, text="Encoding")
+        self.create_encoding_tab()
+
+        # --- Tab 3: Server ---
         self.tab_server = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.tab_server, text="Server")
         self.create_server_tab()
 
-        # --- Tab 3: Extras ---
+        # --- Tab 4: Extras ---
         self.tab_extras = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.tab_extras, text="Extras")
         self.create_extras_tab()
@@ -151,8 +162,8 @@ class SettingsDialog:
                                        command=self.waehle_speicherort)
         speicherort_button.grid(row=0, column=1, sticky="e")
 
-        # Dauer
-        tk.Label(storage_frame, text="Dauer (Sek.):", font=("Arial", 11)).grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        # Intro Dauer
+        tk.Label(storage_frame, text="Intro Dauer (Sek.):", font=("Arial", 11)).grid(row=1, column=0, sticky="w", padx=5, pady=5)
 
         dauer_frame = tk.Frame(storage_frame, bg="white", relief=tk.RAISED, borderwidth=1)
         dauer_frame.grid(row=1, column=1, sticky="w", padx=5, pady=5)
@@ -201,22 +212,18 @@ class SettingsDialog:
         # --- Sektion 2: SD-Karten Backup ---
         backup_frame = ttk.LabelFrame(self.tab_allgemein, text="SD-Karten Backup", padding=(10, 10))
         backup_frame.pack(fill="x", pady=(0, 10))
-        backup_frame.grid_columnconfigure(1, weight=1)
+        backup_frame.grid_columnconfigure(1, weight=1)  # Entry-Spalte expandiert
 
-        # Backup Ordner
+        # Backup Ordner - gleiche Struktur wie Speicherort
         tk.Label(backup_frame, text="Backup Ordner:", font=("Arial", 11)).grid(row=0, column=0, sticky="w", padx=5, pady=5)
 
-        backup_folder_frame = tk.Frame(backup_frame)
-        backup_folder_frame.grid(row=0, column=1, sticky="ew", padx=5)
-        backup_folder_frame.grid_columnconfigure(0, weight=1)
-
-        backup_folder_entry = tk.Entry(backup_folder_frame, textvariable=self.sd_backup_folder_var,
+        backup_folder_entry = tk.Entry(backup_frame, textvariable=self.sd_backup_folder_var,
                                        font=("Arial", 10), state="readonly")
-        backup_folder_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        backup_folder_entry.grid(row=0, column=1, sticky="ew", padx=(5, 5), pady=5)
 
-        backup_folder_button = tk.Button(backup_folder_frame, text="Wählen...",
+        backup_folder_button = tk.Button(backup_frame, text="Wählen...",
                                          command=self.waehle_backup_ordner)
-        backup_folder_button.grid(row=0, column=1, sticky="e")
+        backup_folder_button.grid(row=0, column=2, sticky="e", padx=(0, 5), pady=5)
 
         # Haupt-Checkbox: Automatischer Backup
         self.sd_auto_backup_checkbox = tk.Checkbutton(
@@ -229,13 +236,8 @@ class SettingsDialog:
         self.sd_auto_backup_checkbox.grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
         # Abhängige Checkboxen (nur sichtbar wenn Auto-Backup aktiviert)
-        self.sd_clear_checkbox = tk.Checkbutton(
-            backup_frame,
-            text="SD-Karte nach Backup leeren",
-            variable=self.sd_clear_var,
-            font=("Arial", 10)
-        )
 
+        # 1. Automatisch importieren (ERSTE Option)
         self.sd_auto_import_checkbox = tk.Checkbutton(
             backup_frame,
             text="Automatisch importieren in Aero Tandem Studio",
@@ -243,11 +245,148 @@ class SettingsDialog:
             font=("Arial", 10)
         )
 
-        # Werden nur angezeigt wenn Auto-Backup aktiviert ist
-        # Initial-Zustand wird in load_settings() gesetzt
+        # 2. Größen-Limit Option
+        self.sd_size_limit_checkbox = tk.Checkbutton(
+            backup_frame,
+            text="Warnung bei zu vielen Dateien auf SD-Karte",
+            variable=self.sd_size_limit_enabled_var,
+            font=("Arial", 10),
+            command=self.on_size_limit_toggle
+        )
 
-        # --- Sektion 3: Erweitert ---
-        advanced_frame = ttk.LabelFrame(self.tab_allgemein, text="Erweitert", padding=(10, 10))
+        # Sub-Option: Größen-Eingabe (noch mehr eingerückt)
+        size_limit_frame = tk.Frame(backup_frame)
+        self.sd_size_limit_frame = size_limit_frame  # Referenz speichern
+
+        tk.Label(size_limit_frame, text="Maximale Dateigröße (MB):", font=("Arial", 9)).pack(side='left', padx=(0, 5))
+
+        size_limit_entry = tk.Entry(size_limit_frame, textvariable=self.sd_size_limit_mb_var,
+                                    font=("Arial", 9), width=10)
+        size_limit_entry.pack(side='left')
+
+        tk.Label(size_limit_frame, text="(z.B. 2000 für 2GB)", font=("Arial", 8), fg="gray").pack(side='left', padx=(5, 0))
+
+        # 3. SD-Karte nach Backup leeren
+        self.sd_clear_checkbox = tk.Checkbutton(
+            backup_frame,
+            text="SD-Karte nach Backup leeren",
+            variable=self.sd_clear_var,
+            font=("Arial", 10)
+        )
+
+        # NEU: Nur-neue-Dateien Checkbox + Verlauf-Button (gleiche Ebene)
+        row_idx = 7
+        self.sd_skip_checkbox = tk.Checkbutton(
+            backup_frame,
+            text="Nur neue Dateien sichern/importieren (Duplikate überspringen)",
+            variable=self.sd_skip_processed_var,
+            font=("Arial", 10),
+            command=self.on_skip_processed_toggle
+        )
+        self.sd_skip_checkbox.grid(row=row_idx, column=0, sticky="w", padx=5, pady=(8, 2))
+
+        self.history_button = tk.Button(
+            backup_frame,
+            text="Verlauf anzeigen…",
+            command=self._open_processed_history_dialog,
+            width=18
+        )
+        self.history_button.grid(row=row_idx, column=1, sticky="e", padx=5, pady=(8, 2))
+
+        # NEU: Sub-Option für manuellen Import (eingerückt, nur sichtbar wenn skip_processed aktiv)
+        row_idx += 1
+        self.sd_skip_manual_checkbox = tk.Checkbutton(
+            backup_frame,
+            text="Auch manuell importierte Dateien merken und prüfen",
+            variable=self.sd_skip_processed_manual_var,
+            font=("Arial", 9),
+        )
+        # Wird nur angezeigt wenn sd_skip_processed aktiv ist
+
+
+    def _open_processed_history_dialog(self):
+        try:
+            from src.gui.components.processed_files_dialog import ProcessedFilesDialog
+            dlg = ProcessedFilesDialog(self.dialog)
+            dlg.show()
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Verlauf konnte nicht geöffnet werden:\n{e}", parent=self.dialog)
+
+    def create_encoding_tab(self):
+        """Erstellt den Tab 'Encoding'"""
+
+        # --- Sektion 1: Codec-Auswahl ---
+        codec_frame = ttk.LabelFrame(self.tab_encoding, text="Video-Codec", padding=(10, 10))
+        codec_frame.pack(fill="x", pady=(0, 15))
+        codec_frame.grid_columnconfigure(0, weight=1)
+
+        # Info-Text oben
+        info_text = "Wählen Sie den Codec für die finale Videoerstellung:"
+        tk.Label(codec_frame, text=info_text, font=("Arial", 10), fg="gray", wraplength=500, justify="left").grid(
+            row=0, column=0, sticky="w", padx=5, pady=(0, 10))
+
+        # Radio-Buttons für Codec-Auswahl mit inline Beschreibungen
+        codec_options = [
+            ("auto", "Auto (empfohlen)", "Automatische Codec-Erkennung. Keine Neucodierung wenn alle Clips kompatibel sind."),
+            ("h264", "H.264 (AVC)", "Hohe Kompatibilität, gute Qualität und effiziente Kompression."),
+            ("h265", "H.265 (HEVC)", "Bessere Kompression als H.264, benötigt jedoch mehr Rechenleistung."),
+            ("vp9", "VP9", "Optimiert für Web-Streaming, Open-Source."),
+            ("av1", "AV1", "Beste Kompression, langsameres Encoding, zukunftssicher.")
+        ]
+
+        current_row = 1
+        # Feste Breite für Radiobutton-Spalte, damit Beschreibungen ausgerichtet sind
+        max_label_width = 25  # Breite in Zeichen
+
+        for idx, (value, label, description) in enumerate(codec_options):
+            # Container-Frame für Option (horizontal layout)
+            option_frame = tk.Frame(codec_frame)
+            option_frame.grid(row=current_row, column=0, sticky="ew", padx=5, pady=5)
+            option_frame.grid_columnconfigure(1, weight=1)  # Beschreibung kann expandieren
+
+            # Radiobutton links mit fester Breite
+            radio = tk.Radiobutton(
+                option_frame,
+                text=label,
+                variable=self.codec_var,
+                value=value,
+                font=("Arial", 10, "bold"),
+                command=self.on_codec_changed,
+                width=max_label_width,
+                anchor="w"
+            )
+            radio.grid(row=0, column=0, sticky="w", padx=(5, 10))
+
+            # Beschreibung rechts daneben (inline, alle starten an gleicher Position!)
+            desc_label = tk.Label(
+                option_frame,
+                text=description,
+                font=("Arial", 9),
+                fg="gray",
+                wraplength=450,
+                justify="left",
+                anchor="w"
+            )
+            desc_label.grid(row=0, column=1, sticky="w")
+
+            current_row += 1
+
+        # Hinweis für Wasserzeichen-Video
+        separator = ttk.Separator(codec_frame, orient='horizontal')
+        separator.grid(row=current_row, column=0, sticky="ew", pady=(10, 10), padx=5)
+
+        watermark_note = tk.Label(
+            codec_frame,
+            text="ℹ️ Hinweis: Wasserzeichen-Videos werden immer mit H.264 codiert (240p, optimiert für Vorschau).",
+            font=("Arial", 9),
+            fg="#2196F3",
+            wraplength=650,
+            justify="left"
+        )
+        watermark_note.grid(row=current_row+1, column=0, sticky="w", padx=10, pady=(0, 5))
+
+        # --- Sektion 2: Erweitert ---
+        advanced_frame = ttk.LabelFrame(self.tab_encoding, text="Erweitert", padding=(10, 10))
         advanced_frame.pack(fill="x", pady=(0, 10))
         advanced_frame.grid_columnconfigure(0, weight=1)
 
@@ -284,8 +423,8 @@ class SettingsDialog:
 
         # --- Paralleles Processing ---
         # Separator-Linie
-        separator = ttk.Separator(advanced_frame, orient='horizontal')
-        separator.grid(row=2, column=0, sticky="ew", pady=10)
+        separator2 = ttk.Separator(advanced_frame, orient='horizontal')
+        separator2.grid(row=2, column=0, sticky="ew", pady=10)
 
         # Paralleles Processing Container
         parallel_container = tk.Frame(advanced_frame)
@@ -311,6 +450,15 @@ class SettingsDialog:
         )
         self.parallel_info_label.grid(row=4, column=0, sticky="w", padx=20, pady=(0, 5))
 
+    def on_codec_changed(self):
+        """Wird aufgerufen wenn ein anderer Codec ausgewählt wird"""
+        selected_codec = self.codec_var.get()
+        print(f"Codec geändert zu: {selected_codec}")
+
+        # Aktualisiere Hardware-Info mit dem neuen Codec (falls Hardware-Beschleunigung aktiv)
+        if self.hardware_acceleration_var.get() and not self.hw_detection_running:
+            self._update_hardware_info_for_codec(selected_codec)
+
     def on_hw_accel_toggle(self):
         """Wird aufgerufen wenn die Hardware-Beschleunigung Checkbox geändert wird"""
         is_enabled = self.hardware_acceleration_var.get()
@@ -333,7 +481,12 @@ class SettingsDialog:
                 try:
                     from src.utils.hardware_acceleration import HardwareAccelerationDetector
                     detector = HardwareAccelerationDetector()
-                    hw_info_text = detector.get_hardware_info_string()
+
+                    # Hole den aktuell gewählten Codec
+                    selected_codec = self.codec_var.get()
+                    display_codec = selected_codec if selected_codec != "auto" else "h264"
+
+                    hw_info_text = detector.get_hardware_info_string(display_codec)
 
                     # Aktualisiere UI im Haupt-Thread
                     self.dialog.after(0, self._update_hw_info_success, hw_info_text)
@@ -376,20 +529,82 @@ class SettingsDialog:
         if self.parallel_processing_var.get():
             self._update_parallel_processing_info()
 
+    def _update_hardware_info_for_codec(self, codec):
+        """
+        Aktualisiert die Hardware-Info für einen spezifischen Codec
+
+        Args:
+            codec: Der Codec (z.B. 'h264', 'h265', 'vp9', 'av1')
+        """
+        try:
+            from src.utils.hardware_acceleration import HardwareAccelerationDetector
+            detector = HardwareAccelerationDetector()
+
+            # Mappe "auto" auf h264
+            display_codec = codec if codec != "auto" else "h264"
+
+            hw_info_text = detector.get_hardware_info_string(display_codec)
+            self.hw_info_label.config(text=f"✓ {hw_info_text}", fg="green")
+        except Exception as e:
+            print(f"Fehler beim Aktualisieren der Hardware-Info: {e}")
+            # Behalte die alte Info bei Fehler
+
     def on_auto_backup_toggle(self):
         """Wird aufgerufen wenn die Auto-Backup Checkbox geändert wird"""
         is_enabled = self.sd_auto_backup_var.get()
 
         if is_enabled:
-            # Zeige abhängige Checkboxen
-            self.sd_clear_checkbox.grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=2)
-            self.sd_auto_import_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+            # Zeige abhängige Checkboxen in neuer Reihenfolge (alle eingerückt mit padx=30)
+            # 1. Automatisch importieren (ERSTE Option)
+            self.sd_auto_import_checkbox.grid(row=2, column=0, columnspan=2, sticky="w", padx=30, pady=2)
+
+            # 2. Größen-Limit Option
+            self.sd_size_limit_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", padx=30, pady=(8, 2))
+            self.on_size_limit_toggle()  # Zeige/Verstecke Eingabefeld
+
+            # 3. SD-Karte leeren
+            self.sd_clear_checkbox.grid(row=5, column=0, columnspan=2, sticky="w", padx=30, pady=2)
         else:
-            # Verstecke und deaktiviere abhängige Checkboxen
-            self.sd_clear_checkbox.grid_forget()
+            # Verstecke und deaktiviere alle abhängigen Checkboxen
             self.sd_auto_import_checkbox.grid_forget()
-            self.sd_clear_var.set(False)
+            self.sd_size_limit_checkbox.grid_forget()
+            self.sd_size_limit_frame.grid_forget()
+            self.sd_clear_checkbox.grid_forget()
+            self.sd_skip_manual_checkbox.grid_forget()
             self.sd_auto_import_var.set(False)
+            self.sd_size_limit_enabled_var.set(False)
+            self.sd_clear_var.set(False)
+            self.sd_skip_processed_manual_var.set(False)
+
+        # "Nur neue Dateien" Checkbox und Verlauf-Button IMMER anzeigen
+        self.sd_skip_checkbox.grid(row=7, column=0, sticky="w", padx=5, pady=(8, 2))
+        self.history_button.grid(row=7, column=1, sticky="e", padx=5, pady=(8, 2))
+
+        # Sub-Option für manuellen Import (conditional)
+        self.on_skip_processed_toggle()
+
+    def on_skip_processed_toggle(self):
+        """Wird aufgerufen wenn die Skip-Processed Checkbox geändert wird"""
+        is_enabled = self.sd_skip_processed_var.get()
+
+        if is_enabled:
+            # Zeige Sub-Option für manuellen Import (eingerückt)
+            self.sd_skip_manual_checkbox.grid(row=8, column=0, columnspan=2, sticky="w", padx=30, pady=(0, 2))
+        else:
+            # Verstecke Sub-Option
+            self.sd_skip_manual_checkbox.grid_forget()
+            self.sd_skip_processed_manual_var.set(False)
+
+    def on_size_limit_toggle(self):
+        """Wird aufgerufen wenn die Größen-Limit Checkbox geändert wird"""
+        is_enabled = self.sd_size_limit_enabled_var.get()
+
+        if is_enabled:
+            # Zeige Eingabefeld (noch mehr eingerückt als Checkbox)
+            self.sd_size_limit_frame.grid(row=4, column=0, columnspan=2, sticky="w", padx=50, pady=(0, 2))
+        else:
+            # Verstecke Eingabefeld
+            self.sd_size_limit_frame.grid_forget()
 
     def on_parallel_processing_toggle(self):
         """Wird aufgerufen wenn die Paralleles Processing Checkbox geändert wird"""
@@ -541,12 +756,19 @@ class SettingsDialog:
         self.sd_auto_backup_var.set(settings.get("sd_auto_backup", False))
         self.sd_clear_var.set(settings.get("sd_clear_after_backup", False))
         self.sd_auto_import_var.set(settings.get("sd_auto_import", False))
+        self.sd_skip_processed_var.set(settings.get("sd_skip_processed", False))  # NEU
+        self.sd_skip_processed_manual_var.set(settings.get("sd_skip_processed_manual", False))  # NEU
+        self.sd_size_limit_enabled_var.set(settings.get("sd_size_limit_enabled", False))  # NEU
+        self.sd_size_limit_mb_var.set(str(settings.get("sd_size_limit_mb", 2000)))  # NEU
 
         # Hardware-Beschleunigung
         self.hardware_acceleration_var.set(settings.get("hardware_acceleration_enabled", True))
 
         # Paralleles Processing
         self.parallel_processing_var.set(settings.get("parallel_processing_enabled", True))
+
+        # Codec-Auswahl
+        self.codec_var.set(settings.get("video_codec", "auto"))
 
         # Trigger checkbox visibility based on auto_backup setting
         self.on_auto_backup_toggle()
@@ -572,12 +794,31 @@ class SettingsDialog:
         sd_auto_backup = self.sd_auto_backup_var.get()
         sd_clear = self.sd_clear_var.get()
         sd_auto_import = self.sd_auto_import_var.get()
+        sd_skip_processed = self.sd_skip_processed_var.get()  # NEU
+        sd_skip_processed_manual = self.sd_skip_processed_manual_var.get()  # NEU
+        sd_size_limit_enabled = self.sd_size_limit_enabled_var.get()  # NEU
+
+        # Validiere Größen-Limit
+        sd_size_limit_mb = 2000  # Default
+        if sd_size_limit_enabled:
+            try:
+                sd_size_limit_mb = int(self.sd_size_limit_mb_var.get())
+                if sd_size_limit_mb <= 0:
+                    raise ValueError("Wert muss größer als 0 sein")
+            except ValueError:
+                messagebox.showwarning("Ungültige Eingabe",
+                                      "Bitte geben Sie eine gültige Zahl für das Größen-Limit ein (z.B. 2000).",
+                                      parent=self.dialog)
+                return
 
         # Hardware-Beschleunigung
         hardware_acceleration_enabled = self.hardware_acceleration_var.get()
 
         # Paralleles Processing
         parallel_processing_enabled = self.parallel_processing_var.get()
+
+        # Codec-Auswahl
+        video_codec = self.codec_var.get()
 
         if not server_url:
             messagebox.showwarning("Fehler", "Bitte geben Sie eine Server-Adresse ein.", parent=self.dialog)
@@ -610,12 +851,19 @@ class SettingsDialog:
             current_settings["sd_auto_backup"] = sd_auto_backup
             current_settings["sd_clear_after_backup"] = sd_clear
             current_settings["sd_auto_import"] = sd_auto_import
+            current_settings["sd_skip_processed"] = sd_skip_processed  # NEU
+            current_settings["sd_skip_processed_manual"] = sd_skip_processed_manual  # NEU
+            current_settings["sd_size_limit_enabled"] = sd_size_limit_enabled  # NEU
+            current_settings["sd_size_limit_mb"] = sd_size_limit_mb  # NEU
 
             # Hardware-Beschleunigung
             current_settings["hardware_acceleration_enabled"] = hardware_acceleration_enabled
 
             # Paralleles Processing
             current_settings["parallel_processing_enabled"] = parallel_processing_enabled
+
+            # Codec-Auswahl
+            current_settings["video_codec"] = video_codec
 
             # Speichern
             self.config.save_settings(current_settings)

@@ -454,7 +454,10 @@ class SettingsDialog:
         """Wird aufgerufen wenn ein anderer Codec ausgewählt wird"""
         selected_codec = self.codec_var.get()
         print(f"Codec geändert zu: {selected_codec}")
-        # Weitere Logik könnte hier hinzugefügt werden
+
+        # Aktualisiere Hardware-Info mit dem neuen Codec (falls Hardware-Beschleunigung aktiv)
+        if self.hardware_acceleration_var.get() and not self.hw_detection_running:
+            self._update_hardware_info_for_codec(selected_codec)
 
     def on_hw_accel_toggle(self):
         """Wird aufgerufen wenn die Hardware-Beschleunigung Checkbox geändert wird"""
@@ -478,7 +481,12 @@ class SettingsDialog:
                 try:
                     from src.utils.hardware_acceleration import HardwareAccelerationDetector
                     detector = HardwareAccelerationDetector()
-                    hw_info_text = detector.get_hardware_info_string()
+
+                    # Hole den aktuell gewählten Codec
+                    selected_codec = self.codec_var.get()
+                    display_codec = selected_codec if selected_codec != "auto" else "h264"
+
+                    hw_info_text = detector.get_hardware_info_string(display_codec)
 
                     # Aktualisiere UI im Haupt-Thread
                     self.dialog.after(0, self._update_hw_info_success, hw_info_text)
@@ -520,6 +528,26 @@ class SettingsDialog:
         # Aktualisiere auch die Paralleles Processing Info, falls aktiviert
         if self.parallel_processing_var.get():
             self._update_parallel_processing_info()
+
+    def _update_hardware_info_for_codec(self, codec):
+        """
+        Aktualisiert die Hardware-Info für einen spezifischen Codec
+
+        Args:
+            codec: Der Codec (z.B. 'h264', 'h265', 'vp9', 'av1')
+        """
+        try:
+            from src.utils.hardware_acceleration import HardwareAccelerationDetector
+            detector = HardwareAccelerationDetector()
+
+            # Mappe "auto" auf h264
+            display_codec = codec if codec != "auto" else "h264"
+
+            hw_info_text = detector.get_hardware_info_string(display_codec)
+            self.hw_info_label.config(text=f"✓ {hw_info_text}", fg="green")
+        except Exception as e:
+            print(f"Fehler beim Aktualisieren der Hardware-Info: {e}")
+            # Behalte die alte Info bei Fehler
 
     def on_auto_backup_toggle(self):
         """Wird aufgerufen wenn die Auto-Backup Checkbox geändert wird"""

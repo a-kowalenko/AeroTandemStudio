@@ -519,8 +519,16 @@ class HardwareAccelerationDetector:
 
         return params
 
-    def get_hardware_info_string(self):
-        """Gibt einen lesbaren String mit Hardware-Informationen zurück"""
+    def get_hardware_info_string(self, codec='h264'):
+        """
+        Gibt einen lesbaren String mit Hardware-Informationen zurück
+
+        Args:
+            codec: Der Codec für den der Encoder angezeigt werden soll (z.B. 'h264', 'h265', 'hevc')
+
+        Returns:
+            String wie "NVIDIA NVENC (Encoder: hevc_nvenc)" oder "Keine Hardware-Beschleunigung verfügbar"
+        """
         hw_info = self.detect_hardware()
 
         if not hw_info['available']:
@@ -535,4 +543,11 @@ class HardwareAccelerationDetector:
         }
 
         hw_name = hw_names.get(hw_info['type'], hw_info['type'])
-        return f"{hw_name} (Encoder: {hw_info['encoder']})"
+
+        # Wähle den richtigen Encoder basierend auf Codec
+        if codec in ['hevc', 'h265'] and 'encoder_hevc' in hw_info:
+            encoder = hw_info.get('encoder_hevc', 'unknown')
+        else:
+            encoder = hw_info.get('encoder', 'unknown')
+
+        return f"{hw_name} (Encoder: {encoder})"

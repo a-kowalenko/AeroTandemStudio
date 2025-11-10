@@ -143,15 +143,27 @@ class VideoPreview:
         """
         return self.hw_detector.get_encoding_params(codec, self.hw_accel_enabled)
 
-    def _get_current_encoder_name(self):
+    def _get_current_encoder_name(self, codec='h264'):
         """
         Gibt einen lesbaren Namen des aktuell verwendeten Encoders zurück.
 
+        Args:
+            codec: Der verwendete Codec (z.B. 'h264', 'h265', 'hevc', 'vp9', 'av1')
+
         Returns:
-            String wie "Intel Quick Sync (h264_qsv)" oder "Software (libx264)"
+            String wie "Intel Quick Sync (hevc_qsv)" oder "Software (libx265)"
         """
         if not self.hw_accel_enabled:
-            return "Software (libx264)"
+            # Software-Encoder basierend auf Codec
+            software_encoders = {
+                'h264': 'libx264',
+                'h265': 'libx265',
+                'hevc': 'libx265',
+                'vp9': 'libvpx-vp9',
+                'av1': 'libaom-av1'
+            }
+            encoder = software_encoders.get(codec, 'libx264')
+            return f"Software ({encoder})"
 
         hw_info = self.hw_detector.detect_hardware()
         if hw_info['available']:
@@ -163,10 +175,25 @@ class VideoPreview:
                 'vaapi': 'VAAPI'
             }
             hw_name = type_names.get(hw_info['type'], hw_info['type'])
-            encoder = hw_info.get('encoder', 'unknown')
+
+            # Wähle den richtigen Encoder basierend auf Codec
+            if codec in ['hevc', 'h265'] and 'encoder_hevc' in hw_info:
+                encoder = hw_info.get('encoder_hevc', 'unknown')
+            else:
+                encoder = hw_info.get('encoder', 'unknown')
+
             return f"{hw_name} ({encoder})"
         else:
-            return "Software (libx264)"
+            # Fallback auf Software
+            software_encoders = {
+                'h264': 'libx264',
+                'h265': 'libx265',
+                'hevc': 'libx265',
+                'vp9': 'libvpx-vp9',
+                'av1': 'libaom-av1'
+            }
+            encoder = software_encoders.get(codec, 'libx264')
+            return f"Software ({encoder})"
 
     def _get_video_codec(self, video_path):
         """
@@ -1471,6 +1498,13 @@ class VideoPreview:
             # Initialisiere Variablen
             needs_reencoding = False
             force_codec = selected_codec != "auto"  # Wenn nicht "auto", dann erzwinge Re-Encoding
+
+            # Bestimme den Ziel-Codec für Encoding-Anzeige
+            target_codec = None
+            if force_codec:
+                # Wenn ein spezifischer Codec gewählt wurde, verwende ihn
+                target_codec = selected_codec
+
             temp_copy_paths = []
 
             # Prüfe ob bereits Kopien existieren (mit file-identity-basiertem Cache)
@@ -1564,12 +1598,16 @@ class VideoPreview:
                                 else:
                                     raise Exception(f"Video {p} nicht in Cache gefunden!")
 
-                            self.parent.after(0, self._update_encoding_info, format_info)
+                            self.parent.after(0, lambda: self._update_encoding_info(format_info, target_codec))
                         else:
                             # Neue Videos nicht kompatibel → ALLE neu kodieren
                             print(f"⚠️ Format-Unterschiede: {format_info['details']}")
                             print("→ ALLE Videos werden auf 1080p@30 standardisiert")
                             needs_reencoding = True
+
+                            # Wenn kein spezifischer Codec gewählt, wird standardisiert (h264)
+                            if not target_codec:
+                                target_codec = "h264"
 
                             # Cache leeren
                             if self.video_copies_map:
@@ -1583,7 +1621,7 @@ class VideoPreview:
                                 self.video_copies_map.clear()
                                 self.metadata_cache.clear()
 
-                            self.parent.after(0, self._update_encoding_info, format_info)
+                            self.parent.after(0, lambda: self._update_encoding_info(format_info, target_codec))
                             temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding=True)
                             self.videos_were_reencoded = True  # Markiere als neu kodiert
 
@@ -1609,8 +1647,11 @@ class VideoPreview:
                         print("→ ALLE Videos werden auf 1080p@30 standardisiert")
                         needs_reencoding = True
                         self.videos_were_reencoded = True
+                        # Wenn kein spezifischer Codec gewählt, wird standardisiert (h264)
+                        if not target_codec:
+                            target_codec = "h264"
 
-                    self.parent.after(0, self._update_encoding_info, format_info)
+                    self.parent.after(0, lambda: self._update_encoding_info(format_info, target_codec))
                     temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding=needs_reencoding)
                 else:
                     # FALL 2c: Nur gecachte Videos (sollte nicht vorkommen, wäre FALL 1)
@@ -1837,18 +1878,31 @@ class VideoPreview:
         details = f"Alle {len(video_paths)} Videos kompatibel." if is_compatible else f"Format-Unterschiede: {', '.join(diffs[:3])}"
         return {"compatible": is_compatible, "details": details}
 
-    def _update_encoding_info(self, format_info):
-        """Aktualisiert die Encoding-Information in der UI"""
-        encoder_name = self._get_current_encoder_name()
+    def _update_encoding_info(self, format_info, target_codec=None):
+        """
+        Aktualisiert die Encoding-Information in der UI
 
-        # Hole den tatsächlichen Codec aus dem ersten Video
-        codec = "unknown"
-        if self.last_video_paths and len(self.last_video_paths) > 0:
-            # Versuche den Codec aus der ersten gecachten Kopie zu holen
-            file_identity = self._get_file_identity(self.last_video_paths[0])
-            if file_identity and file_identity in self.video_copies_map:
-                copy_path = self.video_copies_map[file_identity]
-                codec = self._get_video_codec(copy_path)
+        Args:
+            format_info: Dict mit Kompatibilitäts-Informationen
+            target_codec: Der Ziel-Codec (wenn Re-Encoding stattfindet), sonst None
+        """
+        # Verwende den Ziel-Codec wenn vorhanden, sonst erkenne aus Video
+        if target_codec:
+            codec = target_codec
+        else:
+            # Hole den tatsächlichen Codec aus dem ersten Video
+            codec = "h264"  # Default
+            if self.last_video_paths and len(self.last_video_paths) > 0:
+                # Versuche den Codec aus der ersten gecachten Kopie zu holen
+                file_identity = self._get_file_identity(self.last_video_paths[0])
+                if file_identity and file_identity in self.video_copies_map:
+                    copy_path = self.video_copies_map[file_identity]
+                    detected_codec = self._get_video_codec(copy_path)
+                    if detected_codec != "unknown":
+                        codec = detected_codec
+
+        # Hole Encoder-Namen mit dem tatsächlichen Codec
+        encoder_name = self._get_current_encoder_name(codec)
 
         if format_info["compatible"]:
             self.encoding_label.config(text=f"Kompatibel | {encoder_name} | Codec: {codec.upper()}", fg="green")
@@ -1886,15 +1940,19 @@ class VideoPreview:
         self.size_label.config(text=total_size)
         self.clips_label.config(text=str(len(copy_paths)))
 
-        # Hole Encoder-Namen
-        encoder_name = self._get_current_encoder_name()
-
         # Hole den tatsächlichen Codec aus dem kombinierten Video oder der ersten Kopie
-        codec = "unknown"
+        codec = "h264"  # Default
         if self.combined_video_path and os.path.exists(self.combined_video_path):
-            codec = self._get_video_codec(self.combined_video_path)
+            detected_codec = self._get_video_codec(self.combined_video_path)
+            if detected_codec != "unknown":
+                codec = detected_codec
         elif copy_paths and len(copy_paths) > 0:
-            codec = self._get_video_codec(copy_paths[0])
+            detected_codec = self._get_video_codec(copy_paths[0])
+            if detected_codec != "unknown":
+                codec = detected_codec
+
+        # Hole Encoder-Namen mit dem tatsächlichen Codec
+        encoder_name = self._get_current_encoder_name(codec)
 
         if was_reencoded:
             self.status_label.config(text="Vorschau bereit (standardisiert)", fg="green")

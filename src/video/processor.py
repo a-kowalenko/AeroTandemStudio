@@ -203,30 +203,73 @@ class VideoProcessor:
                     temp_intro_with_audio_path, dauer, video_params, drawtext_filter
                 )
 
-                # Schritt 5: Videos in .ts-Format umwandeln (Intro)
+                # Schritt 5 & 6: Vorbereitung für Zusammenfügen (codec-abhängig)
                 self._check_for_cancellation()
                 self._update_progress(5, TOTAL_STEPS)
-                self._update_status("Normalisiere Intro für robustes Zusammenfügen...")
-                bsf = "hevc_mp4toannexb" if video_params['vcodec'] == 'hevc' else "h264_mp4toannexb"
-                temp_intro_ts_path = os.path.join(tempfile.gettempdir(), "intro.ts")
-                temp_files.append(temp_intro_ts_path)
-                subprocess.run([
-                    "ffmpeg", "-y", "-i", temp_intro_with_audio_path,
-                    "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
-                    temp_intro_ts_path
-                ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
-                # Schritt 6: Hauptvideo nach .ts konvertieren
-                self._check_for_cancellation()
+                vcodec = video_params.get('vcodec', 'h264')
+
+                # VP9 und AV1 verwenden concat demuxer statt MPEG-TS (bessere Kompatibilität)
+                use_concat_demuxer = vcodec in ['vp9', 'av1']
+
+                # Initialisiere Variablen (werden je nach Methode gefüllt)
+                concat_list_path = None
+                temp_intro_ts_path = None
+                temp_combined_ts_path = None
+
+                if use_concat_demuxer:
+                    self._update_status("Bereite Videos für Zusammenfügen vor (concat demuxer)...")
+                    # Für VP9/AV1: Verwende concat demuxer (concat:file:...)
+                    # Keine Konvertierung nötig, verwende MP4-Dateien direkt
+                    temp_intro_path = temp_intro_with_audio_path
+                    temp_combined_path = combined_video_path
+
+                    # Erstelle concat-Liste
+                    concat_list_path = os.path.join(tempfile.gettempdir(), "final_concat_list.txt")
+                    temp_files.append(concat_list_path)
+
+                    with open(concat_list_path, 'w', encoding='utf-8') as f:
+                        # Escape Pfade für FFmpeg
+                        intro_escaped = os.path.abspath(temp_intro_path).replace('\\', '/')
+                        combined_escaped = os.path.abspath(temp_combined_path).replace('\\', '/')
+                        f.write(f"file '{intro_escaped}'\n")
+                        f.write(f"file '{combined_escaped}'\n")
+                else:
+                    self._update_status("Normalisiere Videos für robustes Zusammenfügen (MPEG-TS)...")
+                    # Für H.264/HEVC: Verwende MPEG-TS (wie bisher)
+                    bsf_map = {
+                        'h264': 'h264_mp4toannexb',
+                        'hevc': 'hevc_mp4toannexb',
+                        'h265': 'hevc_mp4toannexb',
+                    }
+                    bsf = bsf_map.get(vcodec, None)
+
+                    temp_intro_ts_path = os.path.join(tempfile.gettempdir(), "intro.ts")
+                    temp_files.append(temp_intro_ts_path)
+
+                    intro_cmd = ["ffmpeg", "-y", "-i", temp_intro_with_audio_path, "-c", "copy"]
+                    if bsf:
+                        intro_cmd.extend(["-bsf:v", bsf])
+                    intro_cmd.extend(["-f", "mpegts", temp_intro_ts_path])
+
+                    subprocess.run(intro_cmd, capture_output=True, text=True, check=True,
+                                  creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+                    # Hauptvideo nach .ts konvertieren
+                    self._check_for_cancellation()
+                    self._update_progress(6, TOTAL_STEPS)
+                    temp_combined_ts_path = os.path.join(tempfile.gettempdir(), "combined.ts")
+                    temp_files.append(temp_combined_ts_path)
+
+                    combined_cmd = ["ffmpeg", "-y", "-i", combined_video_path, "-c", "copy"]
+                    if bsf:
+                        combined_cmd.extend(["-bsf:v", bsf])
+                    combined_cmd.extend(["-f", "mpegts", temp_combined_ts_path])
+
+                    subprocess.run(combined_cmd, capture_output=True, text=True, check=True,
+                                  creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
                 self._update_progress(6, TOTAL_STEPS)
-                self._update_status("Normalisiere Hauptvideo für robustes Zusammenfügen...")
-                temp_combined_ts_path = os.path.join(tempfile.gettempdir(), "combined.ts")
-                temp_files.append(temp_combined_ts_path)
-                subprocess.run([
-                    "ffmpeg", "-y", "-i", combined_video_path,
-                    "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
-                    temp_combined_ts_path
-                ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
                 # Schritt 6a: Längsten Clip finden (falls Wasserzeichen gewünscht)
                 longest_clip_path = None
@@ -273,18 +316,30 @@ class VideoProcessor:
 
                     # Task 1: Normale Version zusammenfügen
                     def create_normal_version_task(task_id=None):
-                        concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
-                        command = [
-                            "ffmpeg", "-y",
-                            "-fflags", "+genpts",
-                            "-i", concat_input,
-                            "-c", "copy",
-                            "-bsf:a", "aac_adtstoasc",
-                            "-movflags", "+faststart"
-                        ]
-                        # HEVC-spezifische Stabilisierung und Tagging
-                        if video_params.get('vcodec') == 'hevc':
-                            command.extend(["-bsf:v", "hevc_metadata=aud=insert,extract_extradata", "-tag:v", "hvc1"])
+                        if use_concat_demuxer:
+                            # VP9/AV1: Verwende concat demuxer
+                            command = [
+                                "ffmpeg", "-y",
+                                "-f", "concat",
+                                "-safe", "0",
+                                "-i", concat_list_path,
+                                "-c", "copy",
+                                "-movflags", "+faststart"
+                            ]
+                        else:
+                            # H.264/HEVC: Verwende MPEG-TS concat protocol
+                            concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
+                            command = [
+                                "ffmpeg", "-y",
+                                "-fflags", "+genpts",
+                                "-i", concat_input,
+                                "-c", "copy",
+                                "-bsf:a", "aac_adtstoasc",
+                                "-movflags", "+faststart"
+                            ]
+                            # HEVC-spezifische Stabilisierung und Tagging
+                            if video_params.get('vcodec') == 'hevc':
+                                command.extend(["-bsf:v", "hevc_metadata=aud=insert,extract_extradata", "-tag:v", "hvc1"])
 
                         command.append(full_video_output_path)
 
@@ -324,18 +379,31 @@ class VideoProcessor:
                         self._check_for_cancellation()
                         self._update_progress(9, TOTAL_STEPS)
                         self._update_status("Füge Videos final zusammen...")
-                        concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
-                        command = [
-                            "ffmpeg", "-y",
-                            "-fflags", "+genpts",
-                            "-i", concat_input,
-                            "-c", "copy",
-                            "-bsf:a", "aac_adtstoasc",
-                            "-movflags", "+faststart"
-                        ]
-                        # HEVC-spezifische Stabilisierung und Tagging
-                        if video_params.get('vcodec') == 'hevc':
-                            command.extend(["-bsf:v", "hevc_metadata=aud=insert,extract_extradata", "-tag:v", "hvc1"])
+
+                        if use_concat_demuxer:
+                            # VP9/AV1: Verwende concat demuxer
+                            command = [
+                                "ffmpeg", "-y",
+                                "-f", "concat",
+                                "-safe", "0",
+                                "-i", concat_list_path,
+                                "-c", "copy",
+                                "-movflags", "+faststart"
+                            ]
+                        else:
+                            # H.264/HEVC: Verwende MPEG-TS concat protocol
+                            concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
+                            command = [
+                                "ffmpeg", "-y",
+                                "-fflags", "+genpts",
+                                "-i", concat_input,
+                                "-c", "copy",
+                                "-bsf:a", "aac_adtstoasc",
+                                "-movflags", "+faststart"
+                            ]
+                            # HEVC-spezifische Stabilisierung und Tagging
+                            if video_params.get('vcodec') == 'hevc':
+                                command.extend(["-bsf:v", "hevc_metadata=aud=insert,extract_extradata", "-tag:v", "hvc1"])
 
                         command.append(full_video_output_path)
 
@@ -551,7 +619,7 @@ class VideoProcessor:
             f"[v][wm_scaled]overlay=(W-w)/2:(H-h)/2"
         )
 
-        # Hole Encoding-Parameter für H.264 (Wasserzeichen-Videos werden immer mit H.264 codiert)
+        # Hole Encoding-Parameter für H.264 (Wasserzeichen-Videos werden IMMER mit H.264 codiert)
         encoding_params = self._get_encoding_params('h264')
 
         # Baue FFmpeg-Befehl
@@ -601,8 +669,8 @@ class VideoProcessor:
 
         # Hole Encoding-Parameter (mit oder ohne Hardware-Beschleunigung)
         vcodec = v_params.get('vcodec', 'h264')
-        codec_type = 'hevc' if vcodec in ['hevc', 'h265'] else 'h264'
-        encoding_params = self._get_encoding_params(codec_type)
+        # Verwende den tatsächlichen Codec aus den Video-Parametern
+        encoding_params = self._get_encoding_params(vcodec)
 
         command = ["ffmpeg", "-y"]
 
@@ -632,9 +700,28 @@ class VideoProcessor:
             "-map", "1:a:0"
         ])
 
-        # Preset und CRF nur bei Software-Encoding
+        # Preset und CRF nur bei Software-Encoding (codec-spezifisch)
         if not self.hw_accel_enabled:
-            command.extend(["-preset", "fast", "-crf", "18"])
+            encoder = encoding_params.get('encoder', 'libx264')
+
+            if encoder == 'libx264':
+                command.extend(["-preset", "fast", "-crf", "18"])
+            elif encoder == 'libx265':
+                command.extend(["-preset", "fast", "-crf", "20"])
+            elif encoder == 'libvpx-vp9':
+                # VP9 hat keine preset-Option
+                command.extend([
+                    "-deadline", "good",  # good quality (besser als realtime)
+                    "-cpu-used", "2",  # Geschwindigkeit (0=langsam, 5=schnell)
+                    "-crf", "23",  # Qualität für Intro (besser als Preview)
+                    "-b:v", "0"  # CRF Mode
+                ])
+            elif encoder in ['libaom-av1', 'libsvtav1']:
+                command.extend([
+                    "-cpu-used", "6",  # Geschwindigkeit
+                    "-crf", "28",
+                    "-b:v", "0"
+                ])
 
         # Color Space Parameter
         if v_params.get('color_range'):
@@ -817,14 +904,29 @@ class VideoProcessor:
         time_base = video_stream.get("time_base", "1/25").split('/')
         timescale = time_base[1] if len(time_base) == 2 else "25"
 
+        # Codec-spezifisches vtag ermitteln
+        vcodec = video_stream.get("codec_name", "h264")
+        vtag = video_stream.get("codec_tag_string", "")
+
+        # Wenn kein vtag vorhanden, verwende codec-spezifische Defaults
+        if not vtag or vtag == "0x00000000":
+            vtag_map = {
+                'h264': 'avc1',
+                'hevc': 'hvc1',
+                'h265': 'hvc1',
+                'vp9': 'vp09',
+                'av1': 'av01'
+            }
+            vtag = vtag_map.get(vcodec, 'avc1')
+
         return {
             "width": video_stream.get("width"),
             "height": video_stream.get("height"),
             "fps": video_stream.get("r_frame_rate"),
             "timescale": timescale,
             "pix_fmt": video_stream.get("pix_fmt"),
-            "vcodec": video_stream.get("codec_name"),
-            "vtag": video_stream.get("codec_tag_string", "avc1"),
+            "vcodec": vcodec,
+            "vtag": vtag,
             "acodec": audio_stream.get("codec_name"),
             "sample_rate": audio_stream.get("sample_rate"),
             "channel_layout": audio_stream.get("channel_layout", "stereo"),

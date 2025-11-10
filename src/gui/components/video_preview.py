@@ -1292,12 +1292,40 @@ class VideoPreview:
 
         # Zusätzliche Parameter für Software-Encoding (wenn HW nicht aktiv)
         if not self.hw_accel_enabled:
-            cmd.extend([
-                "-preset", "veryfast",
-                "-crf", "26",
-                "-tune", "fastdecode",
-                "-x264-params", "ref=1:me=dia:subme=1:trellis=0"
-            ])
+            encoder = encoding_params.get('encoder', 'libx264')
+
+            # Codec-spezifische Parameter
+            if encoder == 'libx264':
+                # H.264 spezifische Optimierungen
+                cmd.extend([
+                    "-preset", "veryfast",
+                    "-crf", "26",
+                    "-tune", "fastdecode",
+                    "-x264-params", "ref=1:me=dia:subme=1:trellis=0"
+                ])
+            elif encoder == 'libx265':
+                # H.265/HEVC spezifische Optimierungen
+                cmd.extend([
+                    "-preset", "veryfast",
+                    "-crf", "28",
+                    "-x265-params", "ref=1:me=dia"
+                ])
+            elif encoder == 'libvpx-vp9':
+                # VP9 spezifische Optimierungen
+                cmd.extend([
+                    "-deadline", "realtime",  # Schnelles Encoding
+                    "-cpu-used", "5",  # Geschwindigkeit (0=langsam, 5=schnell)
+                    "-row-mt", "1",  # Multi-Threading
+                    "-b:v", "0",  # CRF Mode
+                    "-crf", "31"  # Qualität (höher = kleiner/schlechter)
+                ])
+            elif encoder in ['libaom-av1', 'libsvtav1']:
+                # AV1 spezifische Optimierungen
+                cmd.extend([
+                    "-cpu-used", "8",  # Sehr schnell
+                    "-crf", "35",
+                    "-b:v", "0"
+                ])
         else:
             # Bei Hardware-Encoding: Optimierte Qualitätseinstellungen
             # (preset und tune sind bereits in encoding_params enthalten)

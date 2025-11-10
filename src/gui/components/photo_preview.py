@@ -113,10 +113,11 @@ class PhotoPreview:
         thumbnail_frame = tk.Frame(self.frame)
         thumbnail_frame.pack(fill="x", pady=(0, 5))
 
-        # Scrollbarer Canvas für Thumbnails
+        # Scrollbarer Canvas für Thumbnails - Höhe exakt wie aktives Thumbnail (78px)
+        canvas_height = int(self.thumbnail_size)
         self.thumbnail_canvas = tk.Canvas(
             thumbnail_frame,
-            height=self.thumbnail_size,
+            height=canvas_height,
             bg="#f0f0f0",
             highlightthickness=0
         )
@@ -151,14 +152,14 @@ class PhotoPreview:
 
         # Zwei Spalten: Links = Aktuelles Foto, Rechts = Gesamt-Statistik
         left_info_frame = tk.Frame(info_frame)
-        left_info_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        left_info_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
 
         right_info_frame = tk.Frame(info_frame)
-        right_info_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        right_info_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
 
-        # Grid-Gewichte für gleichmäßige Verteilung
-        info_frame.grid_columnconfigure(0, weight=35, minsize=150)
-        info_frame.grid_columnconfigure(1, weight=65)
+        # WICHTIG: Beide Spalten exakt 50%, uniform für feste Breite (wie Video Preview)
+        info_frame.grid_columnconfigure(0, weight=1, uniform="info_cols")
+        info_frame.grid_columnconfigure(1, weight=1, uniform="info_cols")
 
         # === LINKE SPALTE: Aktuelles Foto ===
         single_info_title = tk.Label(left_info_frame, text="Aktuelles Foto:", font=("Arial", 9, "bold"))
@@ -217,7 +218,7 @@ class PhotoPreview:
 
         self.delete_button = tk.Button(
             button_frame,
-            text="Ausgewähltes Foto löschen",
+            text="Foto löschen",
             command=self._delete_current_photo,
             bg="#f44336",
             fg="white",
@@ -470,7 +471,7 @@ class PhotoPreview:
             self.thumbnail_canvas.xview_moveto(new_view_start)
 
     def _create_thumbnail(self, photo_path, idx, is_current=False):
-        """Erstellt ein Thumbnail für ein Foto - alle gleich groß (quadratisch)"""
+        """Erstellt ein Thumbnail für ein Foto - aktive 1.3x größer"""
         # Cache-Key berücksichtigt ob aktiv oder nicht
         cache_key = (idx, is_current)
         if cache_key in self.thumbnail_images:
@@ -479,38 +480,13 @@ class PhotoPreview:
         try:
             img = Image.open(photo_path)
 
-            # Bestimme Thumbnail-Größe (aktive sind 1.3x größer)
+            # Aktive Thumbnails sind 1.3x größer
             size = int(self.thumbnail_size * 1.3) if is_current else self.thumbnail_size
 
-            # Erstelle quadratisches Thumbnail mit Cropping (zentriert)
-            # Berechne Aspect Ratio
-            width, height = img.size
-            aspect = width / height
+            # Verwende thumbnail() - skaliert in Bounding Box mit Aspect Ratio (wie Video Preview)
+            img.thumbnail((size, size), Image.LANCZOS)
 
-            if aspect > 1:
-                # Landscape - schneide Seiten ab
-                new_height = height
-                new_width = height
-                left = (width - new_width) // 2
-                top = 0
-                right = left + new_width
-                bottom = height
-            else:
-                # Portrait oder quadratisch - schneide oben/unten ab
-                new_width = width
-                new_height = width
-                left = 0
-                top = (height - new_height) // 2
-                right = width
-                bottom = top + new_height
-
-            # Crop zu Quadrat
-            img_cropped = img.crop((left, top, right, bottom))
-
-            # Skaliere auf finale Größe
-            img_resized = img_cropped.resize((size, size), Image.LANCZOS)
-
-            thumbnail = ImageTk.PhotoImage(img_resized)
+            thumbnail = ImageTk.PhotoImage(img)
             self.thumbnail_images[cache_key] = thumbnail
             return thumbnail
         except Exception as e:
@@ -1049,11 +1025,11 @@ class PhotoPreview:
         if self.photo_paths and effective_selection:
             count = len(effective_selection)
             if count == 1:
-                self.delete_button.config(text="Ausgewähltes Foto löschen", state="normal")
+                self.delete_button.config(text="Foto löschen", state="normal")
             else:
-                self.delete_button.config(text=f"{count} ausgewählte Fotos löschen", state="normal")
+                self.delete_button.config(text=f"{count} Fotos löschen", state="normal")
         else:
-            self.delete_button.config(text="Ausgewähltes Foto löschen", state="disabled")
+            self.delete_button.config(text="Foto löschen", state="disabled")
 
         # Clear-Selection-Button nur anzeigen wenn explizite Markierung vorhanden
         if self.explicitly_selected and self.selected_photos:

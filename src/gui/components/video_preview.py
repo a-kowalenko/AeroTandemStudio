@@ -299,10 +299,11 @@ class VideoPreview:
         thumbnail_frame = tk.Frame(self.frame)
         thumbnail_frame.pack(fill="x", pady=(0, 5))
 
-        # Scrollbarer Canvas
+        # Scrollbarer Canvas - Höhe exakt wie aktives Thumbnail (78px)
+        canvas_height = int(self.thumbnail_size)
         self.thumbnail_canvas = tk.Canvas(
             thumbnail_frame,
-            height=self.thumbnail_size,
+            height=canvas_height,
             bg="#f0f0f0",
             highlightthickness=0
         )
@@ -333,16 +334,16 @@ class VideoPreview:
         info_detail_frame = tk.Frame(self.frame, relief="groove", borderwidth=1, padx=5, pady=5)
         info_detail_frame.pack(fill="x", pady=(0, 10))
 
-        # Zwei Spalten - linke Spalte fest 35%
+        # Zwei Spalten - jeweils exakt 50% Breite, fest
         left_info_frame = tk.Frame(info_detail_frame)
-        left_info_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        left_info_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
 
         right_info_frame = tk.Frame(info_detail_frame)
-        right_info_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        right_info_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
 
-        # WICHTIG: Linke Spalte 35%, Rechte Spalte 65%
-        info_detail_frame.grid_columnconfigure(0, weight=35, minsize=150)
-        info_detail_frame.grid_columnconfigure(1, weight=65)
+        # WICHTIG: Beide Spalten exakt 50%, uniform für feste Breite
+        info_detail_frame.grid_columnconfigure(0, weight=1, uniform="info_cols")
+        info_detail_frame.grid_columnconfigure(1, weight=1, uniform="info_cols")
 
         # === LINKE SPALTE: Aktueller Clip ===
         single_info_title = tk.Label(left_info_frame, text="Aktueller Clip:", font=("Arial", 9, "bold"))
@@ -379,6 +380,48 @@ class VideoPreview:
         # Spalte 1 soll sich ausdehnen für Textkürzung
         left_info_frame.grid_columnconfigure(1, weight=1)
 
+        # Buttons unter "Aktueller Clip"
+        button_frame = tk.Frame(left_info_frame)
+        button_frame.grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        button_frame.columnconfigure(0, weight=0)  # Kein fill
+        button_frame.columnconfigure(1, weight=0)
+        button_frame.columnconfigure(2, weight=0)
+
+        self.delete_button = tk.Button(
+            button_frame,
+            text="Clip löschen",
+            command=self._delete_selected_clip,
+            bg="#f44336",
+            fg="white",
+            font=("Arial", 9, "bold"),
+            state="disabled"
+        )
+        self.delete_button.grid(row=0, column=0, sticky="w", padx=(0, 5))
+
+        self.qr_scan_button = tk.Button(
+            button_frame,
+            text="🔍",
+            command=self._scan_current_clip_qr,
+            bg="#2196F3",
+            fg="white",
+            font=("Arial", 9),
+            width=3,
+            state="disabled"
+        )
+        self.qr_scan_button.grid(row=0, column=1, sticky="ew", padx=(0, 5))
+
+        self.wm_button = tk.Button(
+            button_frame,
+            text="💧",
+            command=self._on_wm_button_click,
+            bg="#f0f0f0",
+            fg="black",
+            font=("Arial", 9),
+            width=3,
+            state="disabled"
+        )
+        self.wm_button.grid(row=0, column=2, sticky="ew")
+
         # === RECHTE SPALTE: Gesamt-Statistik ===
         stats_title = tk.Label(right_info_frame, text="Gesamt-Statistik:", font=("Arial", 9, "bold"))
         stats_title.grid(row=0, column=0, columnspan=2, sticky="w")
@@ -407,63 +450,6 @@ class VideoPreview:
         # Dummy-Label für clips_label (für Kompatibilität)
         self.clips_label = self.info_labels["total_count"]
         self.duration_label = self.info_labels["total_duration"]
-
-        # Buttons
-        button_frame = tk.Frame(right_info_frame)
-        button_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        button_frame.columnconfigure(0, weight=1)
-        button_frame.columnconfigure(1, weight=1)
-        button_frame.columnconfigure(2, weight=0)
-        button_frame.columnconfigure(3, weight=0)  # NEUE Spalte
-
-        self.delete_button = tk.Button(
-            button_frame,
-            text="Ausgewählten Clip löschen",
-            command=self._delete_selected_clip,
-            bg="#f44336",
-            fg="white",
-            font=("Arial", 9, "bold"),
-            state="disabled"
-        )
-        self.delete_button.grid(row=0, column=0, sticky="ew", padx=(0, 5))
-
-        self.clear_selection_button = tk.Button(
-            button_frame,
-            text="Auswahl aufheben",
-            command=self._clear_selection,
-            bg="#999999",
-            fg="white",
-            font=("Arial", 9),
-            state="disabled"
-        )
-        self.clear_selection_button.grid(row=0, column=1, sticky="ew", padx=(5, 5))
-
-        self.qr_scan_button = tk.Button(
-            button_frame,
-            text="🔍",
-            command=self._scan_current_clip_qr,
-            bg="#2196F3",
-            fg="white",
-            font=("Arial", 9),
-            width=3,
-            state="disabled"
-        )
-        self.qr_scan_button.grid(row=0, column=2, sticky="ew", padx=(5, 0))
-
-        # --- NEU: Wasserzeichen-Button ---
-        self.wm_button = tk.Button(
-            button_frame,
-            text="💧",
-            command=self._on_wm_button_click,
-            bg="#f0f0f0",
-            fg="black",
-            font=("Arial", 9),
-            width=3,
-            state="disabled"
-        )
-        # INITIAL VERSTECKT - wird von app.py gesteuert
-        # self.wm_button.grid(row=0, column=3, sticky="ew", padx=(5, 0))
-        # --- ENDE NEU ---
 
         # Container für Status-Label und Progress bar in einer Zeile (zentriert)
         status_progress_container = tk.Frame(self.frame)
@@ -1905,9 +1891,11 @@ class VideoPreview:
         encoder_name = self._get_current_encoder_name(codec)
 
         if format_info["compatible"]:
-            self.encoding_label.config(text=f"Kompatibel | {encoder_name} | Codec: {codec.upper()}", fg="green")
+            # Kompatibel: Zeige nur Codec (kein Re-Encoding)
+            self.encoding_label.config(text=f"Kompatibel (Codec: {codec.upper()})", fg="green")
         else:
-            self.encoding_label.config(text=f"Standardisiert | {encoder_name} | Codec: {codec.upper()}", fg="orange")
+            # Standardisiert: Zeige Encoder-Info (wichtiger bei Re-Encoding)
+            self.encoding_label.config(text=f"Standardisiert | {encoder_name}", fg="orange")
 
     def _update_ui_success(self, copy_paths, was_reencoded):
         """
@@ -1956,10 +1944,12 @@ class VideoPreview:
 
         if was_reencoded:
             self.status_label.config(text="Vorschau bereit (standardisiert)", fg="green")
-            self.encoding_label.config(text=f"Standardisiert | {encoder_name} | Codec: {codec.upper()}", fg="orange")
+            # Zeige Encoder-Info bei Re-Encoding
+            self.encoding_label.config(text=f"Standardisiert | {encoder_name}", fg="orange")
         else:
             self.status_label.config(text="Vorschau bereit (schnell)", fg="green")
-            self.encoding_label.config(text=f"Direkt kombiniert | {encoder_name} | Codec: {codec.upper()}", fg="green")
+            # Zeige nur Codec bei direkter Kombination
+            self.encoding_label.config(text=f"Direkt kombiniert (Codec: {codec.upper()})", fg="green")
 
         # self.play_button.config(state="normal")  # ENTFERNT
         # self.action_button.config(state="disabled")  # ENTFERNT
@@ -2591,8 +2581,9 @@ class VideoPreview:
 
             # Lade Bild und erstelle Thumbnail
             img = Image.open(tmp_path)
+            # Aktive Thumbnails sind 1.3x größer
             size = int(self.thumbnail_size * 1.3) if is_active else self.thumbnail_size
-            # Versuche neuere PIL-Version, fallback auf ältere
+            # Verwende thumbnail() - skaliert in Bounding Box mit Aspect Ratio
             try:
                 img.thumbnail((size, size), Image.Resampling.LANCZOS)
             except AttributeError:
@@ -2938,8 +2929,6 @@ class VideoPreview:
             self.qr_scan_button.config(state="disabled")
             self.wm_button.config(state="disabled")  # NEU
 
-        # Clear-Selection immer disabled (keine Mehrfachauswahl aktuell)
-        self.clear_selection_button.config(state="disabled")
 
     # --- NEU: WASSERZEICHEN-METHODEN ---
 

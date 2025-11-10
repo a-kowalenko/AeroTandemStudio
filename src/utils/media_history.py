@@ -1,7 +1,6 @@
 ﻿import os
 import sqlite3
 import hashlib
-import time
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 

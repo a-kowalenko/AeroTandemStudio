@@ -7,7 +7,6 @@ import time
 import threading
 import shutil
 import string
-import tkinter as tk
 
 try:
     import win32api

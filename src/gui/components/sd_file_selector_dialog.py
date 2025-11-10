@@ -4,7 +4,6 @@ Dialog zur Auswahl von Dateien von der SD-Karte mit Thumbnail- und Detail-Ansich
 import tkinter as tk
 from tkinter import ttk
 import os
-from pathlib import Path
 from PIL import Image, ImageTk
 import subprocess
 import threading

@@ -736,10 +736,10 @@ class VideoProcessor:
         # Profile und Level (nur für h264/hevc)
         # WICHTIG: Bei Hardware-Encoding (nvenc) KEIN Level setzen, da nvenc nicht alle Levels unterstützt
         # Der Encoder wählt automatisch ein passendes Level
-        if v_params.get('profile') and v_params['vcodec'] in ['h264', 'hevc'] and not self.hw_accel_enabled:
+        if v_params.get('profile') and v_params['vcodec'] in ['h264', 'hevc', 'h265'] and not self.hw_accel_enabled:
             profile_str = str(v_params['profile']).lower().replace(" ", "")
             command.extend(["-profile:v", profile_str])
-        if v_params.get('level') and v_params['vcodec'] in ['h264', 'hevc'] and not self.hw_accel_enabled:
+        if v_params.get('level') and v_params['vcodec'] in ['h264', 'hevc', 'h265'] and not self.hw_accel_enabled:
             try:
                 level_str = str(float(v_params['level']) / 10.0)
                 command.extend(["-level:v", level_str])

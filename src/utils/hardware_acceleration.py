@@ -463,7 +463,7 @@ class HardwareAccelerationDetector:
                 params['input_params'].extend(['-hwaccel_device', hw_info['device']])
 
         # Hardware Encoder (für Output)
-        if codec == 'hevc' and 'encoder_hevc' in hw_info:
+        if codec in ['hevc', 'h265'] and 'encoder_hevc' in hw_info:
             params['encoder'] = hw_info['encoder_hevc']
         else:
             params['encoder'] = hw_info['encoder']

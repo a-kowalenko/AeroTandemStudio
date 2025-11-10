@@ -51,6 +51,7 @@ class SDFileSelectorDialog:
         self.drag_canvas = None
         self.canvas_container = None  # Container für Canvas-Referenz
         self.current_canvas = None  # Für Scroll-Handler
+        self.current_tree = None  # TreeView-Referenz für optimierte Updates
         self.thumbnail_widgets = {}  # path -> (frame_widget, bbox)
 
         # NEU: Async Thumbnail-Loading
@@ -535,7 +536,7 @@ class SDFileSelectorDialog:
 
         frame = tk.Frame(outer_frame,
                         relief='flat',
-                        borderwidth=0,
+                        borderwidth=2,
                         bg=border_color,
                         highlightthickness=0)
         frame.pack(fill='both', expand=True)
@@ -647,7 +648,8 @@ class SDFileSelectorDialog:
                 # Entferne aus Auswahl
                 self.selected_paths.discard(path)
                 self.update_selection_info()
-                self.apply_filters()
+                # Optimiert: Update nur dieses Thumbnail ohne Flackern
+                self.update_single_thumbnail(path)
                 return "break"  # Verhindere weitere Event-Propagierung
 
             x_button_label = tk.Label(x_button_frame, text="✕", font=("Arial", 12, "bold"),
@@ -881,6 +883,9 @@ class SDFileSelectorDialog:
                            yscrollcommand=scrollbar.set)
         tree.pack(side='left', fill='both', expand=True)
 
+        # Speichere TreeView-Referenz für optimierte Updates
+        self.current_tree = tree
+
         # NEU: Aktiviere Multi-Selection im Treeview
         tree.config(selectmode='extended')  # Erlaubt Shift+Ctrl Multi-Selection
 
@@ -1033,6 +1038,215 @@ class SDFileSelectorDialog:
         # Update Selektions-Liste rechts
         self.update_selection_list()
 
+    def update_single_thumbnail(self, path):
+        """
+        Aktualisiert nur ein einzelnes Thumbnail/TreeView-Item ohne die gesamte Ansicht neu zu laden.
+        Verhindert Flackern beim Hinzufügen/Entfernen aus der Auswahl.
+        """
+        if self.view_mode == "details":
+            # Details-Ansicht: Update nur das betroffene TreeView-Item
+            self._update_tree_item(path)
+            return
+
+        # Thumbnail-Ansicht: (bestehende Logik)
+        # Finde das Widget für diesen Pfad
+        if path not in self.thumbnail_widgets:
+            # Widget existiert nicht (z.B. gefiltert), lade komplett neu
+            self.apply_filters()
+            return
+
+        outer_frame, bbox = self.thumbnail_widgets[path]
+
+        # Prüfe ob Widget noch existiert
+        if not outer_frame.winfo_exists():
+            self.apply_filters()
+            return
+
+        # Hole file_info
+        file_info = next((f for f in self.files_info if f['path'] == path), None)
+        if not file_info:
+            return
+
+        try:
+            # Finde relevante Child-Widgets
+            frame = outer_frame.winfo_children()[0]  # Der Border-Frame
+            inner_frame = frame.winfo_children()[0]  # Der Content-Frame
+            thumb_frame = inner_frame.winfo_children()[0]  # Der Thumbnail-Frame
+
+            # Bestimme neuen Status
+            is_marked = path in self.markierte_paths
+            is_selected = path in self.selected_paths
+
+            # Update Border-Farbe
+            if is_selected:
+                border_color = '#4CAF50'  # Grün für ausgewählt
+            elif is_marked:
+                border_color = '#000000'  # Schwarz für markiert
+            else:
+                border_color = '#e0e0e0'  # Hellgrau für normal
+
+            frame.config(bg=border_color)
+
+            # X-Button Management
+            # Suche nach existierendem X-Button (erkennbar an bg='#f44336')
+            x_button_frame = None
+            for widget in thumb_frame.winfo_children():
+                if isinstance(widget, tk.Frame) and widget.cget('bg') == '#f44336':
+                    x_button_frame = widget
+                    break
+
+            if is_selected and not x_button_frame:
+                # X-Button hinzufügen
+                x_button_frame = tk.Frame(thumb_frame, bg='#f44336')
+                x_button_frame.place(relx=1.0, rely=0.0, anchor='ne', x=-5, y=5)
+                x_button_frame.lift()
+
+                def on_remove_click(event):
+                    self.selected_paths.discard(path)
+                    self.update_selection_info()
+                    self.update_single_thumbnail(path)
+                    return "break"
+
+                x_button_label = tk.Label(x_button_frame, text="✕", font=("Arial", 12, "bold"),
+                                         bg='#f44336', fg='white', padx=3, pady=1, cursor='hand2')
+                x_button_label.pack()
+                x_button_label.bind('<Button-1>', on_remove_click)
+                x_button_frame.bind('<Button-1>', on_remove_click)
+
+            elif not is_selected and x_button_frame:
+                # X-Button entfernen
+                x_button_frame.destroy()
+
+        except Exception as e:
+            # Fallback: Komplette Ansicht neu laden
+            print(f"Fehler beim Update von Thumbnail {path}: {e}")
+            self.apply_filters()
+
+    def _update_tree_item(self, path):
+        """Aktualisiert nur ein TreeView-Item ohne Flackern"""
+        if not self.current_tree or not self.current_tree.winfo_exists():
+            return
+
+        tree = self.current_tree
+
+        # Finde das TreeView-Item für diesen Pfad
+        for item in tree.get_children():
+            if tree.item(item)['tags'][0] == path:
+                # Update nur das Symbol in der ersten Spalte
+                values = list(tree.item(item)['values'])
+
+                is_marked = path in self.markierte_paths
+                is_selected = path in self.selected_paths
+
+                if is_selected:
+                    values[0] = '✅'  # Grün: Ausgewählt
+                elif is_marked:
+                    values[0] = '⬛'  # Schwarz: Markiert
+                else:
+                    values[0] = ''
+
+                tree.item(item, values=values)
+                break
+
+    def update_multiple_thumbnails(self, paths):
+        """
+        Aktualisiert mehrere Thumbnails/TreeView-Items ohne die gesamte Ansicht neu zu laden.
+        Optimiert für Batch-Updates (mark_all, add_marked_to_selection, etc.)
+        """
+        if self.view_mode == "details":
+            # Details-Ansicht: Update alle betroffenen TreeView-Items
+            self._update_tree_items(paths)
+            return
+
+        # Thumbnail-Ansicht: Update jedes Thumbnail einzeln
+        for path in paths:
+            if path in self.thumbnail_widgets:
+                outer_frame, bbox = self.thumbnail_widgets[path]
+
+                try:
+                    if outer_frame.winfo_exists():
+                        # Finde relevante Child-Widgets
+                        frame = outer_frame.winfo_children()[0]  # Der Border-Frame
+                        inner_frame = frame.winfo_children()[0]  # Der Content-Frame
+                        thumb_frame = inner_frame.winfo_children()[0]  # Der Thumbnail-Frame
+
+                        # Bestimme neuen Status
+                        is_marked = path in self.markierte_paths
+                        is_selected = path in self.selected_paths
+
+                        # Update Border-Farbe
+                        if is_selected:
+                            border_color = '#4CAF50'
+                        elif is_marked:
+                            border_color = '#000000'
+                        else:
+                            border_color = '#e0e0e0'
+
+                        frame.config(bg=border_color)
+
+                        # X-Button Management
+                        x_button_frame = None
+                        for widget in thumb_frame.winfo_children():
+                            if isinstance(widget, tk.Frame) and widget.cget('bg') == '#f44336':
+                                x_button_frame = widget
+                                break
+
+                        if is_selected and not x_button_frame:
+                            # X-Button hinzufügen
+                            x_button_frame = tk.Frame(thumb_frame, bg='#f44336')
+                            x_button_frame.place(relx=1.0, rely=0.0, anchor='ne', x=-5, y=5)
+                            x_button_frame.lift()
+
+                            def make_remove_handler(p):
+                                def on_remove_click(event):
+                                    self.selected_paths.discard(p)
+                                    self.update_selection_info()
+                                    self.update_single_thumbnail(p)
+                                    return "break"
+                                return on_remove_click
+
+                            x_button_label = tk.Label(x_button_frame, text="✕", font=("Arial", 12, "bold"),
+                                                     bg='#f44336', fg='white', padx=3, pady=1, cursor='hand2')
+                            x_button_label.pack()
+                            handler = make_remove_handler(path)
+                            x_button_label.bind('<Button-1>', handler)
+                            x_button_frame.bind('<Button-1>', handler)
+
+                        elif not is_selected and x_button_frame:
+                            # X-Button entfernen
+                            x_button_frame.destroy()
+
+                except Exception as e:
+                    print(f"Fehler beim Update von Thumbnail {path}: {e}")
+                    pass  # Ignoriere Fehler bei einzelnen Widgets
+
+    def _update_tree_items(self, paths):
+        """Aktualisiert mehrere TreeView-Items ohne Flackern"""
+        if not self.current_tree or not self.current_tree.winfo_exists():
+            return
+
+        tree = self.current_tree
+        paths_set = set(paths)
+
+        # Update alle betroffenen Items
+        for item in tree.get_children():
+            item_path = tree.item(item)['tags'][0]
+            if item_path in paths_set:
+                # Update nur das Symbol in der ersten Spalte
+                values = list(tree.item(item)['values'])
+
+                is_marked = item_path in self.markierte_paths
+                is_selected = item_path in self.selected_paths
+
+                if is_selected:
+                    values[0] = '✅'  # Grün: Ausgewählt
+                elif is_marked:
+                    values[0] = '⬛'  # Schwarz: Markiert
+                else:
+                    values[0] = ''
+
+                tree.item(item, values=values)
+
     def update_mark_button(self):
         """Aktualisiert den 'X Dateien auswählen' Button"""
         marked_count = len(self.markierte_paths)
@@ -1051,6 +1265,9 @@ class SDFileSelectorDialog:
 
     def add_marked_to_selection(self):
         """Fügt markierte Dateien zur Selektion hinzu"""
+        # Merke betroffene Pfade für Update
+        affected_paths = set(self.markierte_paths)
+
         # Füge alle markierten zur Selektion hinzu
         self.selected_paths.update(self.markierte_paths)
 
@@ -1063,65 +1280,112 @@ class SDFileSelectorDialog:
         # Update Info
         self.update_selection_info()
 
-        # Refresh aktuelle Ansicht
-        self.apply_filters()
+        # Optimiert: Update nur betroffene Thumbnails ohne Flackern
+        self.update_multiple_thumbnails(affected_paths)
 
     def mark_all(self):
         """Markiert alle sichtbaren (gefilterten) Dateien"""
         filtered_files = self.get_filtered_files()
+        affected_paths = set()
         for file_info in filtered_files:
-            self.markierte_paths.add(file_info['path'])
+            if file_info['path'] not in self.selected_paths:  # Nur nicht-ausgewählte
+                self.markierte_paths.add(file_info['path'])
+                affected_paths.add(file_info['path'])
 
         self.update_mark_button()
-        self.apply_filters()
+        # Optimiert: Update nur betroffene Thumbnails ohne Flackern
+        self.update_multiple_thumbnails(affected_paths)
 
     def unmark_all(self):
         """Hebt alle Markierungen auf"""
+        # Merke betroffene Pfade für Update
+        affected_paths = set(self.markierte_paths)
+
         self.markierte_paths.clear()
         self.update_mark_button()
-        self.apply_filters()
+
+        # Optimiert: Update nur betroffene Thumbnails ohne Flackern
+        self.update_multiple_thumbnails(affected_paths)
 
     def update_selection_list(self):
-        """Aktualisiert die Liste der selektierten Dateien rechts"""
-        # Lösche alte Liste
+        """Aktualisiert die Liste der selektierten Dateien rechts (optimiert ohne Flackern)"""
+        # Hole aktuelle Widgets (als Dict: path -> widget)
+        current_widgets = {}
         for widget in self.selection_list_container.winfo_children():
-            widget.destroy()
+            # Pfad ist im Widget als Attribut gespeichert (falls vorhanden)
+            if hasattr(widget, '_file_path'):
+                current_widgets[widget._file_path] = widget
 
-        # Erstelle Items für jede selektierte Datei
-        for idx, path in enumerate(sorted(self.selected_paths)):
-            # Finde file_info
-            file_info = next((f for f in self.files_info if f['path'] == path), None)
-            if not file_info:
-                continue
+        # Sortierte Liste der gewünschten Pfade
+        desired_paths = sorted(self.selected_paths)
+        current_paths = list(current_widgets.keys())
 
-            # Item-Frame
-            item_frame = tk.Frame(self.selection_list_container, bg='white', relief='solid', borderwidth=1)
-            item_frame.pack(fill='x', padx=5, pady=2)
+        # Prüfe ob sich die Liste geändert hat
+        if desired_paths == current_paths:
+            # Keine Änderung, nichts zu tun
+            return
 
-            # Icon + Filename
-            info_frame = tk.Frame(item_frame, bg='white')
-            info_frame.pack(side='left', fill='both', expand=True, padx=5, pady=3)
+        # Diff berechnen
+        paths_to_add = set(desired_paths) - set(current_paths)
+        paths_to_remove = set(current_paths) - set(desired_paths)
 
-            icon = "🎬" if file_info['is_video'] else "🖼️"
-            tk.Label(info_frame, text=icon, font=("Arial", 12), bg='white').pack(side='left', padx=(0, 5))
+        # Entferne nicht mehr benötigte Widgets
+        for path in paths_to_remove:
+            if path in current_widgets:
+                current_widgets[path].destroy()
+                del current_widgets[path]
 
-            # Dateiname (gekürzt)
-            filename = file_info['filename']
-            if len(filename) > 20:
-                filename = filename[:17] + "..."
-            tk.Label(info_frame, text=filename, font=("Arial", 8), bg='white', anchor='w').pack(side='left', fill='x', expand=True)
+        # Wenn nur hinzugefügt oder nur entfernt wurde, können wir optimieren
+        if len(paths_to_add) > 0 or len(paths_to_remove) > 0:
+            # Prüfe ob Reihenfolge noch stimmt
+            remaining_paths = [p for p in current_paths if p in desired_paths]
+            needs_reorder = remaining_paths != [p for p in desired_paths if p in remaining_paths]
 
-            # Entfernen-Button
-            def make_remove_handler(p):
-                def remove():
-                    self.selected_paths.remove(p)
-                    self.update_selection_info()
-                    self.apply_filters()
-                return remove
+            if needs_reorder or len(paths_to_add) > 3:
+                # Bei großen Änderungen oder Neuordnung: Kompletter Rebuild (aber nur dann)
+                for widget in self.selection_list_container.winfo_children():
+                    widget.destroy()
+                current_widgets = {}
+                paths_to_add = set(desired_paths)
 
-            tk.Button(item_frame, text="✕", command=make_remove_handler(path),
-                     bg='#f44336', fg='white', font=("Arial", 8, "bold"),
-                     width=2, relief='flat').pack(side='right', padx=2)
+            # Füge neue Items hinzu
+            for path in desired_paths:
+                if path not in current_widgets:
+                    # Finde file_info
+                    file_info = next((f for f in self.files_info if f['path'] == path), None)
+                    if not file_info:
+                        continue
+
+                    # Item-Frame
+                    item_frame = tk.Frame(self.selection_list_container, bg='white', relief='flat', borderwidth=0)
+                    item_frame._file_path = path  # Speichere Pfad für spätere Identifikation
+                    item_frame.pack(fill='x', padx=5, pady=2)
+
+                    # Icon + Filename
+                    info_frame = tk.Frame(item_frame, bg='white')
+                    info_frame.pack(side='left', fill='both', expand=True, padx=5, pady=3)
+
+                    icon = "🎬" if file_info['is_video'] else "🖼️"
+                    tk.Label(info_frame, text=icon, font=("Arial", 12), bg='white').pack(side='left', padx=(0, 5))
+
+                    # Dateiname (gekürzt)
+                    filename = file_info['filename']
+                    if len(filename) > 20:
+                        filename = filename[:17] + "..."
+                    tk.Label(info_frame, text=filename, font=("Arial", 8), bg='white', anchor='w').pack(side='left', fill='x', expand=True)
+
+                    # Entfernen-Button
+                    def make_remove_handler(p):
+                        def remove():
+                            self.selected_paths.remove(p)
+                            self.update_selection_info()
+                            # Optimiert: Update nur dieses Thumbnail ohne Flackern
+                            self.update_single_thumbnail(p)
+                        return remove
+
+                    tk.Button(item_frame, text="✕", command=make_remove_handler(path),
+                             bg='#f44336', fg='white', font=("Arial", 8, "bold"),
+                             width=2, relief='flat').pack(side='right', padx=2)
 
     def select_all(self):
         """Wählt alle Dateien aus"""

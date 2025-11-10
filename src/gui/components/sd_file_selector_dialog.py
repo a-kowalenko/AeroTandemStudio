@@ -276,9 +276,13 @@ class SDFileSelectorDialog:
         for widget in self.view_container.winfo_children():
             widget.destroy()
 
+        # Erstelle Container-Frame
+        container = tk.Frame(self.view_container)
+        container.pack(fill='both', expand=True)
+
         # Erstelle Thumbnail-Ansicht
-        canvas = tk.Canvas(self.view_container, bg='white')
-        scrollbar = ttk.Scrollbar(self.view_container, orient='vertical', command=canvas.yview)
+        canvas = tk.Canvas(container, bg='white')
+        scrollbar = ttk.Scrollbar(container, orient='vertical', command=canvas.yview)
         scrollable_frame = tk.Frame(canvas, bg='white')
 
         scrollable_frame.bind(
@@ -288,6 +292,11 @@ class SDFileSelectorDialog:
 
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
+
+        # Speichere Canvas-Referenz (kein separates Overlay mehr)
+        # Rectangle wird direkt auf Haupt-Canvas gezeichnet
+        # Canvas-Items haben höhere Z-Order als create_window Widgets
+        self.overlay_canvas = canvas  # Verwende Haupt-Canvas für Rectangle
 
         # Speichere Canvas-Referenz für Drag-Selection
         self.drag_canvas = canvas
@@ -327,6 +336,9 @@ class SDFileSelectorDialog:
         canvas.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
 
+        # Overlay ist bereits über Canvas durch place() - kein lift() nötig
+        # (lift() funktioniert auf Canvas anders als auf Widgets)
+
         # Initialisiere Drag-State
         self.drag_start_x = None
         self.drag_start_y = None
@@ -334,64 +346,73 @@ class SDFileSelectorDialog:
         self.drag_rect = None
 
         # NEU: Drag-Selection direkt auf Haupt-Canvas
-        # Canvas-Items (create_rectangle) liegen ÜBER create_window Widgets!
+        # Canvas-Items (Rectangle) haben höhere Z-Order als create_window Widgets!
+        # Rectangle wird über Kacheln sichtbar sein
 
         def on_canvas_press(event):
-            # Speichere Start für Drag (in Canvas-Koordinaten mit Scroll-Offset)
-            self.drag_start_x = canvas.canvasx(event.x)
-            self.drag_start_y = canvas.canvasy(event.y)
+            # Speichere Start für Drag in Canvas-Koordinaten (mit Scroll)
+            self.drag_start_canvas_x = canvas.canvasx(event.x)
+            self.drag_start_canvas_y = canvas.canvasy(event.y)
             self.is_drag_selecting = False
             self.drag_rect = None
 
         def on_canvas_drag(event):
-            if self.drag_start_x is None:
+            if not hasattr(self, 'drag_start_canvas_x') or self.drag_start_canvas_x is None:
                 return
 
-            # Aktuelle Position (Canvas-Koordinaten)
-            current_x = canvas.canvasx(event.x)
-            current_y = canvas.canvasy(event.y)
+            # Aktuelle Position in Canvas-Koordinaten
+            current_canvas_x = canvas.canvasx(event.x)
+            current_canvas_y = canvas.canvasy(event.y)
 
             # Prüfe Mindestbewegung
             if not self.is_drag_selecting:
-                dx = abs(current_x - self.drag_start_x)
-                dy = abs(current_y - self.drag_start_y)
+                dx = abs(current_canvas_x - self.drag_start_canvas_x)
+                dy = abs(current_canvas_y - self.drag_start_canvas_y)
 
                 if dx > 10 or dy > 10:
                     self.is_drag_selecting = True
-                    # Erstelle Rectangle auf Haupt-Canvas (über Widgets!)
+                    # Erstelle Rectangle auf Haupt-Canvas
+                    # WICHTIG: Canvas-Items werden ÜBER create_window Widgets gezeichnet wenn tag_raise verwendet wird
                     self.drag_rect = canvas.create_rectangle(
-                        self.drag_start_x, self.drag_start_y,
-                        current_x, current_y,
+                        self.drag_start_canvas_x, self.drag_start_canvas_y,
+                        current_canvas_x, current_canvas_y,
                         outline='#2196F3', width=3,
                         fill='#BBDEFB',
                         stipple='gray50',
                         tags='drag_rect'
                     )
+                    # Bringe Rectangle explizit nach oben
+                    canvas.tag_raise('drag_rect')
 
             # Update Rectangle
             if self.is_drag_selecting and self.drag_rect:
                 canvas.coords(self.drag_rect,
-                             self.drag_start_x, self.drag_start_y,
-                             current_x, current_y)
+                             self.drag_start_canvas_x, self.drag_start_canvas_y,
+                             current_canvas_x, current_canvas_y)
+                # Stelle sicher dass Rectangle über Widgets bleibt
+                canvas.tag_raise('drag_rect')
 
         def on_canvas_release(event):
             if not self.is_drag_selecting:
-                self.drag_start_x = None
-                self.drag_start_y = None
+                if hasattr(self, 'drag_start_canvas_x'):
+                    self.drag_start_canvas_x = None
+                    self.drag_start_canvas_y = None
                 return
 
-            # Aktuelle Position (Canvas-Koordinaten)
-            current_x = canvas.canvasx(event.x)
-            current_y = canvas.canvasy(event.y)
+            # Berechne Auswahlbereich in Canvas-Koordinaten
+            current_canvas_x = canvas.canvasx(event.x)
+            current_canvas_y = canvas.canvasy(event.y)
 
-            # Berechne Auswahlbereich
-            canvas_x1 = min(self.drag_start_x, current_x)
-            canvas_y1 = min(self.drag_start_y, current_y)
-            canvas_x2 = max(self.drag_start_x, current_x)
-            canvas_y2 = max(self.drag_start_y, current_y)
-
+            canvas_x1 = min(self.drag_start_canvas_x, current_canvas_x)
+            canvas_y1 = min(self.drag_start_canvas_y, current_canvas_y)
+            canvas_x2 = max(self.drag_start_canvas_x, current_canvas_x)
+            canvas_y2 = max(self.drag_start_canvas_y, current_canvas_y)
             # Prüfe Überschneidungen und MARKIERE (nicht selektieren!)
             for path, (widget, bbox) in self.thumbnail_widgets.items():
+                # Überspringe bereits ausgewählte Files
+                if path in self.selected_paths:
+                    continue
+
                 widget_x1, widget_y1, widget_x2, widget_y2 = bbox
 
                 if not (canvas_x2 < widget_x1 or canvas_x1 > widget_x2 or
@@ -401,11 +422,7 @@ class SDFileSelectorDialog:
                         self.markierte_paths.add(path)
                         if widget.winfo_children():
                             inner_frame = widget.winfo_children()[0]
-                            # Prüfe ob bereits selektiert
-                            if path in self.selected_paths:
-                                inner_frame.config(bg='#4CAF50')  # Grün (selektiert)
-                            else:
-                                inner_frame.config(bg='#2196F3')  # Blau (markiert)
+                            inner_frame.config(bg='#000000')  # Schwarz (markiert)
 
             # Cleanup
             if self.drag_rect:
@@ -413,14 +430,20 @@ class SDFileSelectorDialog:
                 self.drag_rect = None
 
             self.is_drag_selecting = False
-            self.drag_start_x = None
-            self.drag_start_y = None
+            self.drag_start_canvas_x = None
+            self.drag_start_canvas_y = None
             self.update_mark_button()
 
-        # Binde auf Haupt-Canvas (Events gehen auch zu Widgets durch)
+        # Binde auf Haupt-Canvas
         canvas.bind('<Button-1>', on_canvas_press)
         canvas.bind('<B1-Motion>', on_canvas_drag)
         canvas.bind('<ButtonRelease-1>', on_canvas_release)
+
+        # Binde auch Scroll-Events auf Canvas
+        def on_canvas_scroll(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            return "break"
+        canvas.bind('<MouseWheel>', on_canvas_scroll)
 
         # Mausrad-Scrolling - nur für Canvas, nicht global!
         def _on_mousewheel(event):
@@ -499,17 +522,17 @@ class SDFileSelectorDialog:
 
         # Inner-Frame: Immer mit Border-Space, aber Farbe ändert sich
         # Border ist IMMER 2px
-        # Selektiert (grün) > Markiert (blau) > Normal (weiß/unsichtbar)
+        # Ausgewählt (grün) > Markiert (schwarz) > Normal (hellgrau)
         if is_selected:
-            border_color = '#4CAF50'  # Grün für selektiert
+            border_color = '#4CAF50'  # Grün für ausgewählt
         elif is_marked:
-            border_color = '#2196F3'  # Blau für markiert
+            border_color = '#000000'  # Schwarz für markiert
         else:
-            border_color = 'white'  # Unsichtbar
+            border_color = '#e0e0e0'  # Hellgrau für normal
 
         frame = tk.Frame(outer_frame,
-                        relief='solid',
-                        borderwidth=2,
+                        relief='flat',
+                        borderwidth=0,
                         bg=border_color,
                         highlightthickness=0)
         frame.pack(fill='both', expand=True)
@@ -522,16 +545,6 @@ class SDFileSelectorDialog:
         thumb_frame = tk.Frame(inner_frame, width=180, height=135, bg='#f0f0f0')
         thumb_frame.pack()
         thumb_frame.pack_propagate(False)
-
-        # NEU: Video/Foto-Icon in oberer rechter Ecke
-        icon_text = "🎬" if file_info['is_video'] else "🖼"
-        # Tkinter unterstützt kein rgba() - verwende halbtransparenten Effekt mit Frame
-        icon_bg_frame = tk.Frame(thumb_frame, bg='#333333')  # Dunkelgrau statt rgba
-        icon_bg_frame.place(relx=1.0, rely=0.0, anchor='ne', x=-5, y=5)
-
-        icon_label = tk.Label(icon_bg_frame, text=icon_text, font=("Arial", 14),
-                             bg='#333333', fg='white', padx=2, pady=2)
-        icon_label.pack()
 
         # Dateiname (gekürzt)
         filename = file_info['filename']
@@ -558,9 +571,13 @@ class SDFileSelectorDialog:
         size_label = tk.Label(inner_frame, text=f"{size_mb:.1f} MB", font=("Arial", 8), fg='gray', bg='white')
         size_label.pack()
 
-        # Events: Klick=Markieren (Toggle), Doppelklick=Vorschau
+        # Events: Klick=Markieren (Toggle), Doppelklick=Vorschau - DEFINIERE ZUERST!
         def on_click(event):
-            # Toggle Markierung (nicht Selektion!)
+            # Ausgewählte Kacheln können nicht markiert werden!
+            if path in self.selected_paths:
+                return  # Nichts tun
+
+            # Toggle Markierung (nur für nicht-ausgewählte!)
             if path in self.markierte_paths:
                 self.markierte_paths.remove(path)
             else:
@@ -568,14 +585,11 @@ class SDFileSelectorDialog:
 
             # Update Border-Color
             is_marked = path in self.markierte_paths
-            is_selected = path in self.selected_paths
 
-            if is_selected:
-                border_color = '#4CAF50'  # Grün
-            elif is_marked:
-                border_color = '#2196F3'  # Blau
+            if is_marked:
+                border_color = '#000000'  # Schwarz für markiert
             else:
-                border_color = 'white'
+                border_color = '#e0e0e0'  # Hellgrau für normal
 
             frame.config(bg=border_color)
             self.update_mark_button()
@@ -608,16 +622,54 @@ class SDFileSelectorDialog:
             # Speichere auch Click-Handler und Widgets für späteren Zugriff
             self.thumbnail_queue.append((file_info, thumb_label, thumb_frame, frame, on_click, on_double_click))
 
+        # NEU: Video/Foto-Icon in oberer LINKER Ecke (NACH thumb_label, damit es darüber liegt!)
+        icon_text = "🎬" if file_info['is_video'] else "🖼"
+        icon_bg_frame = tk.Frame(thumb_frame, bg='#333333')
+        icon_bg_frame.place(relx=0.0, rely=0.0, anchor='nw', x=5, y=5)
+        icon_bg_frame.lift()  # Bringe Icon ÜBER Thumbnail
+
+        icon_label = tk.Label(icon_bg_frame, text=icon_text, font=("Arial", 14),
+                             bg='#333333', fg='white', padx=2, pady=2)
+        icon_label.pack()
+
+        # NEU: X-Button für ausgewählte Kacheln (oben rechts, NACH thumb_label!)
+        if is_selected:
+            x_button_frame = tk.Frame(thumb_frame, bg='#f44336')
+            x_button_frame.place(relx=1.0, rely=0.0, anchor='ne', x=-5, y=5)
+            x_button_frame.lift()  # Bringe X-Button ÜBER Thumbnail
+
+            def on_remove_click(event):
+                # Entferne aus Auswahl
+                self.selected_paths.discard(path)
+                self.update_selection_info()
+                self.apply_filters()
+                return "break"  # Verhindere weitere Event-Propagierung
+
+            x_button_label = tk.Label(x_button_frame, text="✕", font=("Arial", 12, "bold"),
+                                     bg='#f44336', fg='white', padx=3, pady=1, cursor='hand2')
+            x_button_label.pack()
+            x_button_label.bind('<Button-1>', on_remove_click)
+
         # Binde Events an ALLE Widgets im Frame (inkl. Labels!)
-        for widget in [outer_frame, frame, inner_frame, thumb_frame, thumb_label, icon_bg_frame, icon_label, filename_label, date_label, size_label]:
+        # WICHTIG: Für Drag-Selection müssen wir auch B1-Motion und ButtonRelease binden
+        widgets_list = [outer_frame, frame, inner_frame, thumb_frame, thumb_label, icon_bg_frame, icon_label, filename_label, date_label, size_label]
+
+        # Füge X-Button hinzu falls ausgewählt
+        if is_selected:
+            widgets_list.extend([x_button_frame, x_button_label])
+
+        for widget in widgets_list:
             widget.bind('<Button-1>', on_click)
             widget.bind('<Double-Button-1>', on_double_click)
 
+            # NEU: Binde Drag-Events auf Widgets für Auswahlrahmen
+            # Verwende self.current_canvas da canvas hier nicht im Scope ist
+            widget.bind('<B1-Motion>', self._on_widget_drag, add='+')
+            widget.bind('<ButtonRelease-1>', self._on_widget_release, add='+')
+
             # WICHTIG: Binde Mousewheel auch auf alle Widgets für Scrolling über Thumbnails
-            # Event muss an Canvas weitergeleitet werden
             def make_scroll_handler(w):
                 def scroll_handler(event):
-                    # Scrolle den Canvas
                     if hasattr(self, 'current_canvas') and self.current_canvas:
                         self.current_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
                     return "break"
@@ -627,6 +679,110 @@ class SDFileSelectorDialog:
 
         # Gebe Outer-Frame zurück für Drag-Selection
         return outer_frame
+
+    def _on_widget_drag(self, event):
+        """Helper für Drag-Events auf Widgets (für Auswahlrahmen)"""
+        if not self.current_canvas:
+            return
+
+        canvas = self.current_canvas
+
+        if not hasattr(self, 'drag_start_canvas_x') or self.drag_start_canvas_x is None:
+            # Starte Drag von Widget aus
+            # Konvertiere Widget-Screen-Koordinaten zu Canvas-Koordinaten
+            canvas_x = event.x_root - canvas.winfo_rootx()
+            canvas_y = event.y_root - canvas.winfo_rooty()
+
+            self.drag_start_canvas_x = canvas.canvasx(canvas_x)
+            self.drag_start_canvas_y = canvas.canvasy(canvas_y)
+            self.is_drag_selecting = False
+            self.drag_rect = None
+            return
+
+        # Aktuelle Position (Canvas-Koordinaten)
+        canvas_x = event.x_root - canvas.winfo_rootx()
+        canvas_y = event.y_root - canvas.winfo_rooty()
+        current_canvas_x = canvas.canvasx(canvas_x)
+        current_canvas_y = canvas.canvasy(canvas_y)
+
+        # Prüfe Mindestbewegung
+        if not self.is_drag_selecting:
+            dx = abs(current_canvas_x - self.drag_start_canvas_x)
+            dy = abs(current_canvas_y - self.drag_start_canvas_y)
+
+            if dx > 10 or dy > 10:
+                self.is_drag_selecting = True
+                # Erstelle Rectangle auf Haupt-Canvas
+                self.drag_rect = canvas.create_rectangle(
+                    self.drag_start_canvas_x, self.drag_start_canvas_y,
+                    current_canvas_x, current_canvas_y,
+                    outline='#2196F3', width=3,
+                    fill='#BBDEFB',
+                    stipple='gray50',
+                    tags='drag_rect'
+                )
+                # Bringe Rectangle explizit nach oben
+                canvas.tag_raise('drag_rect')
+
+        # Update Rectangle
+        if self.is_drag_selecting and self.drag_rect:
+            canvas.coords(self.drag_rect,
+                         self.drag_start_canvas_x, self.drag_start_canvas_y,
+                         current_canvas_x, current_canvas_y)
+            # Stelle sicher dass Rectangle über Widgets bleibt
+            canvas.tag_raise('drag_rect')
+
+    def _on_widget_release(self, event):
+        """Helper für Release-Events auf Widgets (für Auswahlrahmen)"""
+        if not self.current_canvas:
+            return
+
+        canvas = self.current_canvas
+
+        if not self.is_drag_selecting:
+            if hasattr(self, 'drag_start_canvas_x'):
+                self.drag_start_canvas_x = None
+                self.drag_start_canvas_y = None
+            return
+
+        # Aktuelle Position (Canvas-Koordinaten)
+        canvas_x = event.x_root - canvas.winfo_rootx()
+        canvas_y = event.y_root - canvas.winfo_rooty()
+        current_canvas_x = canvas.canvasx(canvas_x)
+        current_canvas_y = canvas.canvasy(canvas_y)
+
+        # Berechne Auswahlbereich
+        canvas_x1 = min(self.drag_start_canvas_x, current_canvas_x)
+        canvas_y1 = min(self.drag_start_canvas_y, current_canvas_y)
+        canvas_x2 = max(self.drag_start_canvas_x, current_canvas_x)
+        canvas_y2 = max(self.drag_start_canvas_y, current_canvas_y)
+
+        # Prüfe Überschneidungen und MARKIERE (nicht selektieren!)
+        for path, (widget, bbox) in self.thumbnail_widgets.items():
+            # Überspringe bereits ausgewählte Files
+            if path in self.selected_paths:
+                continue
+
+            widget_x1, widget_y1, widget_x2, widget_y2 = bbox
+
+            if not (canvas_x2 < widget_x1 or canvas_x1 > widget_x2 or
+                   canvas_y2 < widget_y1 or canvas_y1 > widget_y2):
+                # Widget ist im Auswahlbereich - MARKIERE es
+                if path not in self.markierte_paths:
+                    self.markierte_paths.add(path)
+                    if widget.winfo_children():
+                        inner_frame = widget.winfo_children()[0]
+                        inner_frame.config(bg='#000000')  # Schwarz (markiert)
+
+        # Cleanup
+        if self.drag_rect:
+            canvas.delete(self.drag_rect)
+            self.drag_rect = None
+
+        self.is_drag_selecting = False
+        self.drag_start_canvas_x = None
+        self.drag_start_canvas_y = None
+        self.update_mark_button()
 
     def generate_thumbnail(self, file_info):
         """Generiert echtes Thumbnail für Datei"""
@@ -719,7 +875,8 @@ class SDFileSelectorDialog:
                            yscrollcommand=scrollbar.set)
         tree.pack(side='left', fill='both', expand=True)
 
-        scrollbar.config(command=tree.yview)
+        # NEU: Aktiviere Multi-Selection im Treeview
+        tree.config(selectmode='extended')  # Erlaubt Shift+Ctrl Multi-Selection
 
         # Spalten
         tree.heading('select', text='✓')
@@ -746,9 +903,9 @@ class SDFileSelectorDialog:
 
             # Markierungs-Symbol
             if is_selected:
-                mark_symbol = '✅'  # Grün: Selektiert
+                mark_symbol = '✅'  # Grün: Ausgewählt
             elif is_marked:
-                mark_symbol = '🔵'  # Blau: Markiert
+                mark_symbol = '⬛'  # Schwarz: Markiert
             else:
                 mark_symbol = ''
 
@@ -772,34 +929,45 @@ class SDFileSelectorDialog:
                 file_info['path']
             ), tags=(file_info['path'],))
 
-        # Click-Event zum Togglen der Markierung
-        def on_tree_click(event):
-            item = tree.identify_row(event.y)
-            if item:
+        # NEU: TreeviewSelect Event - Synchronisiere markierte_paths mit TreeView-Selection
+        def on_tree_select(event):
+            # Lösche alle Markierungen und setze neu basierend auf TreeView-Selection
+            # WICHTIG: Nur nicht-ausgewählte Dateien können markiert werden
+
+            # Hole alle aktuell selektierten Items im TreeView (blau markiert)
+            selected_items = tree.selection()
+
+            # Baue neue Markierungs-Liste auf
+            new_markierte_paths = set()
+
+            for item in selected_items:
                 path = tree.item(item)['tags'][0]
-                # Toggle Markierung (nicht Selektion!)
-                if path in self.markierte_paths:
-                    self.markierte_paths.remove(path)
-                else:
-                    self.markierte_paths.add(path)
 
-                # Update Tree
-                is_marked = path in self.markierte_paths
-                is_selected = path in self.selected_paths
+                # Überspringe bereits ausgewählte Files (grün)
+                if path not in self.selected_paths:
+                    new_markierte_paths.add(path)
 
-                if is_selected:
-                    mark_symbol = '✅'
-                elif is_marked:
-                    mark_symbol = '🔵'
-                else:
-                    mark_symbol = ''
+            # Update markierte_paths
+            self.markierte_paths = new_markierte_paths
 
+            # Update Tree-Symbole für ALLE Dateien
+            for item in tree.get_children():
+                path = tree.item(item)['tags'][0]
                 values = list(tree.item(item)['values'])
-                values[0] = mark_symbol
-                tree.item(item, values=values)
-                self.update_mark_button()
 
-        tree.bind('<Button-1>', on_tree_click)
+                if path in self.selected_paths:
+                    values[0] = '✅'  # Grün: Ausgewählt
+                elif path in self.markierte_paths:
+                    values[0] = '⬛'  # Schwarz: Markiert (blau selektiert)
+                else:
+                    values[0] = ''
+
+                tree.item(item, values=values)
+
+            self.update_mark_button()
+
+        # Binde TreeviewSelect Event (feuert bei Shift+Ctrl+Click und normalen Clicks)
+        tree.bind('<<TreeviewSelect>>', on_tree_select)
 
         # Doppelklick für Preview
         def on_double_click(event):
@@ -1042,15 +1210,21 @@ class SDFileSelectorDialog:
             new_label.bind('<Button-1>', on_click)
             new_label.bind('<Double-Button-1>', on_double_click)
 
-            # WICHTIG: Binde auch Mousewheel für Scrolling!
-            if self.mousewheel_callback:
-                new_label.bind('<MouseWheel>', self.mousewheel_callback)
+            # Binde Drag-Events für Auswahlrahmen
+            new_label.bind('<B1-Motion>', self._on_widget_drag, add='+')
+            new_label.bind('<ButtonRelease-1>', self._on_widget_release, add='+')
 
-            # Stelle sicher dass Icon-Frame über dem Thumbnail bleibt
-            # Finde alle Kinder von thumb_frame und bringe Icon nach vorne
+            # Binde Mousewheel für Scrolling
+            def scroll_handler(event):
+                if hasattr(self, 'current_canvas') and self.current_canvas:
+                    self.current_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                return "break"
+            new_label.bind('<MouseWheel>', scroll_handler)
+
+            # WICHTIG: Bringe ALLE Overlay-Frames (Icon + X-Button) über das Thumbnail
             for child in thumb_frame.winfo_children():
-                if isinstance(child, tk.Frame):  # Das ist der icon_bg_frame
-                    child.lift()  # Bringe nach vorne
+                if isinstance(child, tk.Frame):  # Icon-Frame oder X-Button-Frame
+                    child.lift()  # Bringe nach vorne, über das Thumbnail
         except:
             pass  # Widget existiert nicht mehr
 

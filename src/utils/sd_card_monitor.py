@@ -198,6 +198,10 @@ class SDCardMonitor:
         if self.on_status_change:
             self.on_status_change('backup_started', drive)
 
+        # Variable für Backup-Typ
+        backup_type = "full"  # "full", "selective", "cancelled", "failed"
+        selected_files = None
+
         try:
             # NEU: Prüfe Größen-Limit bevor Backup startet
             if settings.get("sd_size_limit_enabled", False):
@@ -206,21 +210,26 @@ class SDCardMonitor:
                 if result == "cancel":
                     # User hat abgebrochen - KEINE Fehlermeldung anzeigen
                     print("Backup abgebrochen durch User (Größen-Limit)")
+                    backup_type = "cancelled"
                     # Rufe Callback auf aber ohne Fehlermeldung (stiller Abbruch)
                     # on_backup_complete wird NICHT aufgerufen bei User-Abbruch
                     return
                 elif result == "proceed_all":
                     # User will alle Dateien importieren (trotz Limit)
                     selected_files = None
+                    backup_type = "full"
                 elif isinstance(result, list):
                     # User hat Dateien ausgewählt
                     selected_files = result
+                    backup_type = "selective"
                     print(f"User hat {len(selected_files)} Dateien ausgewählt")
                 else:
                     # Unter Limit oder Fehler - normal weitermachen
                     selected_files = None
+                    backup_type = "full"
             else:
                 selected_files = None
+                backup_type = "full"
 
             # Erstelle Backup (mit optionaler Dateiauswahl)
             backup_path, error_message = self._create_backup(drive, backup_folder, selected_files)
@@ -249,12 +258,14 @@ class SDCardMonitor:
             else:
                 # Backup fehlgeschlagen
                 print(f"Backup fehlgeschlagen: {error_message}")
+                backup_type = "failed"
                 if self.on_backup_complete:
                     self.on_backup_complete(None, False, error_message)
 
         except Exception as e:
             error_message = f"Fehler beim Backup: {str(e)}"
             print(error_message)
+            backup_type = "failed"
             if self.on_backup_complete:
                 self.on_backup_complete(None, False, error_message)
         finally:
@@ -262,8 +273,12 @@ class SDCardMonitor:
             self.backup_in_progress = False
 
             # Status-Callback: Backup beendet (auch bei Fehler/Abbruch)
+            # Übergebe backup_type und Anzahl der Dateien als Data
             if self.on_status_change:
-                self.on_status_change('backup_finished', None)
+                self.on_status_change('backup_finished', {
+                    'type': backup_type,
+                    'file_count': len(selected_files) if selected_files else None
+                })
 
             # Entferne Drive aus known_drives, damit es beim nächsten Einstecken neu erkannt wird
             try:
@@ -358,14 +373,9 @@ class SDCardMonitor:
                     'limit_mb': limit_mb
                 })
 
-            # Warte auf User-Entscheidung (max 60 Sekunden)
+            # Warte auf User-Entscheidung (kein Timeout - User entscheidet!)
             print("Warte auf User-Entscheidung...")
-            decision_received = self.size_limit_decision_event.wait(timeout=60)
-
-            if not decision_received:
-                print("⚠️ Timeout: Keine User-Entscheidung (möglicherweise SD entfernt), breche ab")
-                # Bei Timeout: Als Abbruch behandeln statt alle zu importieren
-                return "cancel"
+            self.size_limit_decision_event.wait()  # Kein Timeout, warte unbegrenzt
 
             decision = self.size_limit_decision
             print(f"User-Entscheidung erhalten: {decision}")

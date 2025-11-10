@@ -1655,10 +1655,28 @@ class VideoGeneratorApp:
             elif status_type == 'backup_finished':
                 self.sd_status_indicator.set_backup_active(False)
                 self.sd_status_indicator.set_sd_detected(False)
-                if data:  # Erfolg
-                    self.progress_handler.set_status("Status: Backup abgeschlossen")
-                else:  # Fehler
-                    self.progress_handler.set_status("Status: Backup fehlgeschlagen")
+
+                # Prüfe Backup-Typ aus data
+                if data and isinstance(data, dict):
+                    backup_type = data.get('type', 'full')
+                    file_count = data.get('file_count')
+
+                    if backup_type == 'selective' and file_count:
+                        self.progress_handler.set_status(f"Status: {file_count} Dateien erfolgreich importiert")
+                    elif backup_type == 'full':
+                        self.progress_handler.set_status("Status: Backup abgeschlossen")
+                    elif backup_type == 'cancelled':
+                        self.progress_handler.set_status("Status: Import abgebrochen")
+                    elif backup_type == 'failed':
+                        self.progress_handler.set_status("Status: Backup fehlgeschlagen")
+                    else:
+                        self.progress_handler.set_status("Status: Backup abgeschlossen")
+                else:
+                    # Fallback für alte Logik (wenn data None oder nicht Dict)
+                    if data:  # Erfolg
+                        self.progress_handler.set_status("Status: Backup abgeschlossen")
+                    else:  # Fehler
+                        self.progress_handler.set_status("Status: Backup fehlgeschlagen")
 
             elif status_type == 'clearing_started':
                 self.sd_status_indicator.set_clearing_active(True)

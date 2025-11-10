@@ -172,18 +172,35 @@ class SDFileSelectorDialog:
         button_group.pack(side='right', padx=(10, 0))
 
         # NEU: Button "X Dateien auswählen" (nur sichtbar wenn markiert)
+        # Dunkleres Grün für "Zur Auswahl hinzufügen"
         self.add_to_selection_button = tk.Button(button_group,
-                                                 text="0 Dateien auswählen",
+                                                 text="✓ 0 Dateien auswählen",
                                                  command=self.add_marked_to_selection,
                                                  font=("Arial", 9, "bold"),
-                                                 bg="#4CAF50", fg="white")
+                                                 bg="#2E7D32", fg="white",
+                                                 padx=10, pady=4,
+                                                 relief='raised', bd=2,
+                                                 cursor='hand2')
         # Initial versteckt
         # self.add_to_selection_button.pack(side='left', padx=2)
 
-        tk.Button(button_group, text="Alle markieren",
-                 command=self.mark_all, font=("Arial", 9)).pack(side='left', padx=2)
-        tk.Button(button_group, text="Markierung aufheben",
-                 command=self.unmark_all, font=("Arial", 9)).pack(side='left', padx=2)
+        # "Alle markieren" - Blau mit Icon
+        tk.Button(button_group, text="☑ Alle markieren",
+                 command=self.mark_all,
+                 font=("Arial", 9),
+                 bg="#2196F3", fg="white",
+                 padx=8, pady=3,
+                 relief='raised', bd=1,
+                 cursor='hand2').pack(side='left', padx=2)
+
+        # "Markierung aufheben" - Orange mit Icon
+        tk.Button(button_group, text="☐ Markierung aufheben",
+                 command=self.unmark_all,
+                 font=("Arial", 9),
+                 bg="#FF9800", fg="white",
+                 padx=8, pady=3,
+                 relief='raised', bd=1,
+                 cursor='hand2').pack(side='left', padx=2)
 
         # Filter (rechts, vor Buttons)
         filter_group = tk.Frame(right_controls)
@@ -258,17 +275,37 @@ class SDFileSelectorDialog:
         # Speichere Canvas-Referenz
         self.selection_canvas = selection_canvas
 
+        # Mousewheel-Scrolling für Auswahlliste
+        def on_selection_mousewheel(event):
+            selection_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            return "break"
+
+        selection_canvas.bind('<MouseWheel>', on_selection_mousewheel)
+        self.selection_list_container.bind('<MouseWheel>', on_selection_mousewheel)
+
         # Buttons
         button_frame = tk.Frame(main_frame)
         button_frame.pack(fill='x')
 
-        tk.Button(button_frame, text="Abbrechen",
+        # "Abbrechen" Button - Grau
+        tk.Button(button_frame, text="✕ Abbrechen",
                  command=self.on_cancel,
-                 bg="#9E9E9E", fg="white", width=15).pack(side='right', padx=2)
+                 bg="#9E9E9E", fg="white",
+                 font=("Arial", 10),
+                 width=18,
+                 padx=10, pady=6,
+                 relief='raised', bd=2,
+                 cursor='hand2').pack(side='right', padx=2)
 
-        tk.Button(button_frame, text="Ausgewählte importieren",
+        # "Ausgewählte importieren" Button - Helles Grün (unterscheidet sich von "auswählen")
+        tk.Button(button_frame, text="⬇ Ausgewählte importieren",
                  command=self.on_import_selected,
-                 bg="#4CAF50", fg="white", width=20).pack(side='right', padx=2)
+                 bg="#4CAF50", fg="white",
+                 font=("Arial", 10, "bold"),
+                 width=25,
+                 padx=10, pady=6,
+                 relief='raised', bd=2,
+                 cursor='hand2').pack(side='right', padx=2)
 
     def switch_to_thumbnails(self):
         """Wechselt zur Thumbnail-Ansicht"""
@@ -1252,9 +1289,9 @@ class SDFileSelectorDialog:
         marked_count = len(self.markierte_paths)
 
         if marked_count > 0:
-            # Button anzeigen und Text aktualisieren
+            # Button anzeigen und Text aktualisieren (mit Icon)
             self.add_to_selection_button.config(
-                text=f"{marked_count} {'Datei' if marked_count == 1 else 'Dateien'} auswählen"
+                text=f"✓ {marked_count} {'Datei' if marked_count == 1 else 'Dateien'} auswählen"
             )
             if not self.add_to_selection_button.winfo_ismapped():
                 # Pack Button einfach (erscheint an erster Stelle wenn vorher pack_forget)

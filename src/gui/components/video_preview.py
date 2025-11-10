@@ -168,6 +168,33 @@ class VideoPreview:
         else:
             return "Software (libx264)"
 
+    def _get_video_codec(self, video_path):
+        """
+        Extrahiert den Video-Codec aus einer Videodatei.
+
+        Args:
+            video_path: Pfad zur Videodatei
+
+        Returns:
+            String mit Codec-Namen (z.B. "h264", "hevc") oder "unknown"
+        """
+        try:
+            result = subprocess.run(
+                ['ffprobe', '-v', 'quiet', '-print_format', 'json',
+                 '-show_streams', '-select_streams', 'v:0', video_path],
+                capture_output=True, text=True, timeout=5,
+                creationflags=SUBPROCESS_CREATE_NO_WINDOW
+            )
+            if result.returncode == 0:
+                info = json.loads(result.stdout)
+                streams = info.get('streams', [])
+                if streams:
+                    codec_name = streams[0].get('codec_name', 'unknown')
+                    return codec_name
+        except Exception as e:
+            print(f"Fehler beim Extrahieren des Codecs von {video_path}: {e}")
+        return "unknown"
+
     def _check_for_cancellation(self):
         """Prüft, ob ein Abbruch angefordert wurde und wirft ggf. eine Exception."""
         if self.cancellation_event.is_set():
@@ -1786,10 +1813,19 @@ class VideoPreview:
         """Aktualisiert die Encoding-Information in der UI"""
         encoder_name = self._get_current_encoder_name()
 
+        # Hole den tatsächlichen Codec aus dem ersten Video
+        codec = "unknown"
+        if self.last_video_paths and len(self.last_video_paths) > 0:
+            # Versuche den Codec aus der ersten gecachten Kopie zu holen
+            file_identity = self._get_file_identity(self.last_video_paths[0])
+            if file_identity and file_identity in self.video_copies_map:
+                copy_path = self.video_copies_map[file_identity]
+                codec = self._get_video_codec(copy_path)
+
         if format_info["compatible"]:
-            self.encoding_label.config(text=f"Kompatibel | {encoder_name}", fg="green")
+            self.encoding_label.config(text=f"Kompatibel | {encoder_name} | Codec: {codec.upper()}", fg="green")
         else:
-            self.encoding_label.config(text=f"Standardisiert | {encoder_name}", fg="orange")
+            self.encoding_label.config(text=f"Standardisiert | {encoder_name} | Codec: {codec.upper()}", fg="orange")
 
     def _update_ui_success(self, copy_paths, was_reencoded):
         """
@@ -1825,12 +1861,19 @@ class VideoPreview:
         # Hole Encoder-Namen
         encoder_name = self._get_current_encoder_name()
 
+        # Hole den tatsächlichen Codec aus dem kombinierten Video oder der ersten Kopie
+        codec = "unknown"
+        if self.combined_video_path and os.path.exists(self.combined_video_path):
+            codec = self._get_video_codec(self.combined_video_path)
+        elif copy_paths and len(copy_paths) > 0:
+            codec = self._get_video_codec(copy_paths[0])
+
         if was_reencoded:
             self.status_label.config(text="Vorschau bereit (standardisiert)", fg="green")
-            self.encoding_label.config(text=f"Standardisiert | {encoder_name}", fg="orange")
+            self.encoding_label.config(text=f"Standardisiert | {encoder_name} | Codec: {codec.upper()}", fg="orange")
         else:
             self.status_label.config(text="Vorschau bereit (schnell)", fg="green")
-            self.encoding_label.config(text=f"Direkt kombiniert | {encoder_name}", fg="green")
+            self.encoding_label.config(text=f"Direkt kombiniert | {encoder_name} | Codec: {codec.upper()}", fg="green")
 
         # self.play_button.config(state="normal")  # ENTFERNT
         # self.action_button.config(state="disabled")  # ENTFERNT

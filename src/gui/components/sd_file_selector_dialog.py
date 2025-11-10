@@ -49,6 +49,7 @@ class SDFileSelectorDialog:
         self.drag_rect = None
         self.is_drag_selecting = False
         self.drag_canvas = None
+        self.canvas_container = None  # Container für Canvas-Referenz
         self.current_canvas = None  # Für Scroll-Handler
         self.thumbnail_widgets = {}  # path -> (frame_widget, bbox)
 
@@ -336,8 +337,10 @@ class SDFileSelectorDialog:
         canvas.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
 
-        # Overlay ist bereits über Canvas durch place() - kein lift() nötig
-        # (lift() funktioniert auf Canvas anders als auf Widgets)
+        # Speichere Canvas-Referenz für Drag-Selection
+        # Rectangle wird auf dem Haupt-Canvas gezeichnet
+        self.drag_canvas = canvas
+        self.canvas_container = container
 
         # Initialisiere Drag-State
         self.drag_start_x = None
@@ -345,9 +348,7 @@ class SDFileSelectorDialog:
         self.is_drag_selecting = False
         self.drag_rect = None
 
-        # NEU: Drag-Selection direkt auf Haupt-Canvas
-        # Canvas-Items (Rectangle) haben höhere Z-Order als create_window Widgets!
-        # Rectangle wird über Kacheln sichtbar sein
+        # Drag-Selection: Events werden vom Haupt-Canvas empfangen, aber Rectangle wird auf Overlay gezeichnet
 
         def on_canvas_press(event):
             # Speichere Start für Drag in Canvas-Koordinaten (mit Scroll)
@@ -371,26 +372,27 @@ class SDFileSelectorDialog:
 
                 if dx > 10 or dy > 10:
                     self.is_drag_selecting = True
-                    # Erstelle Rectangle auf Haupt-Canvas
-                    # WICHTIG: Canvas-Items werden ÜBER create_window Widgets gezeichnet wenn tag_raise verwendet wird
+
+                    # Erstelle Rectangle direkt auf dem Haupt-Canvas
+                    # Verwende sehr dicken Rahmen und halbtransparente Füllung für Sichtbarkeit
                     self.drag_rect = canvas.create_rectangle(
                         self.drag_start_canvas_x, self.drag_start_canvas_y,
                         current_canvas_x, current_canvas_y,
-                        outline='#2196F3', width=3,
+                        outline='#2196F3', width=5,  # Dickerer Rahmen für bessere Sichtbarkeit
                         fill='#BBDEFB',
                         stipple='gray50',
-                        tags='drag_rect'
+                        tags='drag_selection_rect'
                     )
-                    # Bringe Rectangle explizit nach oben
-                    canvas.tag_raise('drag_rect')
+                    # Bringe Rectangle nach oben (über andere Canvas-Items, aber unter Widgets)
+                    canvas.tag_raise('drag_selection_rect')
 
             # Update Rectangle
             if self.is_drag_selecting and self.drag_rect:
                 canvas.coords(self.drag_rect,
                              self.drag_start_canvas_x, self.drag_start_canvas_y,
                              current_canvas_x, current_canvas_y)
-                # Stelle sicher dass Rectangle über Widgets bleibt
-                canvas.tag_raise('drag_rect')
+                # Bringe Rectangle immer nach oben
+                canvas.tag_raise('drag_selection_rect')
 
         def on_canvas_release(event):
             if not self.is_drag_selecting:
@@ -428,6 +430,7 @@ class SDFileSelectorDialog:
             if self.drag_rect:
                 canvas.delete(self.drag_rect)
                 self.drag_rect = None
+
 
             self.is_drag_selecting = False
             self.drag_start_canvas_x = None
@@ -633,6 +636,8 @@ class SDFileSelectorDialog:
         icon_label.pack()
 
         # NEU: X-Button für ausgewählte Kacheln (oben rechts, NACH thumb_label!)
+        x_button_frame = None
+        x_button_label = None
         if is_selected:
             x_button_frame = tk.Frame(thumb_frame, bg='#f44336')
             x_button_frame.place(relx=1.0, rely=0.0, anchor='ne', x=-5, y=5)
@@ -648,15 +653,16 @@ class SDFileSelectorDialog:
             x_button_label = tk.Label(x_button_frame, text="✕", font=("Arial", 12, "bold"),
                                      bg='#f44336', fg='white', padx=3, pady=1, cursor='hand2')
             x_button_label.pack()
+            # Binde X-Button separat mit seinem eigenen Handler
             x_button_label.bind('<Button-1>', on_remove_click)
+            x_button_frame.bind('<Button-1>', on_remove_click)
 
         # Binde Events an ALLE Widgets im Frame (inkl. Labels!)
         # WICHTIG: Für Drag-Selection müssen wir auch B1-Motion und ButtonRelease binden
+        # WICHTIG: X-Button wird NICHT hinzugefügt, damit on_click nicht überschrieben wird
         widgets_list = [outer_frame, frame, inner_frame, thumb_frame, thumb_label, icon_bg_frame, icon_label, filename_label, date_label, size_label]
 
-        # Füge X-Button hinzu falls ausgewählt
-        if is_selected:
-            widgets_list.extend([x_button_frame, x_button_label])
+        # NICHT: X-Button wird separat behandelt (siehe oben)
 
         for widget in widgets_list:
             widget.bind('<Button-1>', on_click)
@@ -712,25 +718,24 @@ class SDFileSelectorDialog:
 
             if dx > 10 or dy > 10:
                 self.is_drag_selecting = True
-                # Erstelle Rectangle auf Haupt-Canvas
+
+                # Erstelle Rectangle direkt auf dem Haupt-Canvas
                 self.drag_rect = canvas.create_rectangle(
                     self.drag_start_canvas_x, self.drag_start_canvas_y,
                     current_canvas_x, current_canvas_y,
-                    outline='#2196F3', width=3,
+                    outline='#2196F3', width=5,  # Dickerer Rahmen
                     fill='#BBDEFB',
                     stipple='gray50',
-                    tags='drag_rect'
+                    tags='drag_selection_rect'
                 )
-                # Bringe Rectangle explizit nach oben
-                canvas.tag_raise('drag_rect')
+                canvas.tag_raise('drag_selection_rect')
 
         # Update Rectangle
         if self.is_drag_selecting and self.drag_rect:
             canvas.coords(self.drag_rect,
                          self.drag_start_canvas_x, self.drag_start_canvas_y,
                          current_canvas_x, current_canvas_y)
-            # Stelle sicher dass Rectangle über Widgets bleibt
-            canvas.tag_raise('drag_rect')
+            canvas.tag_raise('drag_selection_rect')
 
     def _on_widget_release(self, event):
         """Helper für Release-Events auf Widgets (für Auswahlrahmen)"""
@@ -778,6 +783,7 @@ class SDFileSelectorDialog:
         if self.drag_rect:
             canvas.delete(self.drag_rect)
             self.drag_rect = None
+
 
         self.is_drag_selecting = False
         self.drag_start_canvas_x = None

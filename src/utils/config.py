@@ -26,6 +26,9 @@ class ConfigManager:
                     # Stelle sicher, dass server_url existiert
                     if "server_url" not in settings:
                         settings["server_url"] = "smb://169.254.169.254/aktuell"
+                    # Füge neuen Key für Skip Processed hinzu wenn nicht vorhanden
+                    if "sd_skip_processed" not in settings:
+                        settings["sd_skip_processed"] = False
                     return settings
             except (json.JSONDecodeError, FileNotFoundError):
                 return self.get_default_settings()
@@ -48,10 +51,16 @@ class ConfigManager:
             "sd_auto_backup": False,
             "sd_clear_after_backup": False,
             "sd_auto_import": False,
+            "sd_skip_processed": False,  # Nur neue Dateien sichern/importieren
+            "sd_skip_processed_manual": False,  # Auch manuellen Import prüfen
+            "sd_size_limit_enabled": False,  # Größen-Limit aktivieren
+            "sd_size_limit_mb": 2000,  # Größen-Limit in MB
             # Hardware-Beschleunigung
             "hardware_acceleration_enabled": True,  # Hardware-Beschleunigung standardmäßig aktiviert
             # Paralleles Processing
-            "parallel_processing_enabled": True  # Paralleles Processing standardmäßig aktiviert
+            "parallel_processing_enabled": True,  # Paralleles Processing standardmäßig aktiviert
+            # Codec-Auswahl
+            "video_codec": "auto"  # auto, h264, h265, vp9, av1
         }
 
     def save_settings(self, settings):

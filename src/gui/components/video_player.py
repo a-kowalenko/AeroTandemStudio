@@ -1,16 +1,15 @@
 ﻿import sys
 import tkinter as tk
 
+# VLC Import nur wenn benötigt (wird in __init__ geladen)
+vlc = None
+
 try:
     from src.utils.path_helper import setup_vlc_paths
     setup_vlc_paths()
 except ImportError:
     print("Warnung: path_helper nicht gefunden. VLC funktioniert möglicherweise nicht in der gebündelten App.")
 
-
-
-
-import vlc
 
 class VideoPlayer:
     """
@@ -19,6 +18,17 @@ class VideoPlayer:
     """
 
     def __init__(self, parent, app_instance):
+        global vlc
+
+        # Lazy VLC Import - erst hier, nicht beim Modul-Import
+        if vlc is None:
+            try:
+                import vlc as vlc_module
+                vlc = vlc_module
+            except ImportError:
+                print("⚠️ VLC Modul konnte nicht importiert werden")
+                vlc = None
+
         self.parent = parent
         self.app = app_instance
         self.clip_durations = []
@@ -588,6 +598,10 @@ class VideoPlayer:
             if fs_canvas_width > 0:
                 fs_progress_x = int(fs_canvas_width * position_percent)
                 self.fs_progress_canvas.coords(self.fs_progress_bar, 0, 5, fs_progress_x, 20)
+
+        # NEU: Informiere VideoPreview über aktuelle Zeit für Clip-Synchronisation
+        if self.app and hasattr(self.app, 'video_preview'):
+            self.app.video_preview.set_active_clip_by_time(current_time_ms)
 
         if self.media_player.is_playing():
             self._start_updater()

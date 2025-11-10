@@ -47,6 +47,9 @@ class PhotoPreview:
         self.right_arrow_id = None
         self.show_arrows = False
 
+        # Tooltip für Dateinamen
+        self.filename_tooltip = None  # Für Tooltip-Verwaltung
+
         # Größen
         self.large_preview_width = 568
         self.large_preview_height = 320
@@ -59,7 +62,7 @@ class PhotoPreview:
 
         # --- Große Vorschau ---
         preview_frame = tk.Frame(self.frame)
-        preview_frame.pack(fill="x", pady=(0, 10))
+        preview_frame.pack(fill="x", pady=(0, 0))
 
         # Canvas für große Vorschau
         self.large_preview_canvas = tk.Canvas(
@@ -110,10 +113,11 @@ class PhotoPreview:
         thumbnail_frame = tk.Frame(self.frame)
         thumbnail_frame.pack(fill="x", pady=(0, 5))
 
-        # Scrollbarer Canvas für Thumbnails
+        # Scrollbarer Canvas für Thumbnails - Höhe exakt wie aktives Thumbnail (78px)
+        canvas_height = int(self.thumbnail_size)
         self.thumbnail_canvas = tk.Canvas(
             thumbnail_frame,
-            height=self.thumbnail_size,
+            height=canvas_height,
             bg="#f0f0f0",
             highlightthickness=0
         )
@@ -125,7 +129,7 @@ class PhotoPreview:
             orient="horizontal",
             command=self.thumbnail_canvas.xview
         )
-        self.thumbnail_scrollbar.pack(fill="x", pady=(2, 0))
+        self.thumbnail_scrollbar.pack(fill="x", pady=(0, 0))
         self.thumbnail_canvas.configure(xscrollcommand=self.thumbnail_scrollbar.set)
 
         # Frame innerhalb des Canvas für die Thumbnails
@@ -148,14 +152,14 @@ class PhotoPreview:
 
         # Zwei Spalten: Links = Aktuelles Foto, Rechts = Gesamt-Statistik
         left_info_frame = tk.Frame(info_frame)
-        left_info_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        left_info_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
 
         right_info_frame = tk.Frame(info_frame)
-        right_info_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        right_info_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
 
-        # Grid-Gewichte für gleichmäßige Verteilung
-        info_frame.grid_columnconfigure(0, weight=1)
-        info_frame.grid_columnconfigure(1, weight=1)
+        # WICHTIG: Beide Spalten exakt 50%, uniform für feste Breite (wie Video Preview)
+        info_frame.grid_columnconfigure(0, weight=1, uniform="info_cols")
+        info_frame.grid_columnconfigure(1, weight=1, uniform="info_cols")
 
         # === LINKE SPALTE: Aktuelles Foto ===
         single_info_title = tk.Label(left_info_frame, text="Aktuelles Foto:", font=("Arial", 9, "bold"))
@@ -173,10 +177,22 @@ class PhotoPreview:
             label = tk.Label(left_info_frame, text=label_text, font=("Arial", 8), anchor="w")
             label.grid(row=idx, column=0, sticky="w", padx=(0, 5))
 
-            value_label = tk.Label(left_info_frame, text="-", font=("Arial", 8), anchor="w")
-            value_label.grid(row=idx, column=1, sticky="w")
+            if key == "filename":
+                # Dateiname mit Textkürzung und Tooltip
+                value_label = tk.Label(left_info_frame, text="-", font=("Arial", 8), anchor="w")
+                value_label.grid(row=idx, column=1, sticky="ew")
+
+                # Binde Tooltip-Events
+                value_label.bind("<Enter>", self._on_filename_hover_enter)
+                value_label.bind("<Leave>", self._on_filename_hover_leave)
+            else:
+                value_label = tk.Label(left_info_frame, text="-", font=("Arial", 8), anchor="w")
+                value_label.grid(row=idx, column=1, sticky="w")
 
             self.info_labels[key] = value_label
+
+        # Spalte 1 soll sich ausdehnen für Textkürzung
+        left_info_frame.grid_columnconfigure(1, weight=1)
 
         # === RECHTE SPALTE: Gesamt-Statistik ===
         stats_title = tk.Label(right_info_frame, text="Gesamt-Statistik:", font=("Arial", 9, "bold"))
@@ -198,10 +214,11 @@ class PhotoPreview:
         button_frame.columnconfigure(0, weight=1)
         button_frame.columnconfigure(1, weight=1)
         button_frame.columnconfigure(2, weight=0)  # QR-Button hat feste Breite
+        button_frame.columnconfigure(3, weight=0)  # NEUE Spalte: WM-Button
 
         self.delete_button = tk.Button(
             button_frame,
-            text="Ausgewähltes Foto löschen",
+            text="Foto löschen",
             command=self._delete_current_photo,
             bg="#f44336",
             fg="white",
@@ -234,6 +251,21 @@ class PhotoPreview:
             state="disabled"
         )
         self.qr_scan_button.grid(row=0, column=2, sticky="ew", padx=(5, 0))
+
+        # --- NEU: Wasserzeichen-Button ---
+        self.wm_button = tk.Button(
+            button_frame,
+            text="💧",
+            command=self._on_wm_button_click,
+            bg="#f0f0f0",
+            fg="black",
+            font=("Arial", 9),
+            width=3,
+            state="disabled"
+        )
+        # INITIAL VERSTECKT - wird von app.py gesteuert
+        # self.wm_button.grid(row=0, column=3, sticky="ew", padx=(5, 0))
+        # --- ENDE NEU ---
 
     def set_photos(self, photo_paths):
         """Setzt die anzuzeigenden Fotos"""
@@ -439,7 +471,7 @@ class PhotoPreview:
             self.thumbnail_canvas.xview_moveto(new_view_start)
 
     def _create_thumbnail(self, photo_path, idx, is_current=False):
-        """Erstellt ein Thumbnail für ein Foto"""
+        """Erstellt ein Thumbnail für ein Foto - aktive 1.3x größer"""
         # Cache-Key berücksichtigt ob aktiv oder nicht
         cache_key = (idx, is_current)
         if cache_key in self.thumbnail_images:
@@ -447,9 +479,13 @@ class PhotoPreview:
 
         try:
             img = Image.open(photo_path)
-            # Aktive Thumbnails sind größer
+
+            # Aktive Thumbnails sind 1.3x größer
             size = int(self.thumbnail_size * 1.3) if is_current else self.thumbnail_size
+
+            # Verwende thumbnail() - skaliert in Bounding Box mit Aspect Ratio (wie Video Preview)
             img.thumbnail((size, size), Image.LANCZOS)
+
             thumbnail = ImageTk.PhotoImage(img)
             self.thumbnail_images[cache_key] = thumbnail
             return thumbnail
@@ -651,6 +687,8 @@ class PhotoPreview:
         self._update_thumbnails()
         self._update_info()
         self._update_delete_button()
+        # NEU: WM-Button Status aktualisieren
+        self.update_wm_button_state()
 
     def _on_thumbnail_click_release(self, event, index):
         """Behandelt ButtonRelease auf ein Thumbnail - nur wenn es kein Drag war"""
@@ -667,6 +705,8 @@ class PhotoPreview:
             self._update_large_preview()
             self._update_thumbnails()
             self._update_info()
+            # NEU: WM-Button Status aktualisieren
+            self.update_wm_button_state()
 
     def _show_next_photo(self):
         """Zeigt das nächste Foto"""
@@ -677,6 +717,8 @@ class PhotoPreview:
             self._update_large_preview()
             self._update_thumbnails()
             self._update_info()
+            # NEU: WM-Button Status aktualisieren
+            self.update_wm_button_state()
 
     def _on_canvas_click_focus(self, event):
         """Setzt Focus auf Frame bei Klick auf Canvas für Tastatur-Events"""
@@ -931,9 +973,10 @@ class PhotoPreview:
         photo_path = self.photo_paths[self.current_photo_index]
 
         try:
-            # Dateiname
+            # Dateiname (mit Kürzung)
             filename = os.path.basename(photo_path)
-            self.info_labels["filename"].config(text=filename)
+            truncated_filename = self._truncate_filename(filename, max_chars=30)
+            self.info_labels["filename"].config(text=truncated_filename)
 
             # Auflösung
             img = Image.open(photo_path)
@@ -967,6 +1010,9 @@ class PhotoPreview:
         total_size_mb = total_size / (1024 * 1024)
         self.info_labels["total_size"].config(text=f"{total_size_mb:.2f} MB")
 
+        # NEU: WM-Button Status aktualisieren
+        self.update_wm_button_state()
+
     def _update_delete_button(self):
         """Aktualisiert den Status und Text des Löschen-Buttons, Clear-Selection-Buttons und QR-Scan-Buttons"""
         # Bestimme welche Fotos als markiert gelten
@@ -979,11 +1025,11 @@ class PhotoPreview:
         if self.photo_paths and effective_selection:
             count = len(effective_selection)
             if count == 1:
-                self.delete_button.config(text="Ausgewähltes Foto löschen", state="normal")
+                self.delete_button.config(text="Foto löschen", state="normal")
             else:
-                self.delete_button.config(text=f"{count} ausgewählte Fotos löschen", state="normal")
+                self.delete_button.config(text=f"{count} Fotos löschen", state="normal")
         else:
-            self.delete_button.config(text="Ausgewähltes Foto löschen", state="disabled")
+            self.delete_button.config(text="Foto löschen", state="disabled")
 
         # Clear-Selection-Button nur anzeigen wenn explizite Markierung vorhanden
         if self.explicitly_selected and self.selected_photos:
@@ -995,8 +1041,11 @@ class PhotoPreview:
         # (auch wenn mehrere ausgewählt sind, wird nur das aktuelle gescannt)
         if self.photo_paths and 0 <= self.current_photo_index < len(self.photo_paths):
             self.qr_scan_button.config(state="normal")
+            self.wm_button.config(state="normal")  # NEU
+            self.update_wm_button_state()  # NEU: Status aktualisieren
         else:
             self.qr_scan_button.config(state="disabled")
+            self.wm_button.config(state="disabled")  # NEU
 
     def _clear_all_selections(self):
         """Hebt alle expliziten Markierungen auf"""
@@ -1100,9 +1149,99 @@ class PhotoPreview:
             # Fehler ignorieren, wird beim nächsten Update eh neu gerendert
             pass
 
+    # --- NEU: WASSERZEICHEN-METHODEN ---
+
+    def _on_wm_button_click(self):
+        """
+        Wird aufgerufen, wenn der Wasserzeichen-Button geklickt wird.
+        Leitet die Aktion an app.py weiter.
+        """
+        if self.app and hasattr(self.app, 'toggle_photo_watermark') and self.current_photo_index is not None:
+            if 0 <= self.current_photo_index < len(self.photo_paths):
+                self.app.toggle_photo_watermark(self.current_photo_index)
+
+    def set_wm_button_visibility(self, visible: bool):
+        """Zeigt oder verbirgt den Wasserzeichen-Button (gesteuert von app.py)."""
+        if visible:
+            self.wm_button.grid(row=0, column=3, sticky="ew", padx=(5, 0))
+        else:
+            self.wm_button.grid_remove()
+
+    def update_wm_button_state(self):
+        """
+        Aktualisiert Text und Farbe des WM-Buttons basierend auf dem Status
+        in drag_drop.py.
+        """
+        if (not self.app or not hasattr(self.app, 'drag_drop') or
+            self.current_photo_index < 0 or not self.photo_paths):
+            self.wm_button.config(text="💧", state="disabled", bg="#f0f0f0")
+            return
+
+        # Lese den Status direkt von drag_drop (via app)
+        is_marked = self.app.drag_drop.is_photo_watermarked(self.current_photo_index)
+
+        if is_marked:
+            self.wm_button.config(text="💧", state="normal", bg="#D32F2F", fg="white")
+        else:
+            self.wm_button.config(text="💧", state="normal", bg="#FF9800", fg="black")
+
     def pack(self, **kwargs):
         """Packt den Frame"""
         self.frame.pack(**kwargs)
+
+    def _on_filename_hover_enter(self, event):
+        """Zeigt Tooltip mit vollständigem Dateinamen beim Hover"""
+        widget = event.widget
+        full_text = widget.cget("text")
+
+        # Zeige Tooltip nur wenn Text abgekürzt ist (enthält ...)
+        if "..." in full_text or len(full_text) > 30:
+            # Hole vollständigen Dateinamen aus photo_paths
+            if self.photo_paths and self.current_photo_index < len(self.photo_paths):
+                full_filename = os.path.basename(self.photo_paths[self.current_photo_index])
+
+                # Erstelle Tooltip
+                x = widget.winfo_rootx() + 10
+                y = widget.winfo_rooty() + 25
+
+                self.filename_tooltip = tk.Toplevel(widget)
+                self.filename_tooltip.wm_overrideredirect(True)
+                self.filename_tooltip.wm_geometry(f"+{x}+{y}")
+
+                label = tk.Label(
+                    self.filename_tooltip,
+                    text=full_filename,
+                    background="#ffffe0",
+                    relief="solid",
+                    borderwidth=1,
+                    font=("Arial", 8),
+                    padx=5,
+                    pady=3
+                )
+                label.pack()
+
+    def _on_filename_hover_leave(self, event):
+        """Entfernt Tooltip beim Verlassen"""
+        if self.filename_tooltip:
+            self.filename_tooltip.destroy()
+            self.filename_tooltip = None
+
+    def _truncate_filename(self, filename, max_chars=30):
+        """Kürzt Dateinamen wenn zu lang"""
+        if len(filename) <= max_chars:
+            return filename
+
+        # Behalte Dateiendung
+        name, ext = os.path.splitext(filename)
+        if len(ext) > 10:  # Falls Endung sehr lang
+            ext = ext[:10]
+
+        # Berechne verfügbare Zeichen für Namen
+        available = max_chars - len(ext) - 3  # 3 für "..."
+        if available < 5:
+            return filename[:max_chars-3] + "..."
+
+        return name[:available] + "..." + ext
 
     def get_photo_paths(self):
         """Gibt die aktuellen Foto-Pfade zurück"""

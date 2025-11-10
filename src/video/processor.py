@@ -66,6 +66,14 @@ class VideoProcessor:
                 print("ℹ Paralleles Processing deaktiviert (sequenziell)")
                 self.parallel_processor = None
 
+    def reload_hardware_acceleration_settings(self):
+        """
+        Lädt die Hardware-Beschleunigungseinstellungen neu.
+        Wird aufgerufen wenn die Einstellungen geändert wurden.
+        """
+        print("🔄 VideoProcessor: Lade Hardware-Beschleunigungseinstellungen neu...")
+        self._init_hardware_acceleration()
+
     def _get_encoding_params(self, codec='h264'):
         """
         Gibt Encoding-Parameter basierend auf Hardware-Beschleunigung zurück.
@@ -132,6 +140,8 @@ class VideoProcessor:
         create_watermark_version = payload.get("create_watermark_version", False)
         # NEU: Index des für Wasserzeichen ausgewählten Clips
         watermark_clip_index = payload.get("watermark_clip_index", None)
+        # NEU: Indizes der für Wasserzeichen ausgewählten Fotos
+        watermark_photo_indices = payload.get("watermark_photo_indices", [])
 
         print("kunde Objekt:", kunde)
         gast = form_data["gast"]
@@ -193,30 +203,73 @@ class VideoProcessor:
                     temp_intro_with_audio_path, dauer, video_params, drawtext_filter
                 )
 
-                # Schritt 5: Videos in .ts-Format umwandeln (Intro)
+                # Schritt 5 & 6: Vorbereitung für Zusammenfügen (codec-abhängig)
                 self._check_for_cancellation()
                 self._update_progress(5, TOTAL_STEPS)
-                self._update_status("Normalisiere Intro für robustes Zusammenfügen...")
-                bsf = "hevc_mp4toannexb" if video_params['vcodec'] == 'hevc' else "h264_mp4toannexb"
-                temp_intro_ts_path = os.path.join(tempfile.gettempdir(), "intro.ts")
-                temp_files.append(temp_intro_ts_path)
-                subprocess.run([
-                    "ffmpeg", "-y", "-i", temp_intro_with_audio_path,
-                    "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
-                    temp_intro_ts_path
-                ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
-                # Schritt 6: Hauptvideo nach .ts konvertieren
-                self._check_for_cancellation()
+                vcodec = video_params.get('vcodec', 'h264')
+
+                # VP9 und AV1 verwenden concat demuxer statt MPEG-TS (bessere Kompatibilität)
+                use_concat_demuxer = vcodec in ['vp9', 'av1']
+
+                # Initialisiere Variablen (werden je nach Methode gefüllt)
+                concat_list_path = None
+                temp_intro_ts_path = None
+                temp_combined_ts_path = None
+
+                if use_concat_demuxer:
+                    self._update_status("Bereite Videos für Zusammenfügen vor (concat demuxer)...")
+                    # Für VP9/AV1: Verwende concat demuxer (concat:file:...)
+                    # Keine Konvertierung nötig, verwende MP4-Dateien direkt
+                    temp_intro_path = temp_intro_with_audio_path
+                    temp_combined_path = combined_video_path
+
+                    # Erstelle concat-Liste
+                    concat_list_path = os.path.join(tempfile.gettempdir(), "final_concat_list.txt")
+                    temp_files.append(concat_list_path)
+
+                    with open(concat_list_path, 'w', encoding='utf-8') as f:
+                        # Escape Pfade für FFmpeg
+                        intro_escaped = os.path.abspath(temp_intro_path).replace('\\', '/')
+                        combined_escaped = os.path.abspath(temp_combined_path).replace('\\', '/')
+                        f.write(f"file '{intro_escaped}'\n")
+                        f.write(f"file '{combined_escaped}'\n")
+                else:
+                    self._update_status("Normalisiere Videos für robustes Zusammenfügen (MPEG-TS)...")
+                    # Für H.264/HEVC: Verwende MPEG-TS (wie bisher)
+                    bsf_map = {
+                        'h264': 'h264_mp4toannexb',
+                        'hevc': 'hevc_mp4toannexb',
+                        'h265': 'hevc_mp4toannexb',
+                    }
+                    bsf = bsf_map.get(vcodec, None)
+
+                    temp_intro_ts_path = os.path.join(tempfile.gettempdir(), "intro.ts")
+                    temp_files.append(temp_intro_ts_path)
+
+                    intro_cmd = ["ffmpeg", "-y", "-i", temp_intro_with_audio_path, "-c", "copy"]
+                    if bsf:
+                        intro_cmd.extend(["-bsf:v", bsf])
+                    intro_cmd.extend(["-f", "mpegts", temp_intro_ts_path])
+
+                    subprocess.run(intro_cmd, capture_output=True, text=True, check=True,
+                                  creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+                    # Hauptvideo nach .ts konvertieren
+                    self._check_for_cancellation()
+                    self._update_progress(6, TOTAL_STEPS)
+                    temp_combined_ts_path = os.path.join(tempfile.gettempdir(), "combined.ts")
+                    temp_files.append(temp_combined_ts_path)
+
+                    combined_cmd = ["ffmpeg", "-y", "-i", combined_video_path, "-c", "copy"]
+                    if bsf:
+                        combined_cmd.extend(["-bsf:v", bsf])
+                    combined_cmd.extend(["-f", "mpegts", temp_combined_ts_path])
+
+                    subprocess.run(combined_cmd, capture_output=True, text=True, check=True,
+                                  creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
                 self._update_progress(6, TOTAL_STEPS)
-                self._update_status("Normalisiere Hauptvideo für robustes Zusammenfügen...")
-                temp_combined_ts_path = os.path.join(tempfile.gettempdir(), "combined.ts")
-                temp_files.append(temp_combined_ts_path)
-                subprocess.run([
-                    "ffmpeg", "-y", "-i", combined_video_path,
-                    "-c", "copy", "-bsf:v", bsf, "-f", "mpegts",
-                    temp_combined_ts_path
-                ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
                 # Schritt 6a: Längsten Clip finden (falls Wasserzeichen gewünscht)
                 longest_clip_path = None
@@ -263,15 +316,38 @@ class VideoProcessor:
 
                     # Task 1: Normale Version zusammenfügen
                     def create_normal_version_task(task_id=None):
-                        concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
-                        subprocess.run([
-                            "ffmpeg", "-y",
-                            "-i", concat_input,
-                            "-c", "copy",
-                            "-bsf:a", "aac_adtstoasc",
-                            "-movflags", "+faststart",
-                            full_video_output_path
-                        ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                        if use_concat_demuxer:
+                            # VP9/AV1: Verwende concat demuxer
+                            command = [
+                                "ffmpeg", "-y",
+                                "-f", "concat",
+                                "-safe", "0",
+                                "-i", concat_list_path,
+                                "-c", "copy",
+                                "-movflags", "+faststart"
+                            ]
+                        else:
+                            # H.264/HEVC: Verwende MPEG-TS concat protocol
+                            concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
+                            command = [
+                                "ffmpeg", "-y",
+                                "-fflags", "+genpts",
+                                "-i", concat_input,
+                                "-c", "copy",
+                                "-bsf:a", "aac_adtstoasc",
+                                "-movflags", "+faststart"
+                            ]
+                            # HEVC-spezifische Stabilisierung und Tagging
+                            if video_params.get('vcodec') == 'hevc':
+                                command.extend(["-bsf:v", "hevc_metadata=aud=insert,extract_extradata", "-tag:v", "hvc1"])
+
+                        command.append(full_video_output_path)
+
+                        subprocess.run(
+                            command,
+                            capture_output=True, text=True, check=True,
+                            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+                        )
 
                     # Task 2: Wasserzeichen-Version erstellen
                     def create_watermark_version_task(task_id=None):
@@ -303,15 +379,39 @@ class VideoProcessor:
                         self._check_for_cancellation()
                         self._update_progress(9, TOTAL_STEPS)
                         self._update_status("Füge Videos final zusammen...")
-                        concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
-                        subprocess.run([
-                            "ffmpeg", "-y",
-                            "-i", concat_input,
-                            "-c", "copy",
-                            "-bsf:a", "aac_adtstoasc",
-                            "-movflags", "+faststart",
-                            full_video_output_path
-                        ], capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+                        if use_concat_demuxer:
+                            # VP9/AV1: Verwende concat demuxer
+                            command = [
+                                "ffmpeg", "-y",
+                                "-f", "concat",
+                                "-safe", "0",
+                                "-i", concat_list_path,
+                                "-c", "copy",
+                                "-movflags", "+faststart"
+                            ]
+                        else:
+                            # H.264/HEVC: Verwende MPEG-TS concat protocol
+                            concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
+                            command = [
+                                "ffmpeg", "-y",
+                                "-fflags", "+genpts",
+                                "-i", concat_input,
+                                "-c", "copy",
+                                "-bsf:a", "aac_adtstoasc",
+                                "-movflags", "+faststart"
+                            ]
+                            # HEVC-spezifische Stabilisierung und Tagging
+                            if video_params.get('vcodec') == 'hevc':
+                                command.extend(["-bsf:v", "hevc_metadata=aud=insert,extract_extradata", "-tag:v", "hvc1"])
+
+                        command.append(full_video_output_path)
+
+                        subprocess.run(
+                            command,
+                            capture_output=True, text=True, check=True,
+                            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+                        )
                     else:
                         self._update_progress(9, TOTAL_STEPS)
                         self._update_status("Überspringe normale Video-Erstellung...")
@@ -345,6 +445,36 @@ class VideoProcessor:
                 for i in range(2, 11 if create_watermark_version else 10):  # Schritte 2 bis 10/9
                     self._update_progress(i, TOTAL_STEPS)
                 full_video_output_path = None  # Sicherstellen, dass es None ist
+
+            # --- NEU: FOTO WASSERZEICHEN VERARBEITUNG ---
+            if watermark_photo_indices and photo_paths:
+                self._check_for_cancellation()
+                self._update_status("Erstelle Wasserzeichen-Vorschau für Fotos...")
+
+                # 1. Pfade der ausgewählten Fotos holen
+                selected_photo_paths = []
+                for i in watermark_photo_indices:
+                    if i < len(photo_paths):
+                        selected_photo_paths.append(photo_paths[i])
+
+                if selected_photo_paths:
+                    # 2. Preview-Verzeichnis erstellen (Ziel: base_output_dir/Preview_Foto)
+                    try:
+                        preview_dir = self._generate_watermark_photo_directory(base_output_dir)
+
+                        # 3. Jedes ausgewählte Foto verarbeiten
+                        processed_count = 0
+                        for photo_path in selected_photo_paths:
+                            self._check_for_cancellation()
+                            if os.path.exists(photo_path):
+                                self._create_photo_with_watermark(photo_path, preview_dir)
+                                processed_count += 1
+
+                        print(f"{processed_count} Foto(s) mit Wasserzeichen verarbeitet und in {preview_dir} gespeichert.")
+
+                    except Exception as e:
+                        print(f"Fehler bei der Erstellung der Foto-Wasserzeichen: {e}")
+                        self._update_status(f"Fehler bei Foto-WM: {e}")
 
             # --- FOTO VERARBEITUNG (Schritt 11) ---
             self._check_for_cancellation()
@@ -437,23 +567,23 @@ class VideoProcessor:
 
     def _generate_watermark_video_path(self, base_output_dir, base_filename):
         """Generiert den Pfad für die Wasserzeichen-Video-Version"""
-        watermark_dir = os.path.join(base_output_dir, "Wasserzeichen_Video")
+        watermark_dir = os.path.join(base_output_dir, "Preview_Video")
 
         try:
             os.makedirs(watermark_dir, exist_ok=True)
         except PermissionError as e:
-            error_msg = f"Zugriff verweigert beim Erstellen des Wasserzeichen-Ordners\n\n"
+            error_msg = f"Zugriff verweigert beim Erstellen des Vorschau-Ordners\n\n"
             error_msg += f"Basis-Verzeichnis: {base_output_dir}\n"
-            error_msg += f"Unterordner: Wasserzeichen_Video\n\n"
+            error_msg += f"Unterordner: Preview_Video\n\n"
             error_msg += f"Technische Details: {str(e)}"
             raise PermissionError(error_msg)
         except OSError as e:
-            error_msg = f"Fehler beim Erstellen des Wasserzeichen-Ordners\n\n"
+            error_msg = f"Fehler beim Erstellen des Vorschau-Ordners\n\n"
             error_msg += f"Voller Pfad: {watermark_dir}\n\n"
             error_msg += f"Technische Details: {str(e)}"
             raise OSError(error_msg)
 
-        output_filename = f"{base_filename}_wasserzeichen.mp4"
+        output_filename = f"{base_filename}_preview.mp4"
         full_output_path = os.path.join(watermark_dir, output_filename)
 
         return full_output_path
@@ -463,7 +593,9 @@ class VideoProcessor:
         Erstellt eine Video-Version mit Wasserzeichen über dem gesamten Video.
         NEU: Nutzt Hardware-Encoding wenn verfügbar, aber Software-Decoding für Filter-Kompatibilität.
 
-        WICHTIG: overlay-Filter benötigt Software-Frames (yuv420p), daher KEIN Hardware-Decoding!
+        WICHTIG:
+        - overlay-Filter benötigt Software-Frames (yuv420p), daher KEIN Hardware-Decoding!
+        - Wasserzeichen-Videos werden IMMER mit H.264 codiert für maximale Kompatibilität
         """
 
         # Pfad zum Wasserzeichen-Bild
@@ -487,10 +619,8 @@ class VideoProcessor:
             f"[v][wm_scaled]overlay=(W-w)/2:(H-h)/2"
         )
 
-        # Hole Encoding-Parameter (mit oder ohne Hardware-Beschleunigung)
-        vcodec = video_params.get('vcodec', 'h264')
-        codec_type = 'hevc' if vcodec in ['hevc', 'h265'] else 'h264'
-        encoding_params = self._get_encoding_params(codec_type)
+        # Hole Encoding-Parameter für H.264 (Wasserzeichen-Videos werden IMMER mit H.264 codiert)
+        encoding_params = self._get_encoding_params('h264')
 
         # Baue FFmpeg-Befehl
         command = ["ffmpeg", "-y"]
@@ -539,8 +669,8 @@ class VideoProcessor:
 
         # Hole Encoding-Parameter (mit oder ohne Hardware-Beschleunigung)
         vcodec = v_params.get('vcodec', 'h264')
-        codec_type = 'hevc' if vcodec in ['hevc', 'h265'] else 'h264'
-        encoding_params = self._get_encoding_params(codec_type)
+        # Verwende den tatsächlichen Codec aus den Video-Parametern
+        encoding_params = self._get_encoding_params(vcodec)
 
         command = ["ffmpeg", "-y"]
 
@@ -557,9 +687,9 @@ class VideoProcessor:
         # Encoding-Parameter (Hardware oder Software)
         command.extend(encoding_params['output_params'])
 
+
         # Zusätzliche Parameter für Kompatibilität
         command.extend([
-            "-tag:v", v_params['vtag'],
             "-pix_fmt", v_params['pix_fmt'],
             "-r", v_params['fps'],
             "-video_track_timescale", v_params['timescale'],
@@ -570,9 +700,28 @@ class VideoProcessor:
             "-map", "1:a:0"
         ])
 
-        # Preset und CRF nur bei Software-Encoding
+        # Preset und CRF nur bei Software-Encoding (codec-spezifisch)
         if not self.hw_accel_enabled:
-            command.extend(["-preset", "fast", "-crf", "18"])
+            encoder = encoding_params.get('encoder', 'libx264')
+
+            if encoder == 'libx264':
+                command.extend(["-preset", "fast", "-crf", "18"])
+            elif encoder == 'libx265':
+                command.extend(["-preset", "fast", "-crf", "20"])
+            elif encoder == 'libvpx-vp9':
+                # VP9 hat keine preset-Option
+                command.extend([
+                    "-deadline", "good",  # good quality (besser als realtime)
+                    "-cpu-used", "2",  # Geschwindigkeit (0=langsam, 5=schnell)
+                    "-crf", "23",  # Qualität für Intro (besser als Preview)
+                    "-b:v", "0"  # CRF Mode
+                ])
+            elif encoder in ['libaom-av1', 'libsvtav1']:
+                command.extend([
+                    "-cpu-used", "6",  # Geschwindigkeit
+                    "-crf", "28",
+                    "-b:v", "0"
+                ])
 
         # Color Space Parameter
         if v_params.get('color_range'):
@@ -585,10 +734,12 @@ class VideoProcessor:
             command.extend(["-color_trc", v_params['color_trc']])
 
         # Profile und Level (nur für h264/hevc)
-        if v_params.get('profile') and v_params['vcodec'] in ['h264', 'hevc']:
+        # WICHTIG: Bei Hardware-Encoding (nvenc) KEIN Level setzen, da nvenc nicht alle Levels unterstützt
+        # Der Encoder wählt automatisch ein passendes Level
+        if v_params.get('profile') and v_params['vcodec'] in ['h264', 'hevc', 'h265'] and not self.hw_accel_enabled:
             profile_str = str(v_params['profile']).lower().replace(" ", "")
             command.extend(["-profile:v", profile_str])
-        if v_params.get('level') and v_params['vcodec'] in ['h264', 'hevc']:
+        if v_params.get('level') and v_params['vcodec'] in ['h264', 'hevc', 'h265'] and not self.hw_accel_enabled:
             try:
                 level_str = str(float(v_params['level']) / 10.0)
                 command.extend(["-level:v", level_str])
@@ -656,6 +807,78 @@ class VideoProcessor:
         print(f"{copied_files_count} Foto(s) nach '{handcam_dir}' und/oder '{outside_dir}' kopiert")
         return copied_files_count
 
+    def _generate_watermark_photo_directory(self, base_output_dir):
+        """
+        Erstellt den Ordner 'Preview_Foto' innerhalb des base_output_dir.
+        """
+        preview_dir_path = os.path.join(base_output_dir, "Preview_Foto")
+
+        try:
+            os.makedirs(preview_dir_path, exist_ok=True)
+            return preview_dir_path
+        except PermissionError as e:
+            error_msg = f"Zugriff verweigert beim Erstellen des Foto-Vorschau-Ordners\n\n"
+            error_msg += f"Pfad: {preview_dir_path}\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise PermissionError(error_msg)
+        except OSError as e:
+            error_msg = f"Fehler beim Erstellen des Foto-Vorschau-Ordners\n\n"
+            error_msg += f"Pfad: {preview_dir_path}\n\n"
+            error_msg += f"Technische Details: {str(e)}"
+            raise OSError(error_msg)
+
+    def _create_photo_with_watermark(self, input_photo_path, output_dir):
+        """
+        Verwendet FFmpeg, um ein einzelnes Foto auf 720p (Höhe) zu skalieren
+        und ein Wasserzeichen (80% Transparenz, volle Breite) darüber zu legen.
+        """
+        wasserzeichen_path = os.path.join(os.path.dirname(self.hintergrund_path), "skydivede_wasserzeichen.png")
+
+        if not os.path.exists(wasserzeichen_path):
+            print(f"Warnung: Wasserzeichen-Datei nicht gefunden: {wasserzeichen_path}")
+            return
+        if not os.path.exists(input_photo_path):
+            print(f"Warnung: Eingabe-Foto nicht gefunden: {input_photo_path}")
+            return
+
+        output_filename = os.path.basename(input_photo_path)
+        output_path = os.path.join(output_dir, output_filename)
+
+        target_height = 720
+        alpha_level = 0.8  # 80% Transparenz
+
+        # FFmpeg Filter:
+        # 1. [0:v] (Input-Foto) skalieren auf 720px Höhe, Seitenverhältnis beibehalten
+        # 2. [1:v] (Wasserzeichen) auf Foto-Breite skalieren, Seitenverhältnis beibehalten
+        # 3. [wm_scaled] (Wasserzeichen) Transparenz auf 80% setzen
+        # 4. [v][wm_transparent] (beide) überlagern (mittig)
+
+        watermark_filter = (
+            f"[0:v]scale=w=-2:h={target_height}[v];"
+            # Skaliere Wasserzeichen auf die VOLLE BREITE des Fotos (w=iw), behalte Seitenverhältnis
+            f"[1:v]scale=w=iw:h=-2[wm_scaled];"
+            # Setze Transparenz
+            f"[wm_scaled]colorchannelmixer=aa={alpha_level}[wm_transparent];"
+            # Überlagere mittig
+            f"[v][wm_transparent]overlay=(W-w)/2:(H-h)/2"
+        )
+
+        command = [
+            "ffmpeg", "-y",
+            "-i", input_photo_path,
+            "-i", wasserzeichen_path,
+            "-filter_complex", watermark_filter,
+            "-frames:v", "1",  # Wichtig: Nur einen Frame (das Bild) ausgeben
+            output_path
+        ]
+
+        try:
+            subprocess.run(command, capture_output=True, text=True, check=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+        except subprocess.CalledProcessError as e:
+            print(f"Fehler bei FFmpeg-Foto-Wasserzeichen für {output_filename}:")
+            print(f"STDERR: {e.stderr}")
+            raise e
+
     def _get_video_info(self, video_path):
         """
         Ermittelt detaillierte Video- und Audio-Stream-Informationen mit ffprobe.
@@ -681,14 +904,29 @@ class VideoProcessor:
         time_base = video_stream.get("time_base", "1/25").split('/')
         timescale = time_base[1] if len(time_base) == 2 else "25"
 
+        # Codec-spezifisches vtag ermitteln
+        vcodec = video_stream.get("codec_name", "h264")
+        vtag = video_stream.get("codec_tag_string", "")
+
+        # Wenn kein vtag vorhanden, verwende codec-spezifische Defaults
+        if not vtag or vtag == "0x00000000":
+            vtag_map = {
+                'h264': 'avc1',
+                'hevc': 'hvc1',
+                'h265': 'hvc1',
+                'vp9': 'vp09',
+                'av1': 'av01'
+            }
+            vtag = vtag_map.get(vcodec, 'avc1')
+
         return {
             "width": video_stream.get("width"),
             "height": video_stream.get("height"),
             "fps": video_stream.get("r_frame_rate"),
             "timescale": timescale,
             "pix_fmt": video_stream.get("pix_fmt"),
-            "vcodec": video_stream.get("codec_name"),
-            "vtag": video_stream.get("codec_tag_string", "avc1"),
+            "vcodec": vcodec,
+            "vtag": vtag,
             "acodec": audio_stream.get("codec_name"),
             "sample_rate": audio_stream.get("sample_rate"),
             "channel_layout": audio_stream.get("channel_layout", "stereo"),

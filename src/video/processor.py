@@ -447,6 +447,7 @@ class VideoProcessor:
                 full_video_output_path = None  # Sicherstellen, dass es None ist
 
             # --- NEU: FOTO WASSERZEICHEN VERARBEITUNG ---
+            watermark_photo_count = 0
             if watermark_photo_indices and photo_paths:
                 self._check_for_cancellation()
                 self._update_status("Erstelle Wasserzeichen-Vorschau für Fotos...")
@@ -463,14 +464,13 @@ class VideoProcessor:
                         preview_dir = self._generate_watermark_photo_directory(base_output_dir)
 
                         # 3. Jedes ausgewählte Foto verarbeiten
-                        processed_count = 0
                         for photo_path in selected_photo_paths:
                             self._check_for_cancellation()
                             if os.path.exists(photo_path):
                                 self._create_photo_with_watermark(photo_path, preview_dir)
-                                processed_count += 1
+                                watermark_photo_count += 1
 
-                        print(f"{processed_count} Foto(s) mit Wasserzeichen verarbeitet und in {preview_dir} gespeichert.")
+                        print(f"{watermark_photo_count} Foto(s) mit Wasserzeichen verarbeitet und in {preview_dir} gespeichert.")
 
                     except Exception as e:
                         print(f"Fehler bei der Erstellung der Foto-Wasserzeichen: {e}")
@@ -480,11 +480,10 @@ class VideoProcessor:
             self._check_for_cancellation()
             step_photo = 11 if create_watermark_version else 10
             self._update_progress(step_photo, TOTAL_STEPS)
-            photo_copy_message = ""
+            copied_count = 0
             if photo_paths:
                 self._update_status("Kopiere Fotos...")
                 copied_count = self._copy_photos_to_output_directory(photo_paths, base_output_dir, kunde)
-                photo_copy_message = f"{copied_count} Foto(s) wurden in die entsprechenden Ordner kopiert."
             else:
                 self._update_status("Keine Fotos zum Kopieren ausgewählt.")
 
@@ -505,36 +504,27 @@ class VideoProcessor:
             # Jetzt Server-Upload durchführen (inkl. _fertig.txt)
             step_server = 12 if create_watermark_version else 11
             self._update_progress(step_server, TOTAL_STEPS)
-            server_message = ""
+            server_uploaded = False
             if upload_to_server:
                 self._update_status("Lade Verzeichnis auf Server hoch...")
                 # Wir laden das gesamte Basis-Verzeichnis hoch (inkl. _fertig.txt)
                 success, message, server_path = self._upload_to_server(base_output_dir)
-                server_message = f"\nServer: {message}" if message else ""
+                server_uploaded = success
 
             # --- ABSCHLUSS (letzter Schritt) ---
             final_step = 13 if create_watermark_version else 12
             self._update_progress(final_step, TOTAL_STEPS)
 
+            # Erstelle strukturierte Informationen über erstellte Elemente
+            created_items = {
+                'video': bool(full_video_output_path),
+                'watermark_video': bool(watermark_video_output_path),
+                'photos': copied_count,
+                'watermark_photos': watermark_photo_count,
+                'server_uploaded': server_uploaded
+            }
 
-            # Fertig-Meldung erstellen
-            success_messages = []
-            if full_video_output_path:
-                success_messages.append(f"Das finale Video wurde unter '{full_video_output_path}' gespeichert.")
-            if watermark_video_output_path:
-                success_messages.append(
-                    f"Die Wasserzeichen-Version wurde unter '{watermark_video_output_path}' gespeichert.")
-            if photo_copy_message:
-                success_messages.append(photo_copy_message)
-
-            if not success_messages:
-                # Fallback, wenn nur ein leeres Verzeichnis erstellt wurde (sollte durch app.py verhindert werden)
-                success_messages.append(f"Ausgabe-Verzeichnis '{base_output_dir}' wurde erstellt.")
-
-            if server_message:
-                success_messages.append(server_message)
-
-            self._show_success_message("\n".join(success_messages))
+            self._show_success_message(created_items)
 
         except subprocess.CalledProcessError as e:
             if self.cancel_event.is_set():
@@ -972,9 +962,11 @@ class VideoProcessor:
             from datetime import datetime
             datum_formatiert = datetime.now().strftime("%Y%m%d")
 
-        base_filename = f"{datum_formatiert}_L{load}_{gast}_TA_{tandemmaster}"
+        base_filename = f"{datum_formatiert}_{gast}_TA_{tandemmaster}"
         if outside_video:
             base_filename += f"_V_{videospringer}"
+
+        base_filename += f"_L{load}"
 
         base_filename_sanitized = sanitize_filename(base_filename)
         output_dir = os.path.join(speicherort, base_filename_sanitized)
@@ -1072,10 +1064,10 @@ class VideoProcessor:
         if self.progress_callback:
             self.progress_callback(step, total_steps)
 
-    def _show_success_message(self, message):
+    def _show_success_message(self, created_items):
         """Zeigt die kombinierte Erfolgsmeldung an"""
         if self.status_callback:
-            self.status_callback("success", message)
+            self.status_callback("success", created_items)
 
     def _handle_cancellation(self):
         print("Cancellation signal received and handled in VideoProcessor.")

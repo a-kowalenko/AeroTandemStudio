@@ -18,6 +18,7 @@ from .components.video_player import VideoPlayer
 from .components.video_cutter import VideoCutterDialog  # Importiert
 from .components.loading_window import LoadingWindow
 from .components.sd_status_indicator import SDStatusIndicator
+from .components.success_dialog import show_success_dialog
 from ..model.kunde import Kunde
 
 from ..video.processor import VideoProcessor
@@ -1284,7 +1285,13 @@ class VideoGeneratorApp:
     def _handle_status_update(self, status_type, message):
         """Callback für Statusupdates"""
         if status_type == "success":
-            self.root.after(0, lambda: messagebox.showinfo("Fertig", message))
+            # message ist jetzt ein Dict mit created_items
+            if isinstance(message, dict):
+                self.root.after(0, lambda: show_success_dialog(self.root, message))
+            else:
+                # Fallback für alte Text-Nachrichten
+                self.root.after(0, lambda: messagebox.showinfo("Fertig", message))
+
             self.root.after(0, self.progress_handler.set_status, "Status: Fertig.")
 
             # NEU: Auto-Clear nach erfolgreichem Erstellen

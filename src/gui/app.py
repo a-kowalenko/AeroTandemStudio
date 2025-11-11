@@ -268,6 +268,12 @@ class VideoGeneratorApp:
 
         print("✅ App-Initialisierung abgeschlossen")
 
+        # Update-Prüfung starten (automatisch im Hintergrund)
+        try:
+            initialize_updater(self.root, self.APP_VERSION)
+        except Exception as e:
+            print(f"⚠️ Fehler beim Initialisieren des Updaters: {e}")
+
         # SD-Monitor verzögert starten (800ms nach Splash-Schließung)
         self.root.after(800, self._delayed_sd_monitor_start)
 

@@ -279,17 +279,21 @@ class VideoPreview:
         durations = []
         for video_path in video_paths:  # HINWEIS: video_paths ist hier eine Liste von KOPIEN
             try:
-                # Suche die file-identity aus der Kopie (umgekehrter Lookup im Cache)
-                file_identity = next((key for key, value in self.video_copies_map.items() if value == video_path), None)
+                # KORRIGIERT: Berechne file_identity direkt aus dem copy_path
+                # (nicht via umgekehrten Lookup), damit nach Trim die neue Größe erkannt wird
+                file_identity = self._get_file_identity(video_path)
 
                 if file_identity and file_identity in self.metadata_cache:
                     duration_str = self.metadata_cache[file_identity].get("duration_sec_str", "0.0")
                     durations.append(float(duration_str))
+                    print(f"Clip-Dauer aus Cache: {os.path.basename(video_path)} = {duration_str}s")
                 else:
                     # Fallback: ffprobe direkt auf die Kopie anwenden
+                    print(f"Clip-Dauer via ffprobe (nicht im Cache): {os.path.basename(video_path)}")
                     duration_str = self._get_single_video_duration_str(video_path)
                     durations.append(float(duration_str))
-            except Exception:
+            except Exception as e:
+                print(f"Fehler beim Ermitteln der Clip-Dauer für {video_path}: {e}")
                 durations.append(0.0)
         return durations
 
@@ -1991,11 +1995,24 @@ class VideoPreview:
         """
         Fügt ein neues Mapping für eine geteilte Datei hinzu.
         Verwendet file-identity (Name + Größe) als Cache-Key.
+
+        WICHTIG: Wenn eine Datei getrimmt wurde, hat sie eine neue Größe.
+        Wir müssen alle alten Identitäten mit dem gleichen Dateinamen löschen.
         """
         file_identity = self._get_file_identity(original_placeholder)
         if not file_identity:
             print(f"⚠️ Kann neue Kopie nicht registrieren: File-Identity konnte nicht erstellt werden für {original_placeholder}")
             return
+
+        # Lösche alle alten Identitäten mit dem gleichen Dateinamen
+        filename = os.path.basename(original_placeholder)
+        old_identities = [key for key in self.video_copies_map.keys() if key[0] == filename]
+        for old_identity in old_identities:
+            if old_identity != file_identity:
+                print(f"Lösche alte File-Identity: {old_identity}")
+                del self.video_copies_map[old_identity]
+                if old_identity in self.metadata_cache:
+                    del self.metadata_cache[old_identity]
 
         if file_identity in self.video_copies_map:
             print(f"Warnung: File-Identity {file_identity} existierte bereits. Wird überschrieben.")
@@ -2094,18 +2111,45 @@ class VideoPreview:
         # self.play_button.config(state="normal")  # ENTFERNT
         # self.action_button.config(state="disabled")  # ENTFERNT
 
-        # NEU: Video-Player aktualisieren
+        # NEU: Video-Player vollständig aktualisieren mit neuen Clip-Dauern
         clip_durations = self._get_clip_durations_seconds(copy_paths)
         if self.app and hasattr(self.app, 'video_player') and self.app.video_player:
+            print(f"Aktualisiere Video-Player: {len(clip_durations)} Clips, Gesamt: {sum(clip_durations):.1f}s")
+
+            # Speichere aktuelle Position & Play-Status
+            current_time_ms = 0
+            was_playing = False
+            try:
+                if self.app.video_player.media_player:
+                    current_time_ms = self.app.video_player.media_player.get_time()
+                    was_playing = self.app.video_player.media_player.is_playing()
+            except:
+                pass
+
+            # Lade Video neu (aktualisiert Dauer, Progress-Bar, Clip-Marker)
             self.app.video_player.load_video(self.combined_video_path, clip_durations)
 
-        # NEU: Aktualisiere Thumbnails und Info
-        self.video_paths = copy_paths
-        self.clip_durations = clip_durations
-        self.current_active_clip = 0
-        self._update_thumbnails()
-        self._update_info()
-        self._update_button_states()
+            # Versuche Position wiederherzustellen (falls sinnvoll)
+            if current_time_ms > 0:
+                new_total_ms = sum(clip_durations) * 1000
+                if current_time_ms < new_total_ms:
+                    # Position ist noch gültig
+                    self.parent.after(200, lambda: self._restore_player_position(current_time_ms, was_playing))
+                else:
+                    # Position ungültig - setze auf Anfang
+                    print(f"Position {current_time_ms}ms ungültig für neue Dauer {new_total_ms}ms - starte bei 0")
+
+    def _restore_player_position(self, time_ms, was_playing):
+        """Stellt die Player-Position nach Preview-Update wieder her."""
+        try:
+            if self.app and hasattr(self.app, 'video_player') and self.app.video_player:
+                if self.app.video_player.media_player:
+                    self.app.video_player.media_player.set_time(int(time_ms))
+                    if was_playing:
+                        self.app.video_player.media_player.play()
+                    print(f"Position wiederhergestellt: {time_ms}ms, Playing: {was_playing}")
+        except Exception as e:
+            print(f"Fehler beim Wiederherstellen der Position: {e}")
 
     def _get_single_video_duration_str(self, video_path):
         """Hilfsmethode: Holt die Dauer EINES Videos als String in Sekunden (z.B. '12.34'). (Blockierend)"""

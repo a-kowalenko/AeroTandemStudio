@@ -228,6 +228,9 @@ class VideoCutterService:
         """
         Erstellt einen optimalen Plan für Trim-Operation.
 
+        IMMER Stream-Copy - niemals re-encoden!
+        Bei DJI-Videos sind Keyframes alle 1-2s, eventuelle Artefakte minimal.
+
         Args:
             video_path: Pfad zur Videodatei
             start_sec: Startzeit in Sekunden
@@ -239,66 +242,17 @@ class VideoCutterService:
         """
         duration_sec = end_sec - start_sec
 
-        # Keyframes finden
-        kf_before_start = self.get_keyframe_before(video_path, start_sec)
-        kf_after_start = self.get_keyframe_after(video_path, start_sec)
-        kf_before_end = self.get_keyframe_before(video_path, end_sec)
-
-        # Prüfen ob auf Keyframes
-        start_on_kf = self.is_on_keyframe(video_path, start_sec, video_info.fps)
-        end_on_kf = self.is_on_keyframe(video_path, end_sec, video_info.fps)
-
         print(f"\n=== TRIM PLAN ===")
         print(f"Bereich: {start_sec:.3f}s - {end_sec:.3f}s (Dauer: {duration_sec:.3f}s)")
-        print(f"Start auf Keyframe: {start_on_kf}, Ende auf Keyframe: {end_on_kf}")
+        print("Strategie: STREAM_COPY (100% Original, lossless)")
 
-        # Fall A: Beide auf Keyframes -> Stream-Copy
-        if start_on_kf and end_on_kf:
-            print("Strategie: STREAM_COPY (perfekt)")
-            return CutPlan(
-                strategy='stream_copy',
-                segments=[{
-                    'type': 'copy',
-                    'start': start_sec,
-                    'duration': duration_sec
-                }]
-            )
-
-        # Fall B: Beide zwischen Keyframes mit genug Platz für Mittelteil
-        if not start_on_kf and not end_on_kf and (kf_after_start < kf_before_end - 1.0):
-            print("Strategie: SMART_CUT_3SEG (minimal re-encode)")
-            return CutPlan(
-                strategy='smart_cut_3seg',
-                segments=[
-                    {
-                        'type': 'encode',
-                        'start': start_sec,
-                        'duration': kf_after_start - start_sec,
-                        'force_keyframe': True
-                    },
-                    {
-                        'type': 'copy',
-                        'start': kf_after_start,
-                        'duration': kf_before_end - kf_after_start
-                    },
-                    {
-                        'type': 'encode',
-                        'start': kf_before_end,
-                        'duration': end_sec - kf_before_end,
-                        'force_keyframe': False
-                    }
-                ]
-            )
-
-        # Fall C: Kurz oder gemischt -> komplettes Re-encode des Segments
-        print("Strategie: RE_ENCODE (gesamtes Segment)")
+        # IMMER Stream-Copy - behält Original-Encoding 1:1
         return CutPlan(
-            strategy='re_encode',
+            strategy='stream_copy',
             segments=[{
-                'type': 'encode',
+                'type': 'copy',
                 'start': start_sec,
-                'duration': duration_sec,
-                'force_keyframe': True
+                'duration': duration_sec
             }]
         )
 
@@ -430,7 +384,12 @@ class VideoCutterService:
     def execute_trim(self, video_path: str, start_sec: float, end_sec: float,
                     output_path: str, progress_callback: Optional[Callable] = None) -> bool:
         """
-        Führt Trim-Operation aus.
+        Führt SMART-CUT Trim aus (minimales Re-encode an Übergängen).
+
+        Strategien:
+        - Auf Keyframes: Stream-Copy (instant, lossless)
+        - Zwischen Keyframes: Smart-Cut (minimal re-encode)
+        - Keine Keyframes: Stream-Copy mit Warnung
 
         Args:
             video_path: Eingabedatei
@@ -453,104 +412,55 @@ class VideoCutterService:
             # Keyframes laden
             if progress_callback:
                 progress_callback(10, "Analysiere Keyframes...")
-            self.get_keyframes(video_path)
+            keyframes = self.get_keyframes(video_path)
 
-            # Plan erstellen
-            if progress_callback:
-                progress_callback(15, "Plane Schnitt...")
-            plan = self.plan_trim(video_path, start_sec, end_sec, video_info)
+            duration_sec = end_sec - start_sec
 
-            # Extension vom Input übernehmen
-            _, ext = os.path.splitext(video_path)
+            print(f"\n=== SMART-CUT TRIM START ===")
+            print(f"Bereich: {start_sec:.3f}s - {end_sec:.3f}s (Dauer: {duration_sec:.3f}s)")
+            print(f"Keyframes: {len(keyframes)}")
 
-            # Segmente verarbeiten
-            if plan.strategy == 'stream_copy':
-                # Einfacher Fall: direkter Copy
-                if progress_callback:
-                    progress_callback(20, "Schneide Video (Stream-Copy)...")
+            # Prüfe ob Start/Ende auf Keyframes
+            start_on_kf = self.is_on_keyframe(video_path, start_sec, video_info.fps)
+            end_on_kf = self.is_on_keyframe(video_path, end_sec, video_info.fps)
 
-                segment = plan.segments[0]
-                cmd = self.build_ffmpeg_cmd(video_path, output_path, segment, video_info)
+            if start_on_kf and end_on_kf:
+                # Fall A: Beide auf Keyframes → Stream-Copy
+                print("✅ Beide auf Keyframes → Stream-Copy (perfekt)")
+                return self._trim_stream_copy(
+                    video_path, start_sec, duration_sec, output_path, progress_callback
+                )
 
-                success = self._run_ffmpeg(cmd, segment['duration'], 20, 100, progress_callback)
-                return success
+            elif not keyframes or len(keyframes) == 0:
+                # Fall B: Keine Keyframes → Stream-Copy
+                print("⚠️ Keine Keyframes → Stream-Copy")
+                return self._trim_stream_copy(
+                    video_path, start_sec, duration_sec, output_path, progress_callback
+                )
 
-            elif plan.strategy == 'smart_cut_3seg':
-                # 3-Segment-Verarbeitung
-                base, _ = os.path.splitext(output_path)
-                seg_paths = [f"{base}.__seg{i}__{ext}" for i in range(1, 4)]
-                concat_list = f"{base}.__concat__.txt"
+            else:
+                # Fall C: Smart-Cut
+                kf_before_start = self.get_keyframe_before(video_path, start_sec)
+                kf_after_start = self.get_keyframe_after(video_path, start_sec)
+                kf_before_end = self.get_keyframe_before(video_path, end_sec)
 
-                try:
-                    # Segment 1
-                    if progress_callback:
-                        progress_callback(20, "Encode Segment 1/3...")
-                    cmd1 = self.build_ffmpeg_cmd(video_path, seg_paths[0], plan.segments[0], video_info)
-                    if not self._run_ffmpeg(cmd1, plan.segments[0]['duration'], 20, 40, progress_callback):
-                        return False
+                print(f"⚡ Smart-Cut → Minimal re-encode")
+                print(f"   Start: {start_sec:.3f}s (KF vor: {kf_before_start:.3f}s, nach: {kf_after_start:.3f}s)")
+                print(f"   Ende: {end_sec:.3f}s (KF vor: {kf_before_end:.3f}s)")
 
-                    # Segment 2
-                    if progress_callback:
-                        progress_callback(40, "Copy Segment 2/3...")
-                    cmd2 = self.build_ffmpeg_cmd(video_path, seg_paths[1], plan.segments[1], video_info)
-                    if not self._run_ffmpeg(cmd2, plan.segments[1]['duration'], 40, 70, progress_callback):
-                        return False
-
-                    # Segment 3
-                    if progress_callback:
-                        progress_callback(70, "Encode Segment 3/3...")
-                    cmd3 = self.build_ffmpeg_cmd(video_path, seg_paths[2], plan.segments[2], video_info)
-                    if not self._run_ffmpeg(cmd3, plan.segments[2]['duration'], 70, 90, progress_callback):
-                        return False
-
-                    # Concatenate
-                    if progress_callback:
-                        progress_callback(90, "Füge Segmente zusammen...")
-
-                    with open(concat_list, 'w', encoding='utf-8') as f:
-                        for seg_path in seg_paths:
-                            f.write(f"file '{seg_path.replace(chr(92), '/')}'\n")
-
-                    cmd_concat = [
-                        "ffmpeg", "-y",
-                        "-f", "concat", "-safe", "0",
-                        "-i", concat_list,
-                        "-c", "copy",
-                        output_path
-                    ]
-
-                    result = subprocess.run(
-                        cmd_concat, capture_output=True, text=True,
-                        creationflags=SUBPROCESS_CREATE_NO_WINDOW
+                # Prüfe ob genug Platz für Smart-Cut (Mittelteil >= 1s)
+                if not start_on_kf and not end_on_kf and (kf_after_start < kf_before_end - 1.0):
+                    return self._trim_smart_cut(
+                        video_path, start_sec, end_sec,
+                        kf_after_start, kf_before_end,
+                        output_path, video_info, progress_callback
                     )
-
-                    if result.returncode != 0:
-                        raise subprocess.CalledProcessError(
-                            result.returncode, cmd_concat, result.stdout, result.stderr
-                        )
-
-                    if progress_callback:
-                        progress_callback(100, "Fertig!")
-                    return True
-
-                finally:
-                    # Cleanup
-                    for path in seg_paths + [concat_list]:
-                        if os.path.exists(path):
-                            try:
-                                os.remove(path)
-                            except:
-                                pass
-
-            else:  # re_encode
-                if progress_callback:
-                    progress_callback(20, "Encode Video...")
-
-                segment = plan.segments[0]
-                cmd = self.build_ffmpeg_cmd(video_path, output_path, segment, video_info)
-
-                success = self._run_ffmpeg(cmd, segment['duration'], 20, 100, progress_callback)
-                return success
+                else:
+                    # Zu kurz oder auf Rand → Stream-Copy
+                    print("⚠️ Segment zu kurz für Smart-Cut → Stream-Copy")
+                    return self._trim_stream_copy(
+                        video_path, start_sec, duration_sec, output_path, progress_callback
+                    )
 
         except Exception as e:
             print(f"Fehler beim Trim: {e}")
@@ -558,11 +468,118 @@ class VideoCutterService:
                 progress_callback(0, f"Fehler: {str(e)}")
             return False
 
+    def _trim_stream_copy(self, video_path: str, start_sec: float, duration_sec: float,
+                         output_path: str, progress_callback: Optional[Callable]) -> bool:
+        """Stream-Copy Trim (schnell, lossless)"""
+        if progress_callback:
+            progress_callback(20, "Schneide (Stream-Copy)...")
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(start_sec),
+            "-i", video_path,
+            "-t", str(duration_sec),
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-map", "0:v:0?", "-map", "0:a:0?",
+            output_path
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+        if result.returncode != 0:
+            print(f"Fehler: {result.stderr[:500]}")
+            return False
+
+        if progress_callback:
+            progress_callback(100, "Fertig!")
+
+        print("✅ Stream-Copy Trim erfolgreich")
+        return True
+
+    def _trim_smart_cut(self, video_path: str, start_sec: float, end_sec: float,
+                       kf_after_start: float, kf_before_end: float,
+                       output_path: str, video_info: VideoInfo,
+                       progress_callback: Optional[Callable]) -> bool:
+        """Smart-Cut Trim (minimal re-encode)"""
+        base, ext = os.path.splitext(output_path)
+
+        seg1_path = f"{base}.__seg1__{ext}"
+        seg2_path = f"{base}.__seg2__{ext}"
+        seg3_path = f"{base}.__seg3__{ext}"
+        concat_list = f"{base}.__concat__.txt"
+
+        try:
+            # Segment 1: Re-encode von Start bis nächstem Keyframe
+            if progress_callback:
+                progress_callback(20, "Seg1: Re-encode...")
+
+            seg = {'type': 'encode', 'start': start_sec,
+                  'duration': kf_after_start - start_sec, 'force_keyframe': True}
+            cmd = self.build_ffmpeg_cmd(video_path, seg1_path, seg, video_info)
+            subprocess.run(cmd, check=True, capture_output=True, text=True,
+                         creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+            # Segment 2: Stream-Copy Mittelteil
+            if progress_callback:
+                progress_callback(50, "Seg2: Copy...")
+
+            cmd = ["ffmpeg", "-y",
+                  "-ss", str(kf_after_start), "-i", video_path,
+                  "-t", str(kf_before_end - kf_after_start),
+                  "-c", "copy",
+                  "-avoid_negative_ts", "make_zero",
+                  "-map", "0:v:0?", "-map", "0:a:0?",
+                  seg2_path]
+            subprocess.run(cmd, check=True, capture_output=True, text=True,
+                         creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+            # Segment 3: Re-encode von letztem Keyframe bis Ende
+            if progress_callback:
+                progress_callback(70, "Seg3: Re-encode...")
+
+            seg = {'type': 'encode', 'start': kf_before_end,
+                  'duration': end_sec - kf_before_end, 'force_keyframe': False}
+            cmd = self.build_ffmpeg_cmd(video_path, seg3_path, seg, video_info)
+            subprocess.run(cmd, check=True, capture_output=True, text=True,
+                         creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+            # Concat
+            if progress_callback:
+                progress_callback(90, "Füge Segmente zusammen...")
+
+            with open(concat_list, 'w', encoding='utf-8') as f:
+                f.write(f"file '{seg1_path.replace(chr(92), '/')}'\n")
+                f.write(f"file '{seg2_path.replace(chr(92), '/')}'\n")
+                f.write(f"file '{seg3_path.replace(chr(92), '/')}'\n")
+
+            cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                  "-i", concat_list, "-c", "copy", output_path]
+            subprocess.run(cmd, check=True, capture_output=True, text=True,
+                         creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+            if progress_callback:
+                progress_callback(100, "Smart-Cut fertig!")
+
+            print("✅ Smart-Cut Trim erfolgreich")
+            return True
+
+        finally:
+            for path in [seg1_path, seg2_path, seg3_path, concat_list]:
+                if os.path.exists(path):
+                    try: os.remove(path)
+                    except: pass
+
     def _run_ffmpeg(self, cmd: List[str], duration_sec: float,
                    start_percent: int, end_percent: int,
-                   progress_callback: Optional[Callable]) -> bool:
+                   progress_callback: Optional[Callable],
+                   video_info: VideoInfo = None,
+                   segment: dict = None,
+                   input_path: str = None,
+                   output_path: str = None) -> bool:
         """
-        Führt ffmpeg-Befehl aus mit Progress-Tracking.
+        Führt ffmpeg-Befehl aus mit automatischem Software-Fallback.
 
         Args:
             cmd: ffmpeg-Kommando
@@ -570,14 +587,16 @@ class VideoCutterService:
             start_percent: Start-Prozent für Progress
             end_percent: End-Prozent für Progress
             progress_callback: Callback(percent, status)
+            video_info: Video-Metadaten für Fallback
+            segment: Segment-Spec für Fallback
+            input_path: Input-Pfad für Fallback
+            output_path: Output-Pfad für Fallback
 
         Returns:
             True bei Erfolg, False bei Fehler
         """
         print(f"FFmpeg: {' '.join(cmd[:15])}...")
 
-        # Einfache Variante: blockierend (für erste Iteration)
-        # TODO: Umstellen auf Popen mit Progress-Parsing
         result = subprocess.run(
             cmd, capture_output=True, text=True,
             creationflags=SUBPROCESS_CREATE_NO_WINDOW
@@ -587,6 +606,59 @@ class VideoCutterService:
             if progress_callback:
                 progress_callback(end_percent, "Segment fertig")
             return True
+
+        # Fehler - prüfe ob Hardware-Problem
+        stderr_lower = result.stderr.lower()
+        hw_errors = [
+            'incompatible pixel format',
+            'impossible to convert',
+            'could not open encoder',
+            'hwaccel',
+            'qsv',
+            'nvenc',
+            'amf',
+            'videotoolbox',
+            'no device',
+            'failed to',
+            'cannot load',
+            'unsupported'
+        ]
+
+        is_hw_error = any(err in stderr_lower for err in hw_errors)
+
+        if is_hw_error and video_info and segment and input_path and output_path:
+            print(f"⚠️ Hardware-Fehler erkannt, versuche Software-Fallback...")
+            print(f"   Fehler: {result.stderr[:300]}")
+
+            # Cleanup fehlgeschlagener Output
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except:
+                    pass
+
+            # Baue Software-Command
+            cmd_sw = self.build_ffmpeg_cmd(input_path, output_path, segment,
+                                          video_info, use_sw_fallback=True)
+
+            print(f"Software-Fallback: {' '.join(cmd_sw[:15])}...")
+
+            if progress_callback:
+                progress_callback(start_percent, "Hardware-Fehler, nutze Software...")
+
+            result_sw = subprocess.run(
+                cmd_sw, capture_output=True, text=True,
+                creationflags=SUBPROCESS_CREATE_NO_WINDOW
+            )
+
+            if result_sw.returncode == 0:
+                print("✅ Software-Fallback erfolgreich")
+                if progress_callback:
+                    progress_callback(end_percent, "Segment fertig (Software)")
+                return True
+            else:
+                print(f"❌ Software-Fallback fehlgeschlagen: {result_sw.stderr[:500]}")
+                return False
         else:
             print(f"FFmpeg Fehler: {result.stderr[:500]}")
             return False

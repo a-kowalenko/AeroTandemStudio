@@ -27,6 +27,7 @@ from .circular_spinner import CircularSpinner
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.hardware_acceleration import HardwareAccelerationDetector
 from src.utils.config import ConfigManager
+from src.video.cutter_service import VideoCutterService
 
 
 class VideoCutterDialog(tk.Toplevel):
@@ -64,6 +65,9 @@ class VideoCutterDialog(tk.Toplevel):
         self.hw_detector = HardwareAccelerationDetector()
         self.hw_info = self.hw_detector.detect_hardware() if self.config.get('hardware_acceleration_enabled', True) else None
 
+        # NEU: Service-Layer für Video-Verarbeitung
+        self.cutter_service = VideoCutterService()
+
         self.title("Video schneiden")
         self.geometry("800x600")
 
@@ -84,6 +88,9 @@ class VideoCutterDialog(tk.Toplevel):
         self.is_dragging_playhead = False
         self._updater_job = None
         self._seek_debounce_timer = None  # NEU: Timer für Debouncing beim Seek
+
+        # NEU: VLC-Event-Callbacks speichern für sauberes Detach
+        self._vlc_callbacks = {}
 
         # --- UI-Referenzen ---
         self.video_frame = None
@@ -152,10 +159,18 @@ class VideoCutterDialog(tk.Toplevel):
     def _load_video_info_and_start(self):
         """Holt synchron Metadaten und startet dann das asynchrone Laden."""
         try:
-            info = self._get_video_info(self.video_path)
-            self.total_duration_ms = info["duration_ms"]
-            self.fps = info["fps"]
+            # NEU: Verwende Service für Video-Info
+            video_info = self.cutter_service.get_video_info(self.video_path)
+            self.total_duration_ms = video_info.duration_ms
+            self.fps = video_info.fps
             print(f"Cutter: Video geladen. Dauer: {self.total_duration_ms}ms, FPS: {self.fps}")
+
+            # NEU: Keyframes im Hintergrund laden
+            threading.Thread(
+                target=self.cutter_service.get_keyframes,
+                args=(self.video_path,),
+                daemon=True
+            ).start()
         except Exception as e:
             self._handle_error(f"Fehler beim Laden der Video-Metadaten: {e}")
             self.after(100, self._on_cancel)  # Dialog schließen, wenn Video nicht geladen werden kann
@@ -187,14 +202,20 @@ class VideoCutterDialog(tk.Toplevel):
         media = self.vlc_instance.media_new(self.video_path)
         self.media_player.set_media(media)
 
-        # Events binden
+        # Events binden (mit gespeicherten Callbacks für sauberes Detach)
         events = self.media_player.event_manager()
-        events.event_attach(vlc.EventType.MediaPlayerEndReached, self._on_end_reached)
-        events.event_attach(vlc.EventType.MediaPlayerTimeChanged, self._on_time_changed)
-        # Player Status Events für Button-Updates
-        events.event_attach(vlc.EventType.MediaPlayerPlaying, lambda e: self.play_pause_btn.config(text="⏸"))
-        events.event_attach(vlc.EventType.MediaPlayerPaused, lambda e: self.play_pause_btn.config(text="▶"))
-        events.event_attach(vlc.EventType.MediaPlayerStopped, lambda e: self.play_pause_btn.config(text="▶"))
+
+        self._vlc_callbacks['end_reached'] = self._on_end_reached
+        self._vlc_callbacks['time_changed'] = self._on_time_changed
+        self._vlc_callbacks['playing'] = lambda e: self.play_pause_btn.config(text="⏸")
+        self._vlc_callbacks['paused'] = lambda e: self.play_pause_btn.config(text="▶")
+        self._vlc_callbacks['stopped'] = lambda e: self.play_pause_btn.config(text="▶")
+
+        events.event_attach(vlc.EventType.MediaPlayerEndReached, self._vlc_callbacks['end_reached'])
+        events.event_attach(vlc.EventType.MediaPlayerTimeChanged, self._vlc_callbacks['time_changed'])
+        events.event_attach(vlc.EventType.MediaPlayerPlaying, self._vlc_callbacks['playing'])
+        events.event_attach(vlc.EventType.MediaPlayerPaused, self._vlc_callbacks['paused'])
+        events.event_attach(vlc.EventType.MediaPlayerStopped, self._vlc_callbacks['stopped'])
 
         # UI initialisieren
         self._on_time_changed(None)  # Zeit-Label initial setzen
@@ -205,139 +226,8 @@ class VideoCutterDialog(tk.Toplevel):
         self.after(100, self.media_player.pause)  # Aber sofort pausieren
         self.play_pause_btn.config(text="▶")
 
-    def _get_video_info(self, video_path: str) -> Dict:
-        """Liest Dauer und FPS eines Videos mit ffprobe aus."""
-        cmd = [
-            "ffprobe", "-v", "quiet", "-print_format", "json",
-            "-show_streams", "-show_format", video_path
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True,
-                                creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-        data = json.loads(result.stdout)
-        streams = data.get("streams", [])
-        format_info = data.get("format", {})
-
-        video_stream = next((s for s in streams if s['codec_type'] == 'video'), None)
-        audio_stream = next((s for s in streams if s['codec_type'] == 'audio'), None)
-
-        if not video_stream:
-            raise ValueError("Kein Video-Stream gefunden.")
-
-        # Dauer
-        duration_s_str = video_stream.get('duration') or format_info.get('duration', '0')
-        duration_ms = int(float(duration_s_str) * 1000)
-
-        # FPS
-        r_frame_rate = video_stream.get('r_frame_rate', '30/1')
-        try:
-            num, den = map(int, r_frame_rate.split('/'))
-            fps = num / den if den != 0 else 30.0
-        except:
-            fps = 30.0
-
-        # NEU: Detaillierte Video-Parameter erfassen
-        video_info = {
-            "duration_ms": duration_ms,
-            "fps": fps,
-            "width": video_stream.get('width', 1920),
-            "height": video_stream.get('height', 1080),
-            "vcodec": video_stream.get('codec_name', 'h264'),
-            "pix_fmt": video_stream.get('pix_fmt', 'yuv420p'),
-            "video_bitrate": video_stream.get('bit_rate'),
-        }
-
-        # Audio-Parameter (falls vorhanden)
-        if audio_stream:
-            video_info.update({
-                "acodec": audio_stream.get('codec_name', 'aac'),
-                "audio_bitrate": audio_stream.get('bit_rate'),
-                "sample_rate": audio_stream.get('sample_rate', '48000'),
-                "channels": audio_stream.get('channels', 2),
-            })
-        else:
-            video_info.update({
-                "acodec": None,
-                "audio_bitrate": None,
-                "sample_rate": None,
-                "channels": None,
-            })
-
-        return video_info
-
-    def _find_keyframe_before(self, video_path: str, target_sec: float) -> float:
-        """
-        Findet den Keyframe VOR der angegebenen Zeit.
-        Gibt die Zeit des Keyframes in Sekunden zurück.
-        """
-        cmd = [
-            "ffprobe",
-            "-v", "quiet",
-            "-select_streams", "v:0",
-            "-show_entries", "frame=key_frame,pts_time",
-            "-of", "json",
-            "-read_intervals", f"%+#{int(target_sec * self.fps + 50)}",  # Etwas mehr Frames lesen
-            video_path
-        ]
-
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True,
-                                  creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-            data = json.loads(result.stdout)
-            frames = data.get("frames", [])
-
-            # Finde den letzten Keyframe vor target_sec
-            keyframe_time = 0.0
-            for frame in frames:
-                if frame.get("key_frame") == 1:
-                    pts_time = float(frame.get("pts_time", 0))
-                    if pts_time <= target_sec:
-                        keyframe_time = pts_time
-                    else:
-                        break  # Wir sind über target_sec hinaus
-
-            print(f"Keyframe vor {target_sec}s gefunden bei: {keyframe_time}s")
-            return keyframe_time
-
-        except Exception as e:
-            print(f"Fehler beim Finden des Keyframes: {e}, verwende target_sec")
-            return target_sec
-
-    def _find_keyframe_after(self, video_path: str, target_sec: float) -> float:
-        """
-        Findet den Keyframe NACH der angegebenen Zeit.
-        Gibt die Zeit des Keyframes in Sekunden zurück.
-        """
-        cmd = [
-            "ffprobe",
-            "-v", "quiet",
-            "-select_streams", "v:0",
-            "-show_entries", "frame=key_frame,pts_time",
-            "-of", "json",
-            "-read_intervals", f"{target_sec}%+#{int(self.fps * 5)}",  # 5 Sekunden voraus suchen
-            video_path
-        ]
-
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True,
-                                  creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-            data = json.loads(result.stdout)
-            frames = data.get("frames", [])
-
-            # Finde den ersten Keyframe nach target_sec
-            for frame in frames:
-                if frame.get("key_frame") == 1:
-                    pts_time = float(frame.get("pts_time", 0))
-                    if pts_time >= target_sec:
-                        print(f"Keyframe nach {target_sec}s gefunden bei: {pts_time}s")
-                        return pts_time
-
-            # Falls kein Keyframe gefunden, verwende target_sec
-            print(f"Kein Keyframe nach {target_sec}s gefunden, verwende target_sec")
-            return target_sec
-
-        except Exception as e:
-            print(f"Fehler beim Finden des Keyframes: {e}, verwende target_sec")
-            return target_sec
+    # _get_video_info, _find_keyframe_before, _find_keyframe_after ENTFERNT
+    # --> Ersetzt durch VideoCutterService
 
     def _build_encode_cmd(self, input_path: str, video_info: dict, output_path: str,
                          ss: float, duration: float, force_keyframe_at_start: bool = True,
@@ -447,8 +337,9 @@ class VideoCutterDialog(tk.Toplevel):
             cmd.extend(["-r", str(video_info['fps'])])
 
         # Keyframe am Anfang erzwingen (wichtig für Concatenation)
+        # KORRIGIERT: Nur erster Frame als Keyframe, nicht alle Frames
         if force_keyframe_at_start:
-            cmd.extend(["-force_key_frames", "expr:gte(t,0)"])
+            cmd.extend(["-force_key_frames", "0"])
 
         # Audio-Codec
         if video_info.get('acodec'):
@@ -1026,170 +917,50 @@ class VideoCutterDialog(tk.Toplevel):
     def _run_cut_task(self, start_ms: int, end_ms: int):
         """
         [THREAD] Führt präzisen Cut aus mit Smart-Cut-Technologie.
-
-        Smart-Cut bedeutet:
-        - Wenn Cut-Punkte auf Keyframes liegen: Stream-Copy (verlustfrei, schnell)
-        - Wenn Cut-Punkte zwischen Keyframes liegen: Re-encode nur die Übergänge
-        - Mittelteil wird mit Stream-Copy übernommen (verlustfrei)
-
-        Das getrimmt Video ersetzt das Input-Video.
+        Nutzt VideoCutterService für saubere Trennung von UI und Logik.
         """
-        temp_output_path = f"{self.video_path}.__temp_cut__.mp4"
-        try:
-            input_path = self.video_path
+        # KORRIGIERT: Extension vom Input übernehmen statt hart .mp4
+        base, ext = os.path.splitext(self.video_path)
+        temp_output_path = f"{base}.__temp_cut__{ext}"
 
+        try:
             start_sec = start_ms / 1000.0
             end_sec = end_ms / 1000.0
-            duration_sec = end_sec - start_sec
 
-            # Video-Info abrufen
-            video_info = self._get_video_info(input_path)
+            # Progress-Callback für UI-Updates
+            def progress_callback(percent, status_text):
+                self.after(0, lambda: self.status_label.config(text=status_text))
 
-            print(f"\n=== SMART CUT START ===")
-            print(f"Gewünschter Bereich: {start_sec:.3f}s - {end_sec:.3f}s (Dauer: {duration_sec:.3f}s)")
+            # Service aufrufen
+            success = self.cutter_service.execute_trim(
+                self.video_path,
+                start_sec,
+                end_sec,
+                temp_output_path,
+                progress_callback
+            )
 
-            # Finde Keyframes um Start und Ende
-            self.after(0, lambda: self.status_label.config(text="Analysiere Keyframes..."))
-            keyframe_before_start = self._find_keyframe_before(input_path, start_sec)
-            keyframe_after_start = self._find_keyframe_after(input_path, start_sec)
-            keyframe_before_end = self._find_keyframe_before(input_path, end_sec)
-            keyframe_after_end = self._find_keyframe_after(input_path, end_sec)
+            if not success:
+                raise Exception("Trim-Operation fehlgeschlagen")
 
-            print(f"Start: {start_sec:.3f}s (Keyframe davor: {keyframe_before_start:.3f}s, danach: {keyframe_after_start:.3f}s)")
-            print(f"Ende:  {end_sec:.3f}s (Keyframe davor: {keyframe_before_end:.3f}s, danach: {keyframe_after_end:.3f}s)")
-
-            # Prüfe ob Start/Ende auf Keyframes liegen (±33ms Toleranz = ~1 Frame bei 30fps)
-            start_on_keyframe = abs(start_sec - keyframe_before_start) < 0.033 or abs(start_sec - keyframe_after_start) < 0.033
-            end_on_keyframe = abs(end_sec - keyframe_before_end) < 0.033 or abs(end_sec - keyframe_after_end) < 0.033
-
-            if start_on_keyframe and end_on_keyframe:
-                # === FALL 1: Beide Punkte auf Keyframes - Perfekt! Stream-Copy ===
-                print("✅ Start und Ende auf Keyframes - nutze reinen Stream-Copy (perfekt)")
-                self.after(0, lambda: self.status_label.config(text="Schneide Video (Stream-Copy)..."))
-
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-ss", str(start_sec),
-                    "-i", input_path,
-                    "-t", str(duration_sec),
-                    "-c", "copy",
-                    "-avoid_negative_ts", "make_zero",
-                    "-map", "0:v:0?", "-map", "0:a:0?",
-                    temp_output_path
-                ]
-
-                print(f"FFmpeg: {' '.join(cmd)}")
-                result = subprocess.run(cmd, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                if result.returncode != 0:
-                    raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
-
-            elif not start_on_keyframe and not end_on_keyframe and (keyframe_after_start < keyframe_before_end - 1.0):
-                # === FALL 2: Beide Punkte zwischen Keyframes - Smart-Cut (3 Segmente) ===
-                print("⚠️ Start und Ende zwischen Keyframes - nutze Smart-Cut (re-encode nur Übergänge)")
-                self.after(0, lambda: self.status_label.config(text="Schneide Video (Smart-Cut)..."))
-
-                # Segment 1: Re-encode von Start bis nächstem Keyframe
-                seg1_path = f"{input_path}.__seg1__.mp4"
-                seg2_path = f"{input_path}.__seg2__.mp4"
-                seg3_path = f"{input_path}.__seg3__.mp4"
-                concat_list = f"{input_path}.__concat__.txt"
-
-                try:
-                    # Segment 1: Re-encode Start bis erster Keyframe danach
-                    seg1_duration = keyframe_after_start - start_sec
-                    print(f"Segment 1 (re-encode): {start_sec:.3f}s - {keyframe_after_start:.3f}s ({seg1_duration:.3f}s)")
-                    self._encode_segment_robust(input_path, video_info, seg1_path,
-                                               ss=start_sec, duration=seg1_duration,
-                                               force_keyframe_at_start=True,
-                                               segment_name="Segment 1")
-
-                    # Segment 2: Stream-Copy vom ersten Keyframe nach Start bis letzten Keyframe vor Ende
-                    seg2_duration = keyframe_before_end - keyframe_after_start
-                    print(f"Segment 2 (stream-copy): {keyframe_after_start:.3f}s - {keyframe_before_end:.3f}s ({seg2_duration:.3f}s)")
-                    cmd2 = [
-                        "ffmpeg", "-y",
-                        "-ss", str(keyframe_after_start),
-                        "-i", input_path,
-                        "-t", str(seg2_duration),
-                        "-c", "copy",
-                        "-avoid_negative_ts", "make_zero",
-                        "-map", "0:v:0?", "-map", "0:a:0?",
-                        seg2_path
-                    ]
-                    result = subprocess.run(cmd2, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                    if result.returncode != 0:
-                        raise subprocess.CalledProcessError(result.returncode, cmd2, result.stdout, result.stderr)
-
-                    # Segment 3: Re-encode vom letzten Keyframe vor Ende bis Ende
-                    seg3_duration = end_sec - keyframe_before_end
-                    print(f"Segment 3 (re-encode): {keyframe_before_end:.3f}s - {end_sec:.3f}s ({seg3_duration:.3f}s)")
-                    self._encode_segment_robust(input_path, video_info, seg3_path,
-                                               ss=keyframe_before_end, duration=seg3_duration,
-                                               force_keyframe_at_start=False,
-                                               segment_name="Segment 3")
-
-                    # Concatenate alle 3 Segmente
-                    with open(concat_list, 'w', encoding='utf-8') as f:
-                        f.write(f"file '{seg1_path.replace(chr(92), '/')}'\n")
-                        f.write(f"file '{seg2_path.replace(chr(92), '/')}'\n")
-                        f.write(f"file '{seg3_path.replace(chr(92), '/')}'\n")
-
-                    cmd_concat = [
-                        "ffmpeg", "-y",
-                        "-f", "concat", "-safe", "0",
-                        "-i", concat_list,
-                        "-c", "copy",
-                        temp_output_path
-                    ]
-                    result = subprocess.run(cmd_concat, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                    if result.returncode != 0:
-                        raise subprocess.CalledProcessError(result.returncode, cmd_concat, result.stdout, result.stderr)
-
-                finally:
-                    # Cleanup
-                    for f in [seg1_path, seg2_path, seg3_path, concat_list]:
-                        if os.path.exists(f):
-                            try: os.remove(f)
-                            except: pass
-
-            else:
-                # === FALL 3: Gemischt oder kurzes Video - Re-encode das ganze Segment ===
-                print("⚠️ Kurzes Segment oder gemischte Keyframe-Situation - re-encode gesamtes Segment")
-                self.after(0, lambda: self.status_label.config(text="Schneide Video (Re-encode)..."))
-
-                self._encode_segment_robust(input_path, video_info, temp_output_path,
-                                           ss=start_sec, duration=duration_sec,
-                                           force_keyframe_at_start=True,
-                                           segment_name="Gesamt-Segment")
-
-            # Original überschreiben
+            # Original überschreiben (atomarer mit os.replace statt copy2+remove)
             self.after(0, lambda: self.status_label.config(text="Überschreibe Original..."))
-            try:
-                time.sleep(0.2)
-                shutil.copy2(temp_output_path, input_path)
-                time.sleep(0.1)
-                os.remove(temp_output_path)
-                print("\n=== SMART CUT ERFOLGREICH ===")
-                print(f"✅ Video erfolgreich getrimmt und gespeichert: {input_path}")
-                if start_on_keyframe and end_on_keyframe:
-                    print("   Methode: Stream-Copy (100% verlustfrei)")
-                elif not start_on_keyframe and not end_on_keyframe:
-                    print("   Methode: Smart-Cut (nur Übergänge re-encoded)")
-                else:
-                    print("   Methode: Re-encode (hochqualitativ)")
-                print()
-            except Exception as e:
-                raise Exception(f"Fehler beim Überschreiben der Original-Kopie nach Schnitt: {e}")
+            time.sleep(0.2)
+
+            # Atomare Ersetzung (robuster als copy+remove)
+            if os.path.exists(temp_output_path):
+                os.replace(temp_output_path, self.video_path)
+                print(f"✅ Video erfolgreich getrimmt: {self.video_path}")
+            else:
+                raise Exception("Temporäre Ausgabe nicht gefunden")
 
             # Callback im Haupt-Thread auslösen
             self.after(0, self._handle_processing_complete, {"action": "cut"})
 
-        except subprocess.CalledProcessError as e:
-            self._handle_error_in_thread(f"FFmpeg (Smart Cut) fehlgeschlagen (Code {e.returncode}):\n{e.stderr}")
         except Exception as e:
             self._handle_error_in_thread(f"Fehler beim Smart Cut: {e}")
         finally:
-            # Sicherstellen, dass temporäre Datei gelöscht wird
+            # Cleanup temp file
             if os.path.exists(temp_output_path):
                 try:
                     os.remove(temp_output_path)
@@ -1198,232 +969,65 @@ class VideoCutterDialog(tk.Toplevel):
 
     def _run_split_task(self, split_time_ms: int):
         """
-        [THREAD] Führt präzisen Split aus mit Smart-Cut (re-encodiert nur an Split-Punkt).
-        Teil 1 überschreibt das Original, Teil 2 erhält das Suffix _2.
-        Verhindert Freeze-Frames durch gezieltes Re-Encoding an den Übergängen.
+        [THREAD] Führt präzisen Split aus.
+        Nutzt VideoCutterService für saubere Trennung von UI und Logik.
         """
-        temp_part1_path = None
-        part2_path = None
-        try:
-            input_path = self.video_path
-            base, ext = os.path.splitext(input_path)
-            temp_part1_path = f"{base}.__temp_part1__{ext}"
-            part2_path = f"{base}_2{ext}"  # GEÄNDERT: Suffix _2 statt __part2__
+        base, ext = os.path.splitext(self.video_path)
+        temp_part1_path = f"{base}.__temp_part1__{ext}"
+        part2_path = f"{base}_2{ext}"
 
+        try:
             split_sec = split_time_ms / 1000.0
 
-            # Video-Info für Re-Encoding
-            video_info = self._get_video_info(input_path)
+            # Progress-Callback für UI-Updates
+            def progress_callback(percent, status_text):
+                self.after(0, lambda: self.status_label.config(text=status_text))
 
-            print(f"\n=== SMART SPLIT START (Anti-Freeze) ===")
-            print(f"Split-Position: {split_sec:.3f}s")
+            # Service aufrufen
+            success = self.cutter_service.execute_split(
+                self.video_path,
+                split_sec,
+                temp_part1_path,
+                part2_path,
+                progress_callback
+            )
 
-            # Finde Keyframes um Split-Position
-            self.after(0, lambda: self.status_label.config(text="Analysiere Keyframes..."))
-            keyframe_before = self._find_keyframe_before(input_path, split_sec)
-            keyframe_after = self._find_keyframe_after(input_path, split_sec)
+            if not success:
+                raise Exception("Split-Operation fehlgeschlagen")
 
-            print(f"Keyframe vor Split: {keyframe_before:.3f}s")
-            print(f"Keyframe nach Split: {keyframe_after:.3f}s")
-
-            # Prüfe ob Split auf Keyframe liegt
-            split_on_keyframe = abs(split_sec - keyframe_before) < 0.01 or abs(split_sec - keyframe_after) < 0.01
-
-            if split_on_keyframe:
-                print("✅ Split liegt auf Keyframe - nutze Stream-Copy (perfekt)")
-                # --- TEIL 1: Stream-Copy bis Split ---
-                self.after(0, lambda: self.status_label.config(text="Erstelle Teil 1 (Stream-Copy)..."))
-                cmd1 = [
-                    "ffmpeg", "-y",
-                    "-i", input_path,
-                    "-t", str(split_sec),
-                    "-c", "copy",
-                    "-avoid_negative_ts", "make_zero",
-                    "-map", "0:v:0?", "-map", "0:a:0?",
-                    temp_part1_path
-                ]
-                print(f"FFmpeg Teil 1: {' '.join(cmd1)}")
-                result1 = subprocess.run(cmd1, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                if result1.returncode != 0:
-                    raise subprocess.CalledProcessError(result1.returncode, cmd1, result1.stdout, result1.stderr)
-
-                # --- TEIL 2: Stream-Copy ab Split ---
-                self.after(0, lambda: self.status_label.config(text="Erstelle Teil 2 (Stream-Copy)..."))
-                cmd2 = [
-                    "ffmpeg", "-y",
-                    "-i", input_path,
-                    "-ss", str(split_sec),
-                    "-c", "copy",
-                    "-avoid_negative_ts", "make_zero",
-                    "-map", "0:v:0?", "-map", "0:a:0?",
-                    part2_path
-                ]
-                print(f"FFmpeg Teil 2: {' '.join(cmd2)}")
-                result2 = subprocess.run(cmd2, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                if result2.returncode != 0:
-                    raise subprocess.CalledProcessError(result2.returncode, cmd2, result2.stdout, result2.stderr)
-            else:
-                print("⚠️ Split liegt NICHT auf Keyframe - nutze Smart-Cut (re-encode an Übergängen)")
-
-                # --- TEIL 1: Smart-Cut (Stream-Copy + Re-encode Ende) ---
-                self.after(0, lambda: self.status_label.config(text="Erstelle Teil 1 (Smart-Cut)..."))
-
-                if keyframe_before < split_sec - 0.1:  # Mehr als 100ms vor Split
-                    # Teile in Segmente: Stream-Copy + Re-encode
-                    seg1_path = f"{input_path}.__part1_seg1__.mp4"
-                    seg2_path = f"{input_path}.__part1_seg2__.mp4"
-                    concat_list = f"{input_path}.__part1_concat__.txt"
-
-                    try:
-                        # Segment 1: Stream-Copy bis Keyframe vor Split
-                        cmd1a = [
-                            "ffmpeg", "-y",
-                            "-i", input_path,
-                            "-t", str(keyframe_before),
-                            "-c", "copy",
-                            "-avoid_negative_ts", "make_zero",
-                            "-map", "0:v:0?", "-map", "0:a:0?",
-                            seg1_path
-                        ]
-                        result = subprocess.run(cmd1a, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                        if result.returncode != 0:
-                            raise subprocess.CalledProcessError(result.returncode, cmd1a, result.stdout, result.stderr)
-
-                        # Segment 2: Re-encode von Keyframe vor Split bis Split
-                        seg2_duration = split_sec - keyframe_before
-                        self._encode_segment_robust(input_path, video_info, seg2_path,
-                                                   ss=keyframe_before, duration=seg2_duration,
-                                                   force_keyframe_at_start=False,
-                                                   segment_name="Teil1-Seg2")
-
-                        # Concat
-                        with open(concat_list, 'w', encoding='utf-8') as f:
-                            f.write(f"file '{seg1_path.replace(chr(92), '/')}'\n")
-                            f.write(f"file '{seg2_path.replace(chr(92), '/')}'\n")
-
-                        cmd1_concat = [
-                            "ffmpeg", "-y",
-                            "-f", "concat", "-safe", "0",
-                            "-i", concat_list,
-                            "-c", "copy",
-                            temp_part1_path
-                        ]
-                        result = subprocess.run(cmd1_concat, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                        if result.returncode != 0:
-                            raise subprocess.CalledProcessError(result.returncode, cmd1_concat, result.stdout, result.stderr)
-                    finally:
-                        for f in [seg1_path, seg2_path, concat_list]:
-                            if os.path.exists(f):
-                                try: os.remove(f)
-                                except: pass
-                else:
-                    # Zu nah am Anfang, re-encode das ganze Teil 1
-                    self._encode_segment_robust(input_path, video_info, temp_part1_path,
-                                               ss=0, duration=split_sec,
-                                               force_keyframe_at_start=True,
-                                               segment_name="Teil 1 (komplett)")
-
-                # --- TEIL 2: Smart-Cut (Re-encode Anfang + Stream-Copy Rest) ---
-                self.after(0, lambda: self.status_label.config(text="Erstelle Teil 2 (Smart-Cut)..."))
-
-                if keyframe_after > split_sec + 0.1:  # Mehr als 100ms nach Split
-                    # Teile in Segmente: Re-encode + Stream-Copy
-                    seg1_path = f"{input_path}.__part2_seg1__.mp4"
-                    seg2_path = f"{input_path}.__part2_seg2__.mp4"
-                    concat_list = f"{input_path}.__part2_concat__.txt"
-
-                    try:
-                        # Segment 1: Re-encode von Split bis Keyframe nach Split
-                        seg1_duration = keyframe_after - split_sec
-                        self._encode_segment_robust(input_path, video_info, seg1_path,
-                                                   ss=split_sec, duration=seg1_duration,
-                                                   force_keyframe_at_start=True,
-                                                   segment_name="Teil2-Seg1")
-
-                        # Segment 2: Stream-Copy ab Keyframe nach Split
-                        cmd2b = [
-                            "ffmpeg", "-y",
-                            "-i", input_path,
-                            "-ss", str(keyframe_after),
-                            "-c", "copy",
-                            "-avoid_negative_ts", "make_zero",
-                            "-map", "0:v:0?", "-map", "0:a:0?",
-                            seg2_path
-                        ]
-                        result = subprocess.run(cmd2b, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                        if result.returncode != 0:
-                            raise subprocess.CalledProcessError(result.returncode, cmd2b, result.stdout, result.stderr)
-
-                        # Concat
-                        with open(concat_list, 'w', encoding='utf-8') as f:
-                            f.write(f"file '{seg1_path.replace(chr(92), '/')}'\n")
-                            f.write(f"file '{seg2_path.replace(chr(92), '/')}'\n")
-
-                        cmd2_concat = [
-                            "ffmpeg", "-y",
-                            "-f", "concat", "-safe", "0",
-                            "-i", concat_list,
-                            "-c", "copy",
-                            part2_path
-                        ]
-                        result = subprocess.run(cmd2_concat, capture_output=True, text=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                        if result.returncode != 0:
-                            raise subprocess.CalledProcessError(result.returncode, cmd2_concat, result.stdout, result.stderr)
-                    finally:
-                        for f in [seg1_path, seg2_path, concat_list]:
-                            if os.path.exists(f):
-                                try: os.remove(f)
-                                except: pass
-                else:
-                    # Rest des Videos ist klein, re-encode alles
-                    self._encode_segment_robust(input_path, video_info, part2_path,
-                                               ss=split_sec, duration=999999,
-                                               force_keyframe_at_start=True,
-                                               segment_name="Teil 2 (komplett)")
-
-            print("✅ Teil 1 erfolgreich")
-            print("✅ Teil 2 erfolgreich")
-
-            # Original mit Teil 1 überschreiben und dann zu _1 umbenennen
+            # Finalisierung: Teil 1 überschreibt Original, wird dann zu _1 umbenannt
             self.after(0, lambda: self.status_label.config(text="Finalisiere Split..."))
+            time.sleep(0.2)
 
-            # Definiere part1_path außerhalb des try-Blocks
-            base, ext = os.path.splitext(input_path)
+            # Definiere part1_path
             part1_path = f"{base}_1{ext}"
 
-            try:
-                time.sleep(0.2)
-                # Schritt 1: Original wird mit Teil 1 überschrieben
-                shutil.copy2(temp_part1_path, input_path)
-                time.sleep(0.1)
-                os.remove(temp_part1_path)
+            # Atomare Operationen
+            if os.path.exists(temp_part1_path):
+                # Original wird mit Teil 1 überschrieben
+                os.replace(temp_part1_path, self.video_path)
+                # Original-Video wird zu _1 umbenannt
+                os.replace(self.video_path, part1_path)
 
-                # Schritt 2: Original-Video wird zu _1 umbenannt
-                shutil.move(input_path, part1_path)
-
-                print("\n=== PRECISE SPLIT ERFOLGREICH ===")
+                print("\n=== SPLIT ERFOLGREICH ===")
                 print(f"Teil 1: {part1_path}")
-                print(f"Teil 2: {part2_path}")
-                print("⚠️ Hinweis: Split ist frame-genau mit Smart-Cut")
-                print("   Nur die Bereiche um den Split-Punkt wurden re-encoded\n")
-            except Exception as e:
-                raise Exception(f"Fehler beim Finalisieren des Splits: {e}")
+                print(f"Teil 2: {part2_path}\n")
+            else:
+                raise Exception("Temporäre Teil-1-Datei nicht gefunden")
 
             # Callback im Haupt-Thread auslösen
             result = {"action": "split", "part1_path": part1_path, "part2_path": part2_path}
             self.after(0, self._handle_processing_complete, result)
 
-        except subprocess.CalledProcessError as e:
-            self._handle_error_in_thread(f"FFmpeg (Precise Split) fehlgeschlagen (Code {e.returncode}):\n{e.stderr}")
         except Exception as e:
-            self._handle_error_in_thread(f"Fehler beim Precise Split: {e}")
+            self._handle_error_in_thread(f"Fehler beim Split: {e}")
         finally:
-            # Sicherstellen, dass temporäre Dateien gelöscht werden
+            # Cleanup temp file
             if temp_part1_path and os.path.exists(temp_part1_path):
                 try:
                     os.remove(temp_part1_path)
                 except Exception as del_e:
-                    print(f"Konnte temp. Teil 1 nicht löschen: {del_e}")
+                    print(f"Konnte temp. Split-Datei nicht löschen: {del_e}")
 
     # --- Thread-Kommunikation & Status ---
 
@@ -1517,13 +1121,19 @@ class VideoCutterDialog(tk.Toplevel):
         # VLC-Player cleanup
         if hasattr(self, 'media_player') and self.media_player:
             try:
-                # Events entfernen, um Fehler nach dem Schließen zu vermeiden
-                events = self.media_player.event_manager()
-                events.event_detach(vlc.EventType.MediaPlayerEndReached)
-                events.event_detach(vlc.EventType.MediaPlayerTimeChanged)
-                events.event_detach(vlc.EventType.MediaPlayerPlaying)
-                events.event_detach(vlc.EventType.MediaPlayerPaused)
-                events.event_detach(vlc.EventType.MediaPlayerStopped)
+                # Events entfernen - VLC event_detach nimmt nur EventType als Argument
+                if hasattr(self, '_vlc_callbacks') and self._vlc_callbacks:
+                    events = self.media_player.event_manager()
+                    if 'end_reached' in self._vlc_callbacks:
+                        events.event_detach(vlc.EventType.MediaPlayerEndReached)
+                    if 'time_changed' in self._vlc_callbacks:
+                        events.event_detach(vlc.EventType.MediaPlayerTimeChanged)
+                    if 'playing' in self._vlc_callbacks:
+                        events.event_detach(vlc.EventType.MediaPlayerPlaying)
+                    if 'paused' in self._vlc_callbacks:
+                        events.event_detach(vlc.EventType.MediaPlayerPaused)
+                    if 'stopped' in self._vlc_callbacks:
+                        events.event_detach(vlc.EventType.MediaPlayerStopped)
 
                 if self.media_player.is_playing():
                     self.media_player.stop()

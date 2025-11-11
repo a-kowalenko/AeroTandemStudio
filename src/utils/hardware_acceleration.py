@@ -21,6 +21,7 @@ class HardwareAccelerationDetector:
         self.hw_type = None
         self._cache_file = os.path.join(CONFIG_DIR, 'hw_cache.json')
         self._detection_timeout = 2.0  # Maximale Zeit für Hardware-Erkennung
+        self._cache_version = 2  # WICHTIG: Erhöhen wenn sich GOP-Parameter ändern!
 
     def detect_hardware(self):
         """
@@ -106,7 +107,15 @@ class HardwareAccelerationDetector:
                     return None
 
                 with open(self._cache_file, 'r') as f:
-                    return json.load(f)
+                    cached_data = json.load(f)
+
+                # Prüfe Cache-Version (wichtig für GOP-Parameter-Updates)
+                cached_version = cached_data.get('_cache_version', 1)
+                if cached_version < self._cache_version:
+                    print(f"🗑️ Hardware-Cache veraltet (v{cached_version} < v{self._cache_version}), wird neu erkannt")
+                    return None
+
+                return cached_data
         except Exception as e:
             print(f"⚠️ Fehler beim Laden des Hardware-Cache: {e}")
         return None
@@ -114,10 +123,15 @@ class HardwareAccelerationDetector:
     def _save_to_cache(self, result):
         """Speichert Hardware-Info in Cache-Datei"""
         try:
+            # Füge Cache-Version hinzu
+            result['_cache_version'] = self._cache_version
+
             os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
             with open(self._cache_file, 'w') as f:
                 json.dump(result, f, indent=2)
-            print(f"💾 Hardware-Info gecacht: {result.get('type', 'none')}")
+            print(f"💾 Hardware-Info gecacht: {result.get('type', 'none')} (v{self._cache_version})")
+        except Exception as e:
+            print(f"⚠️ Fehler beim Speichern des Hardware-Cache: {e}")
         except Exception as e:
             print(f"⚠️ Fehler beim Speichern des Hardware-Cache: {e}")
 
@@ -177,7 +191,7 @@ class HardwareAccelerationDetector:
                 'decoder': None,
                 'hwaccel': 'dxva2',
                 'device': None,
-                'extra_params': ['-usage', 'transcoding', '-quality', 'speed']
+                'extra_params': ['-usage', 'transcoding', '-quality', 'speed', '-g', '30']
             }
         return None
 
@@ -193,7 +207,13 @@ class HardwareAccelerationDetector:
                 'decoder_hevc': 'hevc_qsv',
                 'hwaccel': 'qsv',
                 'device': None,
-                'extra_params': ['-global_quality', '23', '-preset', 'medium']
+                'extra_params': [
+                    '-global_quality', '23',
+                    '-preset', 'medium',
+                    '-g', '30',  # GOP-Size für Keyframes
+                    '-look_ahead', '0',  # Deaktiviere Look-ahead für Stabilität
+                    '-bf', '0'  # Keine B-Frames für bessere Kompatibilität
+                ]
             }
         return None
 
@@ -283,7 +303,7 @@ class HardwareAccelerationDetector:
                 'decoder': None,
                 'hwaccel': 'videotoolbox',
                 'device': None,
-                'extra_params': ['-b:v', '0']  # VBR mode
+                'extra_params': ['-b:v', '0', '-g', '30']  # VBR mode + GOP
             }
 
         return {'available': False, 'type': None}
@@ -303,7 +323,7 @@ class HardwareAccelerationDetector:
                 'decoder_hevc': 'hevc_cuvid',
                 'hwaccel': 'cuda',
                 'device': None,
-                'extra_params': ['-preset', 'p4', '-tune', 'hq']
+                'extra_params': ['-preset', 'p4', '-tune', 'hq', '-g', '30']
             }
 
         # 2. Prüfe VAAPI (Intel/AMD unter Linux)
@@ -316,7 +336,7 @@ class HardwareAccelerationDetector:
                 'decoder': None,
                 'hwaccel': 'vaapi',
                 'device': '/dev/dri/renderD128',
-                'extra_params': []
+                'extra_params': ['-g', '30']
             }
 
         return {'available': False, 'type': None}

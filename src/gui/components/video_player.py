@@ -212,8 +212,20 @@ class VideoPlayer:
 
             self.time_label.config(text=f"00:00 / {self._format_time(self.total_duration_ms)}")
 
-            # Warten Sie kurz, bis die Canvas gezeichnet wurde, bevor Sie Marker setzen
-            self.parent.after(100, lambda: self._draw_clip_markers(fullscreen=False))
+            # NEU: Sofort Progress-Bar auf 0 zurücksetzen
+            canvas_width = self.progress_canvas.winfo_width()
+            if canvas_width > 0:
+                self.progress_canvas.coords(self.progress_bar, 0, 5, 0, 20)
+                self.progress_canvas.coords(self.progress_bg, 0, 5, canvas_width, 20)
+
+            # NEU: Canvas-Update erzwingen und dann Marker neu zeichnen
+            self.progress_canvas.update_idletasks()
+
+            # Marker sofort zeichnen (nach Canvas-Update)
+            self._draw_clip_markers(fullscreen=False)
+
+            # Marker nochmal nach 100ms zeichnen (falls Canvas noch nicht bereit war)
+            self.parent.after(100, lambda: self._redraw_timeline())
 
             self._start_updater()
 
@@ -221,6 +233,19 @@ class VideoPlayer:
             print(f"Fehler beim Laden des Videos in den VLC Player: {e}")
             self.play_pause_btn.config(state="disabled")
             self.fullscreen_btn.config(state="disabled")
+
+    def _redraw_timeline(self):
+        """Zeichnet die Timeline (Progress + Marker) komplett neu."""
+        # Progress-Bar zurücksetzen
+        canvas_width = self.progress_canvas.winfo_width()
+        if canvas_width > 0:
+            self.progress_canvas.coords(self.progress_bg, 0, 5, canvas_width, 20)
+            self.progress_canvas.coords(self.progress_bar, 0, 5, 0, 20)
+
+        # Clip-Marker neu zeichnen
+        self._draw_clip_markers(fullscreen=False)
+
+        print(f"Timeline neu gezeichnet: {len(self.clip_durations)} Clips, {self.total_duration_ms}ms")
 
     def unload_video(self):
         """Entfernt das Video und setzt den Player zurück."""

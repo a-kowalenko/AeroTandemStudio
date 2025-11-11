@@ -22,8 +22,25 @@ class SuccessDialog:
         self.dialog.transient(parent)
         self.dialog.grab_set()
 
+        # Counter für vorhandene Medien
+        self.media_count = 0
+        if created_items.get('video'):
+            self.media_count += 1
+        if created_items.get('watermark_video'):
+            self.media_count += 1
+        if created_items.get('photos', 0) > 0:
+            self.media_count += 1
+        if created_items.get('watermark_photos', 0) > 0:
+            self.media_count += 1
+        if created_items.get('server_uploaded'):
+            self.media_count += 1
+
+        # Größe des Dialogs basierend auf der Medienanzahl
+        width = 450
+        height = 250 + (self.media_count - 1) * 35
+        self.dialog.geometry(f"{width}x{height}")
+
         # Zentrieren
-        self.dialog.geometry("450x300")
         self._center_window(parent)
 
         # Nicht in der Größe änderbar
@@ -95,7 +112,7 @@ class SuccessDialog:
             item_count += 1
 
         if created_items.get('watermark_video'):
-            self._add_item(items_frame, "Vorschau-Video erstellt", "👁️")
+            self._add_item(items_frame, "Vorschau-Video erstellt", "👁")
             item_count += 1
 
         photo_count = created_items.get('photos', 0)
@@ -107,11 +124,11 @@ class SuccessDialog:
         watermark_photo_count = created_items.get('watermark_photos', 0)
         if watermark_photo_count > 0:
             text = f"{watermark_photo_count} Vorschau-Foto{'s' if watermark_photo_count > 1 else ''} erstellt"
-            self._add_item(items_frame, text, "🖼️")
+            self._add_item(items_frame, text, "🖼")
             item_count += 1
 
         if created_items.get('server_uploaded'):
-            self._add_item(items_frame, "Auf Server hochgeladen", "☁️")
+            self._add_item(items_frame, "Auf Server hochgeladen", "⬆")
             item_count += 1
 
         # Falls keine Items (sollte nicht passieren)

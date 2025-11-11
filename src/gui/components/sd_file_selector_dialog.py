@@ -8,6 +8,8 @@ from PIL import Image, ImageTk
 import subprocess
 import threading
 
+from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
+
 
 class SDFileSelectorDialog:
     """Dialog zur Auswahl von Dateien von der SD-Karte"""
@@ -61,6 +63,11 @@ class SDFileSelectorDialog:
         # Mousewheel-Scrolling Callback (wird von switch_to_thumbnails gesetzt)
         self.mousewheel_callback = None
 
+        # NEU: SD-Karten Überwachung für Entfernung
+        self.sd_card_path = None
+        self.sd_check_running = False
+        self._extract_sd_card_path()
+
     def show(self):
         """Zeigt den Dialog an"""
         self.dialog = tk.Toplevel(self.parent)
@@ -75,6 +82,9 @@ class SDFileSelectorDialog:
 
         # X-Button soll wie Abbrechen funktionieren
         self.dialog.protocol("WM_DELETE_WINDOW", self.on_cancel)
+
+        # Starte SD-Karten-Überwachung
+        self._start_sd_card_monitoring()
 
         # Initial Thumbnail-Ansicht laden
         self.switch_to_thumbnails()
@@ -297,7 +307,7 @@ class SDFileSelectorDialog:
                  cursor='hand2').pack(side='right', padx=2)
 
         # "Ausgewählte importieren" Button - Helles Grün (unterscheidet sich von "auswählen")
-        tk.Button(button_frame, text="⬇ Ausgewählte importieren",
+        tk.Button(button_frame, text="⏬ Ausgewählte importieren",
                  command=self.on_import_selected,
                  bg="#4CAF50", fg="white",
                  font=("Arial", 10, "bold"),
@@ -859,7 +869,7 @@ class SDFileSelectorDialog:
                     ]
 
                     # Führe FFmpeg aus (leise)
-                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
                     # Lade generiertes Bild
                     img = Image.open(tmp_path)
@@ -1448,15 +1458,17 @@ class SDFileSelectorDialog:
                                      parent=self.dialog)
             return
 
-        # Stoppe Thumbnail-Loading
+        # Stoppe Thumbnail-Loading und SD-Monitoring
         self.loading_cancelled = True
+        self.sd_check_running = False
         self.dialog.destroy()
 
     def on_cancel(self):
         """Bricht ab ohne Auswahl"""
         self.selected_files = None
-        # Stoppe Thumbnail-Loading
+        # Stoppe Thumbnail-Loading und SD-Monitoring
         self.loading_cancelled = True
+        self.sd_check_running = False
         self.dialog.destroy()
 
     def get_selected_files(self):
@@ -1540,3 +1552,95 @@ class SDFileSelectorDialog:
             thumb_label.config(text=icon, font=("Arial", 40), fg='#999')
         except:
             pass  # Widget existiert nicht mehr
+
+    def _extract_sd_card_path(self):
+        """Extrahiert den SD-Karten-Pfad aus den Dateiinfos"""
+        if not self.files_info:
+            return
+
+        # Nimm den ersten Dateipfad und extrahiere das Laufwerk
+        first_path = self.files_info[0]['path']
+
+        # Extrahiere Laufwerk (z.B. "D:" aus "D:\DCIM\...")
+        if len(first_path) >= 2 and first_path[1] == ':':
+            self.sd_card_path = first_path[:2]  # z.B. "D:"
+            print(f"SD-Karte erkannt: {self.sd_card_path}")
+
+    def _check_sd_card_available(self):
+        """Prüft ob die SD-Karte noch verfügbar ist"""
+        if not self.sd_card_path:
+            return True  # Kein Pfad bekannt, nehmen an es ist ok
+
+        try:
+            # Versuche auf das Laufwerk zuzugreifen
+            drive_path = self.sd_card_path + "\\"
+            os.listdir(drive_path)
+            return True
+        except (OSError, PermissionError, FileNotFoundError):
+            # Laufwerk nicht verfügbar
+            return False
+        except Exception as e:
+            print(f"Fehler beim SD-Karten-Check: {e}")
+            return True  # Bei unbekanntem Fehler nicht warnen
+
+    def _start_sd_card_monitoring(self):
+        """Startet die periodische Überwachung der SD-Karte"""
+        if not self.sd_card_path:
+            return  # Kein Laufwerk zu überwachen
+
+        self.sd_check_running = True
+        self._schedule_sd_check()
+
+    def _schedule_sd_check(self):
+        """Plant den nächsten SD-Karten-Check"""
+        if not self.sd_check_running:
+            return
+
+        # Prüfe alle 1 Sekunde
+        try:
+            self.dialog.after(1000, self._perform_sd_check)
+        except:
+            # Dialog wurde geschlossen
+            self.sd_check_running = False
+
+    def _perform_sd_check(self):
+        """Führt die SD-Karten-Prüfung durch"""
+        if not self.sd_check_running:
+            return
+
+        # Prüfe ob SD-Karte noch verfügbar ist
+        if not self._check_sd_card_available():
+            # SD-Karte wurde entfernt!
+            print("⚠️ SD-Karte wurde entfernt!")
+            self.sd_check_running = False
+            self._handle_sd_card_removed()
+            return
+
+        # Nächster Check
+        self._schedule_sd_check()
+
+    def _handle_sd_card_removed(self):
+        """Behandelt die Entfernung der SD-Karte"""
+        # Stoppe Thumbnail-Loading
+        self.loading_cancelled = True
+
+        # Zeige Error-Dialog
+        from src.gui.components.error_dialog import show_error_dialog
+
+        try:
+            show_error_dialog(
+                self.parent,
+                title="SD-Karte entfernt",
+                message="Die SD-Karte wurde während der Auswahl entfernt.\n\nDer Dialog wird geschlossen.",
+                details=["Bitte stecken Sie die SD-Karte wieder ein und versuchen Sie es erneut."]
+            )
+        except Exception as e:
+            print(f"Fehler beim Anzeigen des Error-Dialogs: {e}")
+
+        # Schließe den Dialog
+        self.selected_files = None
+        try:
+            self.dialog.destroy()
+        except:
+            pass
+

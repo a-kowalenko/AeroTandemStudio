@@ -20,7 +20,9 @@ class SuccessDialog:
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Erfolgreich erstellt")
         self.dialog.transient(parent)
-        self.dialog.grab_set()
+
+        # WICHTIG: Verstecke Dialog initial, um Flackern zu vermeiden
+        self.dialog.withdraw()
 
         # Counter für vorhandene Medien
         self.media_count = 0
@@ -40,16 +42,22 @@ class SuccessDialog:
         height = 250 + (self.media_count - 1) * 35
         self.dialog.geometry(f"{width}x{height}")
 
+        # Style
+        self.dialog.configure(bg='#f0f0f0')
+
+        self._create_widgets(created_items)
+
         # Zentrieren
         self._center_window(parent)
 
         # Nicht in der Größe änderbar
         self.dialog.resizable(False, False)
 
-        # Style
-        self.dialog.configure(bg='#f0f0f0')
+        # Jetzt erst anzeigen (nach Positionierung)
+        self.dialog.deiconify()
 
-        self._create_widgets(created_items)
+        # Jetzt grab_set aufrufen (muss nach deiconify sein)
+        self.dialog.grab_set()
 
     def _center_window(self, parent):
         """Zentriert den Dialog über dem Parent"""

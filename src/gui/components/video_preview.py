@@ -258,6 +258,14 @@ class VideoPreview:
         """
         file_identity = self._get_file_identity(original_path)
         if not file_identity:
+            # Fallback: Suche nach Dateinamen im Working-Folder
+            # (wichtig, wenn original_path nicht existiert, z.B. nach Trim)
+            filename = os.path.basename(original_path)
+            if self.temp_dir:
+                working_path = os.path.join(self.temp_dir, filename)
+                if os.path.exists(working_path):
+                    print(f"  📂 Fallback: Gefunden im Working-Folder: {filename}")
+                    return working_path
             return None
 
         copy_path = self.video_copies_map.get(file_identity)
@@ -271,6 +279,13 @@ class VideoPreview:
             del self.video_copies_map[file_identity]
             if file_identity in self.metadata_cache:
                 del self.metadata_cache[file_identity]
+
+        # Fallback: Suche nach Dateinamen (wichtig nach Trim, wenn Größe sich geändert hat)
+        filename = os.path.basename(original_path)
+        for cached_identity, cached_path in self.video_copies_map.items():
+            if cached_identity[0] == filename and os.path.exists(cached_path):
+                print(f"  📂 Fallback: Gefunden via Dateinamen-Match: {filename}")
+                return cached_path
 
         return None
 
@@ -718,13 +733,18 @@ class VideoPreview:
             safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
             copy_path = os.path.join(self.temp_dir, safe_filename)
 
-            # Bei Namenskollision: Füge Suffix hinzu
-            if os.path.exists(copy_path):
+            # Bei Namenskollision:
+            # - Beim Re-Encoding: Überschreibe die alte Datei
+            # - Beim Stream-Copy: Füge Suffix hinzu
+            if os.path.exists(copy_path) and not needs_reencoding:
                 base_name, ext = os.path.splitext(safe_filename)
                 counter = 1
                 while os.path.exists(copy_path):
                     copy_path = os.path.join(self.temp_dir, f"{base_name}_{counter}{ext}")
                     counter += 1
+            elif os.path.exists(copy_path) and needs_reencoding:
+                # Beim Re-Encoding: Alte Datei wird überschrieben
+                print(f"  → Überschreibe existierende Datei: {os.path.basename(copy_path)}")
 
 
             # OPTIMIERUNG: Prüfe ob bereits eine gültige Kopie existiert
@@ -1235,6 +1255,18 @@ class VideoPreview:
             task_id: Optional Task-ID für paralleles Encoding
             video_index: Optional Index des Videos in der DragDrop-Tabelle
         """
+        # WICHTIG: Wenn Input = Output, verwende temporäre Datei
+        use_temp_output = os.path.normpath(input_path) == os.path.normpath(output_path)
+
+        if use_temp_output:
+            # Erstelle temporären Output-Pfad
+            base, ext = os.path.splitext(output_path)
+            temp_output_path = f"{base}.__temp_reencode__{ext}"
+            actual_output_path = temp_output_path
+        else:
+            actual_output_path = output_path
+            temp_output_path = None
+
         target_params = {
             'width': 1920, 'height': 1080, 'fps': 30, 'pix_fmt': 'yuv420p',
             'audio_codec': 'aac', 'audio_sample_rate': 48000, 'audio_channels': 2
@@ -1297,19 +1329,33 @@ class VideoPreview:
         else:
             # Software-Filter (Standard)
             # WICHTIG: format=yuv420p konvertiert 10-bit Videos zu 8-bit (für Kompatibilität)
-            cmd.extend([
-                "-vf", f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']},format=yuv420p"
-            ])
+            filter_chain = f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']},format=yuv420p"
+
+            # Für Hardware-Encoder: Konvertiere zu nv12 für Encoder, dann zurück zu yuv420p
+            if self.hw_accel_enabled and hw_type in ['intel', 'nvidia', 'amd']:
+                filter_chain = f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']}"
+
+            cmd.extend(["-vf", filter_chain])
 
         # WICHTIG: Pixel-Format explizit setzen für bessere Kompatibilität
+        # Wird VOR Encoder-Parametern gesetzt, kann aber überschrieben werden
         cmd.extend(["-pix_fmt", "yuv420p"])
 
         # Video-Encoder (Hardware oder Software)
         cmd.extend(encoding_params['output_params'])
 
+        # WICHTIG: Für Hardware-Encoder (besonders QSV) nochmal Pixel-Format erzwingen
+        # QSV bevorzugt nv12, aber für VLC-Kompatibilität brauchen wir yuv420p
+        if self.hw_accel_enabled:
+            cmd.extend(["-pix_fmt", "yuv420p"])
+
         # Zusätzliche Parameter für Software-Encoding (wenn HW nicht aktiv)
         if not self.hw_accel_enabled:
             encoder = encoding_params.get('encoder', 'libx264')
+
+            # Keyframe-Interval für bessere Schneidbarkeit (für alle Codecs)
+            # GOP alle 1 Sekunde = 30 Frames bei 30fps
+            cmd.extend(["-g", "30", "-keyint_min", "30"])
 
             # Codec-spezifische Parameter
             if encoder == 'libx264':
@@ -1347,6 +1393,15 @@ class VideoPreview:
             # Bei Hardware-Encoding: Optimierte Qualitätseinstellungen
             # (preset und tune sind bereits in encoding_params enthalten)
             print(f"  → Nutze Hardware-Encoder: {encoding_params['encoder']}")
+            # DEBUG: Zeige extra_params
+            if 'extra_params' in self.hw_detector.detect_hardware():
+                extra_params = self.hw_detector.detect_hardware().get('extra_params', [])
+                if '-g' in extra_params:
+                    gop_index = extra_params.index('-g')
+                    gop_value = extra_params[gop_index + 1] if gop_index + 1 < len(extra_params) else '?'
+                    print(f"  → GOP-Size: {gop_value} (Keyframes alle {gop_value} Frames)")
+                else:
+                    print(f"  ⚠️ WARNUNG: Keine GOP-Parameter (-g) in Hardware-Config!")
             if use_hw_filters:
                 print(f"  → Nutze Hardware-Filter: {hw_type}")
 
@@ -1363,7 +1418,7 @@ class VideoPreview:
             "-movflags", "+faststart",
             "-max_muxing_queue_size", "1024",
             "-map", "0:v:0", "-map", "0:a:0?",
-            output_path
+            actual_output_path  # Verwende temp path wenn Input=Output
         ])
 
         # WICHTIG: Capture stderr für Fehlerdiagnose
@@ -1383,7 +1438,21 @@ class VideoPreview:
         # Verwende neue Methode mit Live-Fortschritt
         try:
             self._run_ffmpeg_with_progress(cmd, total_duration, task_name, task_id, video_index)
-            print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+
+            # Wenn temporäre Datei verwendet wurde, ersetze Original atomisch
+            if use_temp_output and os.path.exists(temp_output_path):
+                try:
+                    # Atomare Ersetzung: löscht Original und benennt temp um
+                    os.replace(temp_output_path, output_path)
+                    print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+                except Exception as e:
+                    print(f"⚠️ Fehler beim Ersetzen der Datei: {e}")
+                    # Cleanup temp file
+                    if os.path.exists(temp_output_path):
+                        os.remove(temp_output_path)
+                    raise
+            else:
+                print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
 
             # Setze Status in DragDrop-Tabelle auf "Fertig"
             if video_index is not None and self.app and hasattr(self.app, 'drag_drop'):
@@ -1391,19 +1460,38 @@ class VideoPreview:
 
             return  # Erfolg!
         except subprocess.CalledProcessError as e:
+            # Cleanup temp file bei Fehler
+            if use_temp_output and temp_output_path and os.path.exists(temp_output_path):
+                try:
+                    os.remove(temp_output_path)
+                except:
+                    pass
+
             # Hole stderr aus dem Fehler
             stderr_text = e.stderr if hasattr(e, 'stderr') else "Kein stderr verfügbar"
 
             # ZUSÄTZLICHE ÜBERPRÜFUNG: Wenn Output-Datei existiert und vernünftige Größe hat,
-            # betrachte als Erfolg
-            output_exists = os.path.exists(output_path)
-            output_size = os.path.getsize(output_path) if output_exists else 0
+            # betrachte als Erfolg (prüfe temp_output_path wenn verwendet)
+            check_path = temp_output_path if use_temp_output else output_path
+            output_exists = os.path.exists(check_path)
+            output_size = os.path.getsize(check_path) if output_exists else 0
             output_valid = output_exists and output_size > 10240
 
             if output_valid:
                 print(f"⚠️ FFmpeg beendet mit Fehler, aber Output-Datei ist valid ({output_size} bytes)")
                 print(f"→ Betrachte als Erfolg")
-                print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+
+                # Wenn temporäre Datei verwendet wurde, ersetze Original
+                if use_temp_output:
+                    try:
+                        os.replace(temp_output_path, output_path)
+                        print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+                    except Exception as replace_err:
+                        print(f"⚠️ Fehler beim Ersetzen der Datei: {replace_err}")
+                        raise
+                else:
+                    print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+
                 return  # Erfolg!
 
             # Echter Fehler - zeige Details
@@ -1599,15 +1687,10 @@ class VideoPreview:
                             if not target_codec:
                                 target_codec = "h264"
 
-                            # Cache leeren
+                            # Cache leeren - ABER Dateien NICHT löschen!
+                            # Die Dateien werden beim Re-Encoding überschrieben.
                             if self.video_copies_map:
-                                print("🗑️ Lösche alte Kopien...")
-                                for path, copy_path in list(self.video_copies_map.items()):
-                                    if os.path.exists(copy_path):
-                                        try:
-                                            os.remove(copy_path)
-                                        except:
-                                            pass
+                                print("🗑️ Leere Cache (Dateien bleiben erhalten für Re-Encoding)...")
                                 self.video_copies_map.clear()
                                 self.metadata_cache.clear()
 

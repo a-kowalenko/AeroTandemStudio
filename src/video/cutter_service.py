@@ -278,7 +278,12 @@ class VideoCutterService:
                  self.config.get('hardware_acceleration_enabled', True) and
                  self.hw_info and self.hw_info.get('available', False))
 
-        if use_hw and self.hw_info.get('hwaccel'):
+        # WICHTIG: Bei QSV kein hwaccel für Decoding verwenden, wenn wir auch QSV für Encoding nutzen
+        # Dies verhindert Ressourcen-Konflikte und "Cannot load" Fehler
+        hw_type = self.hw_info.get('type') if use_hw else None
+        use_hw_decode = use_hw and hw_type != 'intel' and segment['type'] == 'encode'
+
+        if use_hw_decode and self.hw_info.get('hwaccel'):
             cmd.extend(['-hwaccel', self.hw_info['hwaccel']])
             if self.hw_info.get('device'):
                 cmd.extend(['-hwaccel_device', self.hw_info['device']])
@@ -299,7 +304,6 @@ class VideoCutterService:
                 encoder = self.hw_info['encoder']
                 cmd.extend(["-c:v", encoder])
 
-                hw_type = self.hw_info.get('type')
                 if hw_type == 'nvidia':
                     cmd.extend([
                         "-preset", "p6",  # Gute Balance (p6 statt p7)
@@ -307,13 +311,19 @@ class VideoCutterService:
                         "-rc", "vbr",
                         "-cq", "19",
                         "-b:v", "0",
+                        "-g", "30",
+                        "-keyint_min", "30",
                         "-pix_fmt", "yuv420p"
                     ])
                 elif hw_type == 'intel':
+                    # QSV: Verwende nv12 (natives Format für QSV)
                     cmd.extend([
                         "-global_quality", "19",
-                        "-preset", "veryslow",
-                        "-look_ahead", "1",
+                        "-preset", "medium",
+                        "-look_ahead", "0",  # Deaktiviert für Stabilität
+                        "-g", "30",  # GOP-Size fest auf 30 (bei 30fps = 1 Keyframe/Sekunde)
+                        "-keyint_min", "30",
+                        "-bf", "0",  # Keine B-Frames für bessere Schneidbarkeit
                         "-pix_fmt", "nv12"
                     ])
                 elif hw_type == 'amd':
@@ -322,12 +332,16 @@ class VideoCutterService:
                         "-rc", "cqp",
                         "-qp_i", "19",
                         "-qp_p", "19",
+                        "-g", "30",
+                        "-keyint_min", "30",
                         "-pix_fmt", "nv12"
                     ])
                 elif hw_type == 'videotoolbox':
                     cmd.extend([
                         "-b:v", "0",
                         "-q:v", "65",
+                        "-g", "30",
+                        "-keyint_min", "30",
                         "-pix_fmt", "nv12"
                     ])
             else:
@@ -340,10 +354,13 @@ class VideoCutterService:
                 cmd.extend([
                     "-crf", "18",
                     "-preset", "medium",
-                    "-pix_fmt", "yuv420p"
+                    "-pix_fmt", "yuv420p",
+                    "-g", "30",  # GOP-Size fest auf 30
+                    "-keyint_min", "30",
+                    "-bf", "0"  # Keine B-Frames
                 ])
 
-            # Keyframe nur am Anfang wenn gefordert
+            # Keyframe am Anfang erzwingen wenn gefordert
             if segment.get('force_keyframe'):
                 cmd.extend(["-force_key_frames", "0"])
 
@@ -432,10 +449,10 @@ class VideoCutterService:
                 )
 
             elif not keyframes or len(keyframes) == 0:
-                # Fall B: Keine Keyframes → Stream-Copy
-                print("⚠️ Keine Keyframes → Stream-Copy")
-                return self._trim_stream_copy(
-                    video_path, start_sec, duration_sec, output_path, progress_callback
+                # Fall B: Keine Keyframes → Re-Encoding (Stream-Copy würde zu Problemen führen)
+                print("⚠️ Keine Keyframes → Re-Encoding für sauberen Schnitt")
+                return self._trim_reencode(
+                    video_path, start_sec, end_sec, output_path, video_info, progress_callback
                 )
 
             else:
@@ -497,6 +514,57 @@ class VideoCutterService:
 
         print("✅ Stream-Copy Trim erfolgreich")
         return True
+
+    def _trim_reencode(self, video_path: str, start_sec: float, end_sec: float,
+                      output_path: str, video_info: VideoInfo,
+                      progress_callback: Optional[Callable]) -> bool:
+        """
+        Re-Encoding Trim (präzise, langsamer als Stream-Copy).
+        Wird verwendet, wenn keine Keyframes verfügbar sind.
+        """
+        if progress_callback:
+            progress_callback(20, "Schneide (Re-Encoding)...")
+
+        duration_sec = end_sec - start_sec
+
+        # Baue Encoding-Parameter basierend auf Video-Info und Hardware
+        segment = {
+            'type': 'encode',
+            'start': start_sec,
+            'duration': duration_sec,
+            'force_keyframe': True
+        }
+
+        cmd = self.build_ffmpeg_cmd(video_path, output_path, segment, video_info)
+
+        try:
+            # Führe mit Progress-Tracking aus
+            self._run_ffmpeg(
+                cmd, duration_sec,
+                start_percent=20, end_percent=100,
+                progress_callback=progress_callback,
+                video_info=video_info,
+                segment=segment,
+                input_path=video_path,
+                output_path=output_path
+            )
+
+            if progress_callback:
+                progress_callback(100, "Fertig!")
+
+            print("✅ Re-Encoding Trim erfolgreich")
+
+            # Keyframe-Cache für Output erneuern, da wir gerade neu enkodiert haben
+            if os.path.exists(output_path):
+                self.get_keyframes(output_path, force_refresh=True)
+
+            return True
+
+        except Exception as e:
+            print(f"Fehler beim Re-Encoding Trim: {e}")
+            if progress_callback:
+                progress_callback(0, f"Fehler: {str(e)}")
+            return False
 
     def _trim_smart_cut(self, video_path: str, start_sec: float, end_sec: float,
                        kf_after_start: float, kf_before_end: float,
@@ -560,9 +628,14 @@ class VideoCutterService:
                          creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
             if progress_callback:
-                progress_callback(100, "Smart-Cut fertig!")
+                progress_callback(100, "Fertig!")
 
             print("✅ Smart-Cut Trim erfolgreich")
+
+            # Keyframe-Cache für Output erneuern
+            if os.path.exists(output_path):
+                self.get_keyframes(output_path, force_refresh=True)
+
             return True
 
         finally:
@@ -609,22 +682,30 @@ class VideoCutterService:
 
         # Fehler - prüfe ob Hardware-Problem
         stderr_lower = result.stderr.lower()
+
+        # Spezifischere Hardware-Fehler-Erkennung (nur echte Fehler, keine Warnungen)
         hw_errors = [
-            'incompatible pixel format',
-            'impossible to convert',
+            'cannot load qsv',
+            'cannot initialize qsv',
+            'failed to create qsv',
+            'qsv not available',
             'could not open encoder',
-            'hwaccel',
-            'qsv',
-            'nvenc',
-            'amf',
-            'videotoolbox',
-            'no device',
-            'failed to',
-            'cannot load',
-            'unsupported'
+            'failed to open encoder',
+            'encoder not found',
+            'no device available',
+            'cannot initialize hardware',
+            'unsupported pixel format',
+            'incompatible pixel format',
         ]
 
+        # Nur als HW-Fehler werten, wenn es wirklich ein kritischer Fehler ist
         is_hw_error = any(err in stderr_lower for err in hw_errors)
+
+        # Zusätzlich: Prüfe ob "error" oder "failed" im Zusammenhang mit HW vorkommt
+        if not is_hw_error and ('qsv' in stderr_lower or 'nvenc' in stderr_lower or 'amf' in stderr_lower):
+            # Nur als HW-Fehler werten wenn auch "error", "failed", "cannot" etc. dabei ist
+            if any(word in stderr_lower for word in ['error', 'failed', 'cannot', 'unable to']):
+                is_hw_error = True
 
         if is_hw_error and video_info and segment and input_path and output_path:
             print(f"⚠️ Hardware-Fehler erkannt, versuche Software-Fallback...")
@@ -875,6 +956,13 @@ class VideoCutterService:
                 progress_callback(100, "Smart-Cut fertig!")
 
             print("✅ Smart-Cut Split erfolgreich")
+
+            # Keyframe-Cache für beide Output-Dateien erneuern
+            if os.path.exists(part1_path):
+                self.get_keyframes(part1_path, force_refresh=True)
+            if os.path.exists(part2_path):
+                self.get_keyframes(part2_path, force_refresh=True)
+
             return True
 
         finally:

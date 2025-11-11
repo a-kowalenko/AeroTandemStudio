@@ -1121,19 +1121,19 @@ class VideoCutterDialog(tk.Toplevel):
         # VLC-Player cleanup
         if hasattr(self, 'media_player') and self.media_player:
             try:
-                # Events entfernen mit gespeicherten Callbacks, um Fehler nach dem Schließen zu vermeiden
+                # Events entfernen - VLC event_detach nimmt nur EventType als Argument
                 if hasattr(self, '_vlc_callbacks') and self._vlc_callbacks:
                     events = self.media_player.event_manager()
                     if 'end_reached' in self._vlc_callbacks:
-                        events.event_detach(vlc.EventType.MediaPlayerEndReached, self._vlc_callbacks['end_reached'])
+                        events.event_detach(vlc.EventType.MediaPlayerEndReached)
                     if 'time_changed' in self._vlc_callbacks:
-                        events.event_detach(vlc.EventType.MediaPlayerTimeChanged, self._vlc_callbacks['time_changed'])
+                        events.event_detach(vlc.EventType.MediaPlayerTimeChanged)
                     if 'playing' in self._vlc_callbacks:
-                        events.event_detach(vlc.EventType.MediaPlayerPlaying, self._vlc_callbacks['playing'])
+                        events.event_detach(vlc.EventType.MediaPlayerPlaying)
                     if 'paused' in self._vlc_callbacks:
-                        events.event_detach(vlc.EventType.MediaPlayerPaused, self._vlc_callbacks['paused'])
+                        events.event_detach(vlc.EventType.MediaPlayerPaused)
                     if 'stopped' in self._vlc_callbacks:
-                        events.event_detach(vlc.EventType.MediaPlayerStopped, self._vlc_callbacks['stopped'])
+                        events.event_detach(vlc.EventType.MediaPlayerStopped)
 
                 if self.media_player.is_playing():
                     self.media_player.stop()

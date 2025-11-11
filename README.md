@@ -1,6 +1,6 @@
 ﻿# 🎬 Aero Tandem Studio
 
-![Version](https://img.shields.io/badge/version-0.1.0.7-blue.svg)
+![Version](https://img.shields.io/badge/version-0.5.1.2-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.10+-green.svg)
 ![License](https://img.shields.io/badge/license-proprietary-red.svg)
 
@@ -19,6 +19,8 @@
 - [Build & Deployment](#-build--deployment)
 - [Konfiguration](#-konfiguration)
 - [Troubleshooting](#-troubleshooting)
+- [Changelog](#-changelog)
+- [Danksagungen](#-danksagungen)
 - [Lizenz](#-lizenz)
 
 ---
@@ -49,17 +51,42 @@
   - Server-Status-Überwachung
   - Automatische Fehlerbehandlung
 
-- **💾 SD-Karten Auto-Backup** ✨ NEU
+- **💾 SD-Karten Auto-Backup** ✨
   - Automatische Erkennung von Action-Cam SD-Karten
   - Automatisches Backup beim Einstecken
+  - **Dateiauswahl-Dialog bei großen SD-Karten** (konfigurierbares Größen-Limit)
+    - Kachel- und Detail-Ansicht
+    - Thumbnail-Vorschau für Fotos und Videos
+    - Filter nach Dateityp, Sortierung nach Name/Größe/Datum
+    - Überspringen bereits verarbeiteter Dateien
+  - **SD-Karten-Überwachung während Dateiauswahl**
+    - Automatische Erkennung wenn SD-Karte entfernt wird
+    - Error-Dialog mit Hinweis zur erneuten Verbindung
+    - Sauberes Schließen des Dialogs
   - Optionales Leeren der SD-Karte nach Backup
   - Automatischer Import in die Anwendung
   - Zeitstempel-basierte Backup-Ordner
+  - Medien-History zur Vermeidung von Duplikaten
 
 - **🔄 Auto-Update**
   - Automatische Update-Prüfung beim Start
   - Download und Installation neuer Versionen
   - Versionsverwaltung
+
+- **🎨 UI/UX Verbesserungen** ✨
+  - **Error-Dialog** - Professionelles Fehler-Feedback
+    - Roter Header mit ✕ Symbol
+    - Dynamische Höhenanpassung basierend auf Inhalt
+    - Automatischer Textumbruch in Detail-Listen
+    - Zentriertes Erscheinen ohne Flackern
+  - **Success-Dialog** - Optimiertes Feedback
+    - Grüner Header mit ✓ Symbol
+    - Zentriertes Erscheinen ohne Flackern
+  - **SD File Selector Dialog**
+    - Moderne Kachel- und Detail-Ansichten
+    - Live-Thumbnail-Generierung
+    - Zwei-Stufen-Auswahl (Markieren → Auswählen)
+    - Drag-Selection für schnelle Mehrfachauswahl
 
 ### Technische Features
 - Multi-Threading für flüssige UI
@@ -94,8 +121,9 @@
 
 1. **Download** der neuesten Version:
    ```
-   setup_builds_releases/AeroTandemStudio_Installer_v0.1.0.7.exe
+   setup_builds_releases/AeroTandemStudio_Installer_v0.5.1.1.exe
    ```
+   *(Oder neueste Version aus dem Releases-Ordner)*
 
 2. **Installation** ausführen und Anweisungen folgen
 
@@ -174,9 +202,9 @@ Die Anwendung kann QR-Codes aus Videos analysieren:
 - Unterstützte Formate: QR-Codes mit Kundendaten
 - JSON-Format für strukturierte Daten
 
-### SD-Karten Auto-Backup ✨ NEU
+### SD-Karten Auto-Backup ✨
 
-Die Anwendung überwacht automatisch SD-Karten und erstellt Backups:
+Die Anwendung überwacht automatisch SD-Karten und erstellt intelligente Backups:
 
 **Einrichtung:**
 1. Einstellungen öffnen (⚙️ Button)
@@ -184,20 +212,42 @@ Die Anwendung überwacht automatisch SD-Karten und erstellt Backups:
 3. Backup-Ordner festlegen
 4. Gewünschte Optionen aktivieren:
    - ☑ **Automatischer Backup von SD-Karte**: Aktiviert die Überwachung
+   - ☑ **Größen-Limit aktivieren**: Zeigt Dateiauswahl-Dialog bei großen SD-Karten
+   - 📏 **Maximale Größe (MB)**: Limit festlegen (z.B. 2000 MB)
+   - ☑ **Bereits verarbeitete Dateien überspringen**: Vermeidet Duplikate
    - ☑ **SD-Karte nach Backup leeren**: Löscht DCIM-Ordner nach erfolgreichem Backup
    - ☑ **Automatisch importieren**: Importiert Dateien direkt in die App
 5. Speichern
 
 **Verwendung:**
 1. SD-Karte einstecken (mit DCIM-Ordner)
-2. Backup wird automatisch erstellt
-3. Bei aktiviertem Auto-Import werden Videos und Fotos direkt geladen
-4. Fertig! ☕
+2. **Bei kleinen SD-Karten** (unter Limit):
+   - Backup wird automatisch erstellt
+   - Alle Dateien werden importiert
+3. **Bei großen SD-Karten** (über Limit):
+   - Dateiauswahl-Dialog erscheint automatisch
+   - **Kachel-Ansicht**: Thumbnails aller Videos und Fotos
+   - **Detail-Ansicht**: Tabellarische Übersicht mit Sortierung
+   - **Markieren**: Dateien zum Import markieren
+   - **Auswählen**: Markierte Dateien zur Auswahl hinzufügen
+   - **Importieren**: Nur ausgewählte Dateien werden gesichert
+4. Bei aktiviertem Auto-Import werden Videos und Fotos direkt geladen
+5. Fertig! ☕
+
+**Dateiauswahl-Dialog Features:**
+- 🖼️ **Thumbnail-Vorschau**: Fotos und Videos mit Vorschaubildern
+- 🔍 **Filter**: Nach Typ (Videos/Fotos), Sortierung (Name/Größe/Datum/Typ)
+- ✅ **Zwei-Stufen-Auswahl**: Markieren → Auswählen → Importieren
+- 🖱️ **Drag-Selection**: Ziehen zum Mehrfachauswahl
+- 📋 **Ausgewählte Liste**: Übersicht der ausgewählten Dateien
+- ⚠️ **SD-Karten-Überwachung**: Warnung bei Entfernung während Auswahl
 
 **Sicherheit:**
 - SD-Karte wird nur nach ERFOLGREICHEM Backup geleert
 - Backup-Ordner haben Zeitstempel (z.B. `SD_Backup_20231031_143025`)
-- Fehlerbehandlung mit aussagekräftigen Meldungen
+- Medien-History verhindert Duplikate (Hash-basiert)
+- Fehlerbehandlung mit aussagekräftigen Dialogen
+- Automatisches Schließen bei SD-Karten-Entfernung
 
 ---
 
@@ -214,6 +264,10 @@ TandemIntro/
 │   │       ├── video_player.py  # Video-Player
 │   │       ├── video_cutter.py  # Video-Editor
 │   │       ├── form_fields.py   # Formular
+│   │       ├── sd_file_selector_dialog.py  # SD-Dateiauswahl ✨
+│   │       ├── error_dialog.py  # Fehler-Dialog ✨
+│   │       ├── success_dialog.py # Erfolgs-Dialog
+│   │       ├── sd_status_indicator.py # SD-Status-Anzeige
 │   │       └── ...
 │   ├── video/                   # Video-Verarbeitung
 │   │   ├── processor.py         # Haupt-Prozessor
@@ -224,7 +278,8 @@ TandemIntro/
 │   ├── utils/                   # Hilfsfunktionen
 │   │   ├── config.py           # Konfigurations-Manager
 │   │   ├── file_utils.py       # Datei-Operationen
-│   │   ├── sd_card_monitor.py  # SD-Karten Überwachung ✨ NEU
+│   │   ├── sd_card_monitor.py  # SD-Karten Überwachung ✨
+│   │   ├── media_history.py    # Medien-History Store ✨
 │   │   ├── validation.py       # Validierung
 │   │   └── constants.py        # Konstanten
 │   └── installer/               # Installation & Updates
@@ -275,6 +330,35 @@ Erstellt kombinierte Vorschau:
 - Temporäres Arbeitsverzeichnis
 - Format-Prüfung
 - Metadaten-Caching
+
+#### SDCardMonitor (`src/utils/sd_card_monitor.py`) ✨
+Überwacht SD-Karten und erstellt Backups:
+- Automatische Laufwerkserkennung
+- DCIM-Ordner-Erkennung
+- Backup-Koordination
+- Größen-Limit-Prüfung
+- Medien-History-Integration
+
+#### SDFileSelectorDialog (`src/gui/components/sd_file_selector_dialog.py`) ✨
+Interaktiver Dateiauswahl-Dialog:
+- Kachel- und Detail-Ansichten
+- Thumbnail-Generierung
+- Filter und Sortierung
+- SD-Karten-Überwachung während Auswahl
+- Zwei-Stufen-Auswahl-System
+
+#### ErrorDialog (`src/gui/components/error_dialog.py`) ✨
+Professioneller Fehler-Dialog:
+- Dynamische Höhenanpassung
+- Textumbruch in Details
+- Zentrierte Anzeige ohne Flackern
+- Konsistentes Design
+
+#### MediaHistoryStore (`src/utils/media_history.py`) ✨
+Verhindert Duplikate beim Import:
+- Hash-basierte Identifikation
+- Persistente Speicherung
+- Schnelle Lookup-Operationen
 
 ### Entwickler-Befehle
 
@@ -365,7 +449,14 @@ Pfad: `config/config.json`
   "tandemmaster": "",
   "videospringer": "",
   "upload_to_server": false,
-  "server_url": "smb://169.254.169.254/aktuell"
+  "server_url": "smb://169.254.169.254/aktuell",
+  "sd_auto_backup": true,
+  "sd_backup_folder": "C:\\SD_Backups",
+  "sd_clear_after_backup": false,
+  "sd_auto_import": true,
+  "sd_size_limit_enabled": true,
+  "sd_size_limit_mb": 2000,
+  "sd_skip_processed": true
 }
 ```
 
@@ -379,6 +470,13 @@ Pfad: `config/config.json`
 | `outside_video` | Outside-Kamera-Video einbinden | `false` |
 | `upload_to_server` | Automatischer Server-Upload | `false` |
 | `server_url` | SMB/Netzwerk-Pfad | `"smb://..."` |
+| `sd_auto_backup` | SD-Karten Auto-Backup aktiviert | `false` |
+| `sd_backup_folder` | Backup-Zielordner | `""` |
+| `sd_clear_after_backup` | SD-Karte nach Backup leeren | `false` |
+| `sd_auto_import` | Dateien automatisch importieren | `true` |
+| `sd_size_limit_enabled` | Größen-Limit aktivieren | `false` |
+| `sd_size_limit_mb` | Maximale Größe in MB | `2000` |
+| `sd_skip_processed` | Bereits verarbeitete überspringen | `false` |
 
 ### Umgebungsvariablen
 
@@ -409,6 +507,24 @@ Die Anwendung verwendet keine Umgebungsvariablen.
 - ✅ QR-Code in ersten 5 Sekunden sichtbar?
 - ✅ Ausreichende Bildqualität?
 - ✅ Korrekte Formatierung des QR-Codes?
+
+**SD-Karte wird nicht erkannt** ✨
+- ✅ SD-Karte hat DCIM-Ordner?
+- ✅ SD-Karten Auto-Backup in Einstellungen aktiviert?
+- ✅ Backup-Ordner konfiguriert?
+- ✅ Laufwerk zugreifbar (nicht schreibgeschützt)?
+- ✅ Windows erkennt Laufwerk?
+
+**Dateiauswahl-Dialog bleibt hängen** ✨
+- ✅ SD-Karte noch eingesteckt?
+- ✅ Ausreichend RAM verfügbar?
+- ✅ Thumbnail-Generierung läuft noch?
+- ℹ️ Bei SD-Karten-Entfernung erscheint automatisch Error-Dialog
+
+**Duplikate werden importiert** ✨
+- ✅ "Bereits verarbeitete Dateien überspringen" aktiviert?
+- ✅ Medien-History-Datei nicht beschädigt?
+- ✅ Dateien wurden tatsächlich schon verarbeitet?
 
 ### Logs & Debugging
 
@@ -444,11 +560,53 @@ Diese Software ist urheberrechtlich geschützt und darf ohne ausdrückliche Gene
 
 ---
 
-## 👨‍💻 Entwickler
+## 📝 Changelog
 
-**Projekt:** Aero Tandem Studio  
-**Version:** 0.1.0.7  
-**Letztes Update:** Oktober 2025
+### Version 0.5.1.2 (2025-11-11)
+
+**Neue Features:**
+- ✨ SD-Karten Dateiauswahl-Dialog bei großen SD-Karten
+  - Kachel- und Detail-Ansichten mit Live-Thumbnails
+  - Filter und Sortieroptionen
+  - Zwei-Stufen-Auswahl-System
+  - Drag-Selection für Mehrfachauswahl
+- ✨ SD-Karten-Überwachung während Dateiauswahl
+  - Automatische Erkennung bei SD-Karten-Entfernung
+  - Error-Dialog mit Hinweis
+  - Sauberes Schließen des Dialogs
+- ✨ Error-Dialog mit dynamischer Höhenanpassung
+  - Automatischer Textumbruch in Details
+  - Zentrierte Anzeige ohne Flackern
+- ✨ Success-Dialog Optimierung
+  - Zentrierte Anzeige ohne Flackern
+
+**Verbesserungen:**
+- 🔧 Medien-History zur Vermeidung von Duplikaten
+- 🔧 Option zum Überspringen bereits verarbeiteter Dateien
+- 🔧 Konfigurierbares Größen-Limit für SD-Karten-Import
+- 🎨 Verbesserte UI-Konsistenz bei allen Dialogen
+
+**Bugfixes:**
+- 🐛 BOM-Zeichen in success_dialog.py entfernt
+- 🐛 Dialog-Flackern bei Anzeige behoben
+
+### Version 0.5.1.1 (2025-11)
+- ✨ SD-Karten Auto-Backup Funktion
+- ✨ Medien-History Store
+- ✨ SD-Status-Indikator
+- 🔧 Verschiedene Verbesserungen
+
+### Version 0.1.0.7 (2025-10)
+- ✨ Vollständige GUI-Implementierung
+- ✨ Video-Schneiden und Teilen
+- ✨ QR-Code-Analyse
+- ✨ Auto-Update-Funktion
+- ✨ Server-Upload-Integration
+- 🐛 Diverse Bugfixes
+
+### Version 0.0.1 (Initial Release)
+- 🎉 Initiale Version
+- ✨ Basis-Funktionalität
 
 ---
 
@@ -463,19 +621,11 @@ Verwendete Open-Source-Bibliotheken:
 
 ---
 
-## 📝 Changelog
+## 👨‍💻 Entwickler
 
-### Version 0.1.0.7 (Aktuell)
-- ✨ Vollständige GUI-Implementierung
-- ✨ Video-Schneiden und Teilen
-- ✨ QR-Code-Analyse
-- ✨ Auto-Update-Funktion
-- ✨ Server-Upload-Integration
-- 🐛 Diverse Bugfixes
-
-### Version 0.0.1
-- 🎉 Initiale Version
-- ✨ Basis-Funktionalität
+**Projekt:** Aero Tandem Studio  
+**Version:** 0.5.1.2  
+**Letztes Update:** 2025-11-11
 
 ---
 

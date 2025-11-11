@@ -34,10 +34,12 @@ class VideoPlayer:
         self.clip_durations = []
         self.total_duration_ms = 0
         self._updater_job = None
+        self.current_video_path = None  # NEU: Video-Pfad speichern
 
         # --- Status für manuellen Vollbildmodus ---
         self.fullscreen_window = None
         self._is_fullscreen = False
+        self._is_transitioning = False  # WICHTIG: Verhindert Race Conditions
         self._fullscreen_resume_state = {"time": 0, "was_playing": False}
         # ---
 
@@ -55,12 +57,15 @@ class VideoPlayer:
 
         # VLC-Instanz und Media Player initialisieren
         try:
-            # VLC Instance mit speziellen Parametern erstellen
+            # VLC Instance mit optimierten Parametern für Windows
             vlc_args = [
                 '--no-plugins-cache',
                 '--reset-plugins-cache',
                 '--ignore-config',
-                '--no-xlib'
+                '--no-xlib',
+                '--avcodec-hw=none',  # Deaktiviert problematische Hardware-Beschleunigung
+                '--quiet',  # Reduziert Console-Spam
+                '--no-video-title-show',  # Keine Titel-Overlays
             ]
 
             self.vlc_instance = vlc.Instance(*vlc_args)
@@ -197,6 +202,7 @@ class VideoPlayer:
 
         self.clip_durations = clip_durations_sec
         self.total_duration_ms = sum(self.clip_durations) * 1000
+        self.current_video_path = video_path  # NEU: Pfad speichern
 
         try:
             media = self.vlc_instance.media_new(video_path)
@@ -212,8 +218,20 @@ class VideoPlayer:
 
             self.time_label.config(text=f"00:00 / {self._format_time(self.total_duration_ms)}")
 
-            # Warten Sie kurz, bis die Canvas gezeichnet wurde, bevor Sie Marker setzen
-            self.parent.after(100, lambda: self._draw_clip_markers(fullscreen=False))
+            # NEU: Sofort Progress-Bar auf 0 zurücksetzen
+            canvas_width = self.progress_canvas.winfo_width()
+            if canvas_width > 0:
+                self.progress_canvas.coords(self.progress_bar, 0, 5, 0, 20)
+                self.progress_canvas.coords(self.progress_bg, 0, 5, canvas_width, 20)
+
+            # NEU: Canvas-Update erzwingen und dann Marker neu zeichnen
+            self.progress_canvas.update_idletasks()
+
+            # Marker sofort zeichnen (nach Canvas-Update)
+            self._draw_clip_markers(fullscreen=False)
+
+            # Marker nochmal nach 100ms zeichnen (falls Canvas noch nicht bereit war)
+            self.parent.after(100, lambda: self._redraw_timeline())
 
             self._start_updater()
 
@@ -221,6 +239,19 @@ class VideoPlayer:
             print(f"Fehler beim Laden des Videos in den VLC Player: {e}")
             self.play_pause_btn.config(state="disabled")
             self.fullscreen_btn.config(state="disabled")
+
+    def _redraw_timeline(self):
+        """Zeichnet die Timeline (Progress + Marker) komplett neu."""
+        # Progress-Bar zurücksetzen
+        canvas_width = self.progress_canvas.winfo_width()
+        if canvas_width > 0:
+            self.progress_canvas.coords(self.progress_bg, 0, 5, canvas_width, 20)
+            self.progress_canvas.coords(self.progress_bar, 0, 5, 0, 20)
+
+        # Clip-Marker neu zeichnen
+        self._draw_clip_markers(fullscreen=False)
+
+        print(f"Timeline neu gezeichnet: {len(self.clip_durations)} Clips, {self.total_duration_ms}ms")
 
     def unload_video(self):
         """Entfernt das Video und setzt den Player zurück."""
@@ -292,6 +323,10 @@ class VideoPlayer:
         if not self.media_player:
             return
 
+        # WICHTIG: Verhindere mehrfache gleichzeitige Aufrufe
+        if self._is_transitioning:
+            return
+
         if self._is_fullscreen:
             self._exit_fullscreen()
         else:
@@ -299,38 +334,27 @@ class VideoPlayer:
 
     def _enter_fullscreen(self):
         """Erstellt ein Toplevel-Fenster und schaltet in den Vollbildmodus."""
-        if self.fullscreen_window:
+        # Verhindere mehrfache Aufrufe
+        if self.fullscreen_window or self._is_transitioning:
             return
 
-        self._is_fullscreen = True
+        self._is_transitioning = True
 
-        self._fullscreen_resume_state["was_playing"] = self.media_player.is_playing()
-        self._fullscreen_resume_state["time"] = self.media_player.get_time()
-
-        if self._fullscreen_resume_state["time"] < 0:
-            self._fullscreen_resume_state["time"] = 0
-
-        if self.media_player.get_state() != vlc.State.Stopped:
-            self.media_player.stop()
-
-        # 1. Neues Toplevel-Fenster erstellen
+        # 1. Neues Toplevel-Fenster erstellen (NICHT sofort fullscreen)
         self.fullscreen_window = tk.Toplevel(self.parent)
         self.fullscreen_window.title("Vollbild-Vorschau")
-
-        # 2. Vollbild-Attribute setzen
-        self.fullscreen_window.attributes('-fullscreen', True)
         self.fullscreen_window.configure(bg='black')
 
-        # 3. Ein Frame für das Video im neuen Fenster
+        # 2. Ein Frame für das Video im neuen Fenster
         video_panel = tk.Frame(self.fullscreen_window, bg='black')
         video_panel.pack(fill=tk.BOTH, expand=True)
 
-        # 4. Events binden
+        # 3. Events binden
         self.fullscreen_window.bind("<Escape>", self._on_escape_fullscreen)
-        self.fullscreen_window.bind("<space>", self._on_spacebar_press)  # HINZUGEFÜGT
+        self.fullscreen_window.bind("<space>", self._on_spacebar_press)
         self.fullscreen_window.protocol("WM_DELETE_WINDOW", self._exit_fullscreen)
 
-        # --- NEU: Vollbild-Steuerelemente erstellen ---
+        # --- Vollbild-Steuerelemente erstellen ---
         self.fs_controls_frame = tk.Frame(self.fullscreen_window, bg="#333")
 
         self.fs_play_pause_btn = tk.Button(
@@ -339,9 +363,8 @@ class VideoPlayer:
         )
         self.fs_play_pause_btn.pack(side="left", padx=5)
 
-        # Vollbild beenden Button (ersetzt den 'Vollbild' Button)
         fs_exit_btn = tk.Button(
-            self.fs_controls_frame, text="X",  # Simples X
+            self.fs_controls_frame, text="X",
             font=("Arial", 12, "bold"),
             command=self._exit_fullscreen,
             width=3, bg="#E74C3C", fg="white", highlightthickness=0, relief="flat"
@@ -350,11 +373,11 @@ class VideoPlayer:
 
         self.fs_volume_scale = tk.Scale(
             self.fs_controls_frame, from_=0, to=100, orient=tk.HORIZONTAL,
-            command=self._on_fs_volume_change,  # NEUER Handler
+            command=self._on_fs_volume_change,
             bg="#333", fg="white", highlightthickness=0,
             troughcolor="#555", width=10, length=80, showvalue=False
         )
-        self.fs_volume_scale.set(self.volume_scale.get())  # Aktuelle Lautstärke übernehmen
+        self.fs_volume_scale.set(self.volume_scale.get())
         self.fs_volume_scale.pack(side="right", padx=(0, 5))
 
         self.fs_time_label = tk.Label(
@@ -380,21 +403,13 @@ class VideoPlayer:
         self.fs_progress_canvas.bind("<Button-1>", self._on_fullscreen_progress_click)
 
         self.fs_controls_frame.pack(side="bottom", fill="x", padx=5, pady=5)
-        # --- Ende Steuerelemente ---
 
-        # 5. VLC an das NEUE Fenster binden (mit Verzögerung)
-        self.fullscreen_window.after(
-            100,
-            lambda: self._complete_fullscreen_enter(video_panel)
-        )
+        # 5. Status speichern
+        was_playing = self.media_player.is_playing()
+        current_time = max(0, self.media_player.get_time())
 
-    def _complete_fullscreen_enter(self, video_panel):
-        """Hilfsmethode: Bindet VLC an das Vollbildfenster und setzt Wiedergabe fort."""
-        if not self.fullscreen_window:
-            return
-
-        video_panel.update_idletasks()
-
+        # 6. WICHTIG: Erst Window binden, DANN stoppen
+        # So weiß VLC beim Neustart, welches Window zu nutzen ist
         if sys.platform == "win32":
             self.media_player.set_hwnd(video_panel.winfo_id())
         elif sys.platform == "darwin":
@@ -402,20 +417,31 @@ class VideoPlayer:
         else:
             self.media_player.set_xwindow(video_panel.winfo_id())
 
-        if self._fullscreen_resume_state["was_playing"]:
+        # 7. Vollbild aktivieren
+        self.fullscreen_window.attributes('-fullscreen', True)
+
+        # 8. Nur wenn Video lief: Neustart für korrektes Rendering
+        if was_playing and self.current_video_path:
+            # Stop (kurz, aber notwendig für Video-Output-Neuinitialisierung)
+            self.media_player.stop()
+            # Media neu laden
+            new_media = self.vlc_instance.media_new(self.current_video_path)
+            self.media_player.set_media(new_media)
+            # Play (VLC nutzt jetzt das gebundene neue Window)
             self.media_player.play()
+            # Position setzen
+            self.media_player.set_time(current_time)
 
-            def seek_to_time():
-                if self.media_player.is_playing():
-                    self.media_player.set_time(self._fullscreen_resume_state["time"])
-                else:
-                    self.parent.after(100, seek_to_time)
-
-            self.parent.after(100, seek_to_time)
+        # 9. Flags setzen
+        self._is_fullscreen = True
+        self._is_transitioning = False
 
     def _on_escape_fullscreen(self, event=None):
         """Event-Handler für die Escape-Taste."""
+        if self._is_transitioning:
+            return "break"
         self._exit_fullscreen()
+        return "break"
 
     # NEUE METHODE
     def _on_spacebar_press(self, event=None):
@@ -425,24 +451,20 @@ class VideoPlayer:
 
     def _exit_fullscreen(self):
         """Beendet den Vollbildmodus und stellt die GUI wieder her."""
-        if not self.fullscreen_window:
+        # Verhindere mehrfache Aufrufe
+        if not self.fullscreen_window or self._is_transitioning:
             return
 
-        self._is_fullscreen = False
+        self._is_transitioning = True
 
+        # 1. Status speichern
         was_playing = self.media_player.is_playing()
-        current_time = self.media_player.get_time()
+        current_time = max(0, self.media_player.get_time())
 
-        if current_time < 0:
-            current_time = 0
-
-        if self.media_player.get_state() != vlc.State.Stopped:
-            self.media_player.stop()
-
-        # 1. Vollbild-Fenster zerstören (zerstört auch alle fs_... Widgets)
+        # 2. Vollbild-Fenster zerstören
         self.fullscreen_window.destroy()
 
-        # --- NEU: Alle Referenzen auf fs_... Widgets löschen ---
+        # 3. Alle Referenzen löschen
         self.fullscreen_window = None
         self.fs_controls_frame = None
         self.fs_play_pause_btn = None
@@ -451,11 +473,8 @@ class VideoPlayer:
         self.fs_progress_canvas = None
         self.fs_progress_bar = None
         self.fs_progress_bg = None
-        # ---
 
-        self.video_frame.update_idletasks()
-
-        # 2. VLC zurück an das URSPRÜNGLICHE Frame binden
+        # 4. WICHTIG: Erst Window zurück binden
         if sys.platform == "win32":
             self.media_player.set_hwnd(self.video_frame.winfo_id())
         elif sys.platform == "darwin":
@@ -463,17 +482,17 @@ class VideoPlayer:
         else:
             self.media_player.set_xwindow(self.video_frame.winfo_id())
 
-        # 3. Wiedergabe fortsetzen (mit kleiner Verzögerung)
-        if was_playing:
+        # 5. Nur wenn Video lief: Neustart
+        if was_playing and self.current_video_path:
+            self.media_player.stop()
+            new_media = self.vlc_instance.media_new(self.current_video_path)
+            self.media_player.set_media(new_media)
             self.media_player.play()
+            self.media_player.set_time(current_time)
 
-            def seek_to_time():
-                if self.media_player.is_playing():
-                    self.media_player.set_time(current_time)
-                else:
-                    self.parent.after(100, seek_to_time)
-
-            self.parent.after(100, seek_to_time)
+        # 6. Flags setzen
+        self._is_fullscreen = False
+        self._is_transitioning = False
 
     # --- ENDE VOLLBILD-LOGIK ---
 

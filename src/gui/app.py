@@ -18,6 +18,7 @@ from .components.video_player import VideoPlayer
 from .components.video_cutter import VideoCutterDialog  # Importiert
 from .components.loading_window import LoadingWindow
 from .components.sd_status_indicator import SDStatusIndicator
+from .components.success_dialog import show_success_dialog
 from ..model.kunde import Kunde
 
 from ..video.processor import VideoProcessor
@@ -1284,7 +1285,13 @@ class VideoGeneratorApp:
     def _handle_status_update(self, status_type, message):
         """Callback für Statusupdates"""
         if status_type == "success":
-            self.root.after(0, lambda: messagebox.showinfo("Fertig", message))
+            # message ist jetzt ein Dict mit created_items
+            if isinstance(message, dict):
+                self.root.after(0, lambda: show_success_dialog(self.root, message))
+            else:
+                # Fallback für alte Text-Nachrichten
+                self.root.after(0, lambda: messagebox.showinfo("Fertig", message))
+
             self.root.after(0, self.progress_handler.set_status, "Status: Fertig.")
 
             # NEU: Auto-Clear nach erfolgreichem Erstellen
@@ -1739,12 +1746,14 @@ class VideoGeneratorApp:
         )
         tk.Label(main_frame, text=info_text, font=("Arial", 10), justify='left').pack(pady=(0, 10))
 
+        trotzdem_button_text = "Trotzdem alle importieren"
         # NEU: Hinweis wenn Auto-Import deaktiviert ist
         settings = self.config.get_settings()
         if not settings.get("sd_auto_import", False):
-            hint_text = "ℹ️ Hinweis: Automatischer Import ist deaktiviert.\nDateien werden nur gesichert, nicht importiert."
+            hint_text = "Hinweis: Automatischer Import ist deaktiviert.\nDateien werden nur gesichert, nicht importiert."
             tk.Label(main_frame, text=hint_text, font=("Arial", 9, "bold"), fg="#D84315",
                     justify='left', bg='#FFE0B2', padx=10, pady=8, relief='solid', borderwidth=1).pack(pady=(0, 15), fill='x')
+            trotzdem_button_text = "Trotzdem alle sichern"
 
         # Buttons
         button_frame = tk.Frame(main_frame)
@@ -1763,7 +1772,7 @@ class VideoGeneratorApp:
             self.sd_card_monitor.set_size_limit_decision("cancel")
             dialog.destroy()
 
-        tk.Button(button_frame, text="Trotzdem alle importieren",
+        tk.Button(button_frame, text=trotzdem_button_text,
                  command=on_proceed_all, bg="#FF9800", fg="white",
                  font=("Arial", 10), width=25, height=2).pack(pady=5)
 

@@ -13,15 +13,38 @@ from src.gui.splash_screen import SplashScreen
 from src.gui.app import VideoGeneratorApp
 from src.utils.constants import APP_VERSION
 
+
 def main():
     """Hauptfunktion der Anwendung"""
     try:
         # Erstelle verstecktes Root-Fenster
         from tkinterdnd2 import TkinterDnD
+        import tkinter as tk  # Für Icon-Handling
         root = TkinterDnD.Tk()
         root.withdraw()  # Verstecke Hauptfenster vorerst
 
-        # Zeige Splash-Screen
+        # Setze App-Icon global, damit es von allen Dialogen/Toplevels geerbt wird
+        base_dir = os.path.dirname(__file__)
+        ico_path = os.path.join(base_dir, 'assets', 'icon.ico')
+        png_icon_path = os.path.join(base_dir, 'assets', 'logo.png')  # PNG/GIF wird für iconphoto benötigt
+
+        # Windows-Taskleisten-/Titelleisten-Icon (nur für dieses Fenster, aber unkritisch)
+        try:
+            if os.path.exists(ico_path):
+                root.iconbitmap(ico_path)
+        except Exception:
+            pass
+
+        # Globale Standard-Icon-Grafik für alle zukünftigen Toplevels/Dialogs setzen
+        try:
+            if os.path.exists(png_icon_path):
+                _icon_img = tk.PhotoImage(file=png_icon_path)
+                root.iconphoto(True, _icon_img)  # True => als Default für alle neuen Toplevels
+                root._app_icon_img = _icon_img  # Referenz halten, damit das Bild nicht vom GC eingesammelt wird
+        except Exception:
+            pass
+
+        # Zeige Splash-Screen (erbt nun das Icon automatisch)
         splash = SplashScreen(root, version=APP_VERSION)
 
         # Callback für Status-Updates vom Splash
@@ -72,6 +95,7 @@ def main():
         import traceback
         traceback.print_exc()
         input("Drücke Enter zum Beenden...")
+
 
 if __name__ == "__main__":
     main()

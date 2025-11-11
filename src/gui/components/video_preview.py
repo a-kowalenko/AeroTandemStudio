@@ -258,6 +258,14 @@ class VideoPreview:
         """
         file_identity = self._get_file_identity(original_path)
         if not file_identity:
+            # Fallback: Suche nach Dateinamen im Working-Folder
+            # (wichtig, wenn original_path nicht existiert, z.B. nach Trim)
+            filename = os.path.basename(original_path)
+            if self.temp_dir:
+                working_path = os.path.join(self.temp_dir, filename)
+                if os.path.exists(working_path):
+                    print(f"  📂 Fallback: Gefunden im Working-Folder: {filename}")
+                    return working_path
             return None
 
         copy_path = self.video_copies_map.get(file_identity)
@@ -272,6 +280,13 @@ class VideoPreview:
             if file_identity in self.metadata_cache:
                 del self.metadata_cache[file_identity]
 
+        # Fallback: Suche nach Dateinamen (wichtig nach Trim, wenn Größe sich geändert hat)
+        filename = os.path.basename(original_path)
+        for cached_identity, cached_path in self.video_copies_map.items():
+            if cached_identity[0] == filename and os.path.exists(cached_path):
+                print(f"  📂 Fallback: Gefunden via Dateinamen-Match: {filename}")
+                return cached_path
+
         return None
 
     def _get_clip_durations_seconds(self, video_paths):
@@ -279,17 +294,21 @@ class VideoPreview:
         durations = []
         for video_path in video_paths:  # HINWEIS: video_paths ist hier eine Liste von KOPIEN
             try:
-                # Suche die file-identity aus der Kopie (umgekehrter Lookup im Cache)
-                file_identity = next((key for key, value in self.video_copies_map.items() if value == video_path), None)
+                # KORRIGIERT: Berechne file_identity direkt aus dem copy_path
+                # (nicht via umgekehrten Lookup), damit nach Trim die neue Größe erkannt wird
+                file_identity = self._get_file_identity(video_path)
 
                 if file_identity and file_identity in self.metadata_cache:
                     duration_str = self.metadata_cache[file_identity].get("duration_sec_str", "0.0")
                     durations.append(float(duration_str))
+                    print(f"Clip-Dauer aus Cache: {os.path.basename(video_path)} = {duration_str}s")
                 else:
                     # Fallback: ffprobe direkt auf die Kopie anwenden
+                    print(f"Clip-Dauer via ffprobe (nicht im Cache): {os.path.basename(video_path)}")
                     duration_str = self._get_single_video_duration_str(video_path)
                     durations.append(float(duration_str))
-            except Exception:
+            except Exception as e:
+                print(f"Fehler beim Ermitteln der Clip-Dauer für {video_path}: {e}")
                 durations.append(0.0)
         return durations
 
@@ -714,13 +733,18 @@ class VideoPreview:
             safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
             copy_path = os.path.join(self.temp_dir, safe_filename)
 
-            # Bei Namenskollision: Füge Suffix hinzu
-            if os.path.exists(copy_path):
+            # Bei Namenskollision:
+            # - Beim Re-Encoding: Überschreibe die alte Datei
+            # - Beim Stream-Copy: Füge Suffix hinzu
+            if os.path.exists(copy_path) and not needs_reencoding:
                 base_name, ext = os.path.splitext(safe_filename)
                 counter = 1
                 while os.path.exists(copy_path):
                     copy_path = os.path.join(self.temp_dir, f"{base_name}_{counter}{ext}")
                     counter += 1
+            elif os.path.exists(copy_path) and needs_reencoding:
+                # Beim Re-Encoding: Alte Datei wird überschrieben
+                print(f"  → Überschreibe existierende Datei: {os.path.basename(copy_path)}")
 
 
             # OPTIMIERUNG: Prüfe ob bereits eine gültige Kopie existiert
@@ -1231,6 +1255,18 @@ class VideoPreview:
             task_id: Optional Task-ID für paralleles Encoding
             video_index: Optional Index des Videos in der DragDrop-Tabelle
         """
+        # WICHTIG: Wenn Input = Output, verwende temporäre Datei
+        use_temp_output = os.path.normpath(input_path) == os.path.normpath(output_path)
+
+        if use_temp_output:
+            # Erstelle temporären Output-Pfad
+            base, ext = os.path.splitext(output_path)
+            temp_output_path = f"{base}.__temp_reencode__{ext}"
+            actual_output_path = temp_output_path
+        else:
+            actual_output_path = output_path
+            temp_output_path = None
+
         target_params = {
             'width': 1920, 'height': 1080, 'fps': 30, 'pix_fmt': 'yuv420p',
             'audio_codec': 'aac', 'audio_sample_rate': 48000, 'audio_channels': 2
@@ -1293,19 +1329,33 @@ class VideoPreview:
         else:
             # Software-Filter (Standard)
             # WICHTIG: format=yuv420p konvertiert 10-bit Videos zu 8-bit (für Kompatibilität)
-            cmd.extend([
-                "-vf", f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']},format=yuv420p"
-            ])
+            filter_chain = f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']},format=yuv420p"
+
+            # Für Hardware-Encoder: Konvertiere zu nv12 für Encoder, dann zurück zu yuv420p
+            if self.hw_accel_enabled and hw_type in ['intel', 'nvidia', 'amd']:
+                filter_chain = f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']}"
+
+            cmd.extend(["-vf", filter_chain])
 
         # WICHTIG: Pixel-Format explizit setzen für bessere Kompatibilität
+        # Wird VOR Encoder-Parametern gesetzt, kann aber überschrieben werden
         cmd.extend(["-pix_fmt", "yuv420p"])
 
         # Video-Encoder (Hardware oder Software)
         cmd.extend(encoding_params['output_params'])
 
+        # WICHTIG: Für Hardware-Encoder (besonders QSV) nochmal Pixel-Format erzwingen
+        # QSV bevorzugt nv12, aber für VLC-Kompatibilität brauchen wir yuv420p
+        if self.hw_accel_enabled:
+            cmd.extend(["-pix_fmt", "yuv420p"])
+
         # Zusätzliche Parameter für Software-Encoding (wenn HW nicht aktiv)
         if not self.hw_accel_enabled:
             encoder = encoding_params.get('encoder', 'libx264')
+
+            # Keyframe-Interval für bessere Schneidbarkeit (für alle Codecs)
+            # GOP alle 1 Sekunde = 30 Frames bei 30fps
+            cmd.extend(["-g", "30", "-keyint_min", "30"])
 
             # Codec-spezifische Parameter
             if encoder == 'libx264':
@@ -1343,6 +1393,15 @@ class VideoPreview:
             # Bei Hardware-Encoding: Optimierte Qualitätseinstellungen
             # (preset und tune sind bereits in encoding_params enthalten)
             print(f"  → Nutze Hardware-Encoder: {encoding_params['encoder']}")
+            # DEBUG: Zeige extra_params
+            if 'extra_params' in self.hw_detector.detect_hardware():
+                extra_params = self.hw_detector.detect_hardware().get('extra_params', [])
+                if '-g' in extra_params:
+                    gop_index = extra_params.index('-g')
+                    gop_value = extra_params[gop_index + 1] if gop_index + 1 < len(extra_params) else '?'
+                    print(f"  → GOP-Size: {gop_value} (Keyframes alle {gop_value} Frames)")
+                else:
+                    print(f"  ⚠️ WARNUNG: Keine GOP-Parameter (-g) in Hardware-Config!")
             if use_hw_filters:
                 print(f"  → Nutze Hardware-Filter: {hw_type}")
 
@@ -1359,7 +1418,7 @@ class VideoPreview:
             "-movflags", "+faststart",
             "-max_muxing_queue_size", "1024",
             "-map", "0:v:0", "-map", "0:a:0?",
-            output_path
+            actual_output_path  # Verwende temp path wenn Input=Output
         ])
 
         # WICHTIG: Capture stderr für Fehlerdiagnose
@@ -1379,7 +1438,21 @@ class VideoPreview:
         # Verwende neue Methode mit Live-Fortschritt
         try:
             self._run_ffmpeg_with_progress(cmd, total_duration, task_name, task_id, video_index)
-            print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+
+            # Wenn temporäre Datei verwendet wurde, ersetze Original atomisch
+            if use_temp_output and os.path.exists(temp_output_path):
+                try:
+                    # Atomare Ersetzung: löscht Original und benennt temp um
+                    os.replace(temp_output_path, output_path)
+                    print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+                except Exception as e:
+                    print(f"⚠️ Fehler beim Ersetzen der Datei: {e}")
+                    # Cleanup temp file
+                    if os.path.exists(temp_output_path):
+                        os.remove(temp_output_path)
+                    raise
+            else:
+                print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
 
             # Setze Status in DragDrop-Tabelle auf "Fertig"
             if video_index is not None and self.app and hasattr(self.app, 'drag_drop'):
@@ -1387,19 +1460,38 @@ class VideoPreview:
 
             return  # Erfolg!
         except subprocess.CalledProcessError as e:
+            # Cleanup temp file bei Fehler
+            if use_temp_output and temp_output_path and os.path.exists(temp_output_path):
+                try:
+                    os.remove(temp_output_path)
+                except:
+                    pass
+
             # Hole stderr aus dem Fehler
             stderr_text = e.stderr if hasattr(e, 'stderr') else "Kein stderr verfügbar"
 
             # ZUSÄTZLICHE ÜBERPRÜFUNG: Wenn Output-Datei existiert und vernünftige Größe hat,
-            # betrachte als Erfolg
-            output_exists = os.path.exists(output_path)
-            output_size = os.path.getsize(output_path) if output_exists else 0
+            # betrachte als Erfolg (prüfe temp_output_path wenn verwendet)
+            check_path = temp_output_path if use_temp_output else output_path
+            output_exists = os.path.exists(check_path)
+            output_size = os.path.getsize(check_path) if output_exists else 0
             output_valid = output_exists and output_size > 10240
 
             if output_valid:
                 print(f"⚠️ FFmpeg beendet mit Fehler, aber Output-Datei ist valid ({output_size} bytes)")
                 print(f"→ Betrachte als Erfolg")
-                print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+
+                # Wenn temporäre Datei verwendet wurde, ersetze Original
+                if use_temp_output:
+                    try:
+                        os.replace(temp_output_path, output_path)
+                        print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+                    except Exception as replace_err:
+                        print(f"⚠️ Fehler beim Ersetzen der Datei: {replace_err}")
+                        raise
+                else:
+                    print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+
                 return  # Erfolg!
 
             # Echter Fehler - zeige Details
@@ -1595,15 +1687,10 @@ class VideoPreview:
                             if not target_codec:
                                 target_codec = "h264"
 
-                            # Cache leeren
+                            # Cache leeren - ABER Dateien NICHT löschen!
+                            # Die Dateien werden beim Re-Encoding überschrieben.
                             if self.video_copies_map:
-                                print("🗑️ Lösche alte Kopien...")
-                                for path, copy_path in list(self.video_copies_map.items()):
-                                    if os.path.exists(copy_path):
-                                        try:
-                                            os.remove(copy_path)
-                                        except:
-                                            pass
+                                print("🗑️ Leere Cache (Dateien bleiben erhalten für Re-Encoding)...")
                                 self.video_copies_map.clear()
                                 self.metadata_cache.clear()
 
@@ -1991,11 +2078,24 @@ class VideoPreview:
         """
         Fügt ein neues Mapping für eine geteilte Datei hinzu.
         Verwendet file-identity (Name + Größe) als Cache-Key.
+
+        WICHTIG: Wenn eine Datei getrimmt wurde, hat sie eine neue Größe.
+        Wir müssen alle alten Identitäten mit dem gleichen Dateinamen löschen.
         """
         file_identity = self._get_file_identity(original_placeholder)
         if not file_identity:
             print(f"⚠️ Kann neue Kopie nicht registrieren: File-Identity konnte nicht erstellt werden für {original_placeholder}")
             return
+
+        # Lösche alle alten Identitäten mit dem gleichen Dateinamen
+        filename = os.path.basename(original_placeholder)
+        old_identities = [key for key in self.video_copies_map.keys() if key[0] == filename]
+        for old_identity in old_identities:
+            if old_identity != file_identity:
+                print(f"Lösche alte File-Identity: {old_identity}")
+                del self.video_copies_map[old_identity]
+                if old_identity in self.metadata_cache:
+                    del self.metadata_cache[old_identity]
 
         if file_identity in self.video_copies_map:
             print(f"Warnung: File-Identity {file_identity} existierte bereits. Wird überschrieben.")
@@ -2094,18 +2194,67 @@ class VideoPreview:
         # self.play_button.config(state="normal")  # ENTFERNT
         # self.action_button.config(state="disabled")  # ENTFERNT
 
-        # NEU: Video-Player aktualisieren
+        # NEU: Video-Player vollständig aktualisieren mit neuen Clip-Dauern
         clip_durations = self._get_clip_durations_seconds(copy_paths)
         if self.app and hasattr(self.app, 'video_player') and self.app.video_player:
+            print(f"Aktualisiere Video-Player: {len(clip_durations)} Clips, Gesamt: {sum(clip_durations):.1f}s")
+
+            # Speichere aktuelle Position & Play-Status
+            current_time_ms = 0
+            was_playing = False
+            try:
+                if self.app.video_player.media_player:
+                    current_time_ms = self.app.video_player.media_player.get_time()
+                    was_playing = self.app.video_player.media_player.is_playing()
+            except:
+                pass
+
+            # Lade Video neu (aktualisiert Dauer, Progress-Bar, Clip-Marker)
             self.app.video_player.load_video(self.combined_video_path, clip_durations)
 
-        # NEU: Aktualisiere Thumbnails und Info
-        self.video_paths = copy_paths
+            # Versuche Position wiederherzustellen (falls sinnvoll)
+            if current_time_ms > 0:
+                new_total_ms = sum(clip_durations) * 1000
+                if current_time_ms < new_total_ms:
+                    # Position ist noch gültig
+                    self.parent.after(200, lambda: self._restore_player_position(current_time_ms, was_playing))
+                else:
+                    # Position ungültig - setze auf Anfang
+                    print(f"Position {current_time_ms}ms ungültig für neue Dauer {new_total_ms}ms - starte bei 0")
+
+        # NEU: Aktualisiere Thumbnail-Galerie nach Cut/Split
+        # Wichtig: self.last_video_paths enthält die aktualisierte Liste (inkl. neue Clips nach Split)
+
+        # WICHTIG: Lösche Thumbnail-Cache für betroffene Videos
+        # Nach Trim/Split haben Videos neue Inhalte, aber möglicherweise gleiche Pfade
+        keys_to_remove = []
+        for video_path in self.last_video_paths:
+            # Entferne alle Cache-Einträge für diesen Video-Pfad
+            keys_for_path = [key for key in self.thumbnail_images.keys() if key[0] == video_path]
+            keys_to_remove.extend(keys_for_path)
+
+        for key in keys_to_remove:
+            del self.thumbnail_images[key]
+
+        if keys_to_remove:
+            print(f"Thumbnail-Cache geleert für {len(keys_to_remove)} Einträge (geänderte Videos)")
+
+        self.video_paths = self.last_video_paths
         self.clip_durations = clip_durations
-        self.current_active_clip = 0
         self._update_thumbnails()
-        self._update_info()
-        self._update_button_states()
+        print(f"Thumbnails aktualisiert: {len(self.video_paths)} Clips")
+
+    def _restore_player_position(self, time_ms, was_playing):
+        """Stellt die Player-Position nach Preview-Update wieder her."""
+        try:
+            if self.app and hasattr(self.app, 'video_player') and self.app.video_player:
+                if self.app.video_player.media_player:
+                    self.app.video_player.media_player.set_time(int(time_ms))
+                    if was_playing:
+                        self.app.video_player.media_player.play()
+                    print(f"Position wiederhergestellt: {time_ms}ms, Playing: {was_playing}")
+        except Exception as e:
+            print(f"Fehler beim Wiederherstellen der Position: {e}")
 
     def _get_single_video_duration_str(self, video_path):
         """Hilfsmethode: Holt die Dauer EINES Videos als String in Sekunden (z.B. '12.34'). (Blockierend)"""
@@ -2551,7 +2700,9 @@ class VideoPreview:
         Returns:
             ImageTk.PhotoImage oder None
         """
-        cache_key = (clip_index, is_active)
+        # WICHTIG: Cache-Key muss Video-Pfad enthalten, nicht nur Index!
+        # Sonst bekommt ein neues Video an derselben Position das alte Thumbnail
+        cache_key = (video_path, is_active)
         if cache_key in self.thumbnail_images:
             return self.thumbnail_images[cache_key]
 

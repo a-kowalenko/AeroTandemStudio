@@ -2222,6 +2222,28 @@ class VideoPreview:
                     # Position ungültig - setze auf Anfang
                     print(f"Position {current_time_ms}ms ungültig für neue Dauer {new_total_ms}ms - starte bei 0")
 
+        # NEU: Aktualisiere Thumbnail-Galerie nach Cut/Split
+        # Wichtig: self.last_video_paths enthält die aktualisierte Liste (inkl. neue Clips nach Split)
+
+        # WICHTIG: Lösche Thumbnail-Cache für betroffene Videos
+        # Nach Trim/Split haben Videos neue Inhalte, aber möglicherweise gleiche Pfade
+        keys_to_remove = []
+        for video_path in self.last_video_paths:
+            # Entferne alle Cache-Einträge für diesen Video-Pfad
+            keys_for_path = [key for key in self.thumbnail_images.keys() if key[0] == video_path]
+            keys_to_remove.extend(keys_for_path)
+
+        for key in keys_to_remove:
+            del self.thumbnail_images[key]
+
+        if keys_to_remove:
+            print(f"Thumbnail-Cache geleert für {len(keys_to_remove)} Einträge (geänderte Videos)")
+
+        self.video_paths = self.last_video_paths
+        self.clip_durations = clip_durations
+        self._update_thumbnails()
+        print(f"Thumbnails aktualisiert: {len(self.video_paths)} Clips")
+
     def _restore_player_position(self, time_ms, was_playing):
         """Stellt die Player-Position nach Preview-Update wieder her."""
         try:
@@ -2678,7 +2700,9 @@ class VideoPreview:
         Returns:
             ImageTk.PhotoImage oder None
         """
-        cache_key = (clip_index, is_active)
+        # WICHTIG: Cache-Key muss Video-Pfad enthalten, nicht nur Index!
+        # Sonst bekommt ein neues Video an derselben Position das alte Thumbnail
+        cache_key = (video_path, is_active)
         if cache_key in self.thumbnail_images:
             return self.thumbnail_images[cache_key]
 

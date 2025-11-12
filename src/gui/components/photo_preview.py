@@ -218,7 +218,7 @@ class PhotoPreview:
 
         self.delete_button = tk.Button(
             button_frame,
-            text="Foto löschen",
+            text="Entfernen",
             command=self._delete_current_photo,
             bg="#f44336",
             fg="white",
@@ -242,25 +242,26 @@ class PhotoPreview:
         # QR-Code-Scan Button
         self.qr_scan_button = tk.Button(
             button_frame,
-            text="🔍",  # QR-Code ähnliches Symbol (Box mit Kreuz)
+            text="🔍 QR",
             command=self._scan_current_photo_qr,
             bg="#2196F3",
             fg="white",
             font=("Arial", 9),
-            width=3,
+            width=6,
             state="disabled"
         )
         self.qr_scan_button.grid(row=0, column=2, sticky="ew", padx=(5, 0))
 
         # --- NEU: Wasserzeichen-Button ---
+        self.wm_button_var = tk.BooleanVar(value=False)
         self.wm_button = tk.Button(
             button_frame,
-            text="💧",
+            text="Preview ☐",
             command=self._on_wm_button_click,
             bg="#f0f0f0",
             fg="black",
             font=("Arial", 9),
-            width=3,
+            width=10,
             state="disabled"
         )
         # INITIAL VERSTECKT - wird von app.py gesteuert
@@ -1025,11 +1026,11 @@ class PhotoPreview:
         if self.photo_paths and effective_selection:
             count = len(effective_selection)
             if count == 1:
-                self.delete_button.config(text="Foto löschen", state="normal")
+                self.delete_button.config(text="Entfernen", state="normal")
             else:
-                self.delete_button.config(text=f"{count} Fotos löschen", state="normal")
+                self.delete_button.config(text=f"{count} Entfernen", state="normal")
         else:
-            self.delete_button.config(text="Foto löschen", state="disabled")
+            self.delete_button.config(text="Entfernen", state="disabled")
 
         # Clear-Selection-Button nur anzeigen wenn explizite Markierung vorhanden
         if self.explicitly_selected and self.selected_photos:
@@ -1174,16 +1175,18 @@ class PhotoPreview:
         """
         if (not self.app or not hasattr(self.app, 'drag_drop') or
             self.current_photo_index < 0 or not self.photo_paths):
-            self.wm_button.config(text="💧", state="disabled", bg="#f0f0f0")
+            self.wm_button.config(text="Preview ☐", state="disabled", bg="#f0f0f0")
+            self.wm_button_var.set(False)
             return
 
         # Lese den Status direkt von drag_drop (via app)
         is_marked = self.app.drag_drop.is_photo_watermarked(self.current_photo_index)
+        self.wm_button_var.set(is_marked)
 
         if is_marked:
-            self.wm_button.config(text="💧", state="normal", bg="#D32F2F", fg="white")
+            self.wm_button.config(text="Preview ☑", state="normal", bg="#4CAF50", fg="white")
         else:
-            self.wm_button.config(text="💧", state="normal", bg="#FF9800", fg="black")
+            self.wm_button.config(text="Preview ☐", state="normal", bg="#f0f0f0", fg="black")
 
     def pack(self, **kwargs):
         """Packt den Frame"""

@@ -97,7 +97,7 @@ class VideoGeneratorApp:
         self.root.title("Aero Tandem Studio")
 
         # Zentriere Fenster auf dem Bildschirm
-        window_width = 1400
+        window_width = 1500
         window_height = 800
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
@@ -297,7 +297,7 @@ class VideoGeneratorApp:
         self.root.title("Aero Tandem Studio")
 
         # Zentriere Fenster auf dem Bildschirm
-        window_width = 1400
+        window_width = 1500
         window_height = 800
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()

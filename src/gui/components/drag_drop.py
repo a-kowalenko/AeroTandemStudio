@@ -1348,6 +1348,10 @@ class DragDropFrame:
 
         self._update_video_table()
 
+        # NEU: Synchronisiere mit video_preview
+        if self.app and hasattr(self.app, 'video_preview'):
+            self.app.video_preview.update_wm_button_state()
+
     def is_video_watermarked(self, index):
         """Prüft, ob ein bestimmter Video-Index als Wasserzeichen markiert ist."""
         return self.watermark_clip_index == index
@@ -1365,6 +1369,10 @@ class DragDropFrame:
             self.watermark_photo_indices.append(index)
 
         self._update_photo_table()
+
+        # NEU: Synchronisiere mit photo_preview
+        if self.app and hasattr(self.app, 'photo_preview'):
+            self.app.photo_preview.update_wm_button_state()
 
     def is_photo_watermarked(self, index):
         """Prüft, ob ein bestimmter Foto-Index als Wasserzeichen markiert ist."""
@@ -1398,6 +1406,10 @@ class DragDropFrame:
             self.watermark_photo_indices.append(index)
 
         self._update_photo_table()
+
+        # NEU: Synchronisiere mit photo_preview
+        if self.app and hasattr(self.app, 'photo_preview'):
+            self.app.photo_preview.update_wm_button_state()
 
         # Verhindere, dass die Reihe ausgewählt wird (optional, aber gut für Checkbox-Feeling)
         self.photo_tree.selection_remove(self.photo_tree.selection())
@@ -1434,6 +1446,10 @@ class DragDropFrame:
             self.watermark_clip_index = index
 
         self._update_video_table()
+
+        # NEU: Synchronisiere mit video_preview
+        if self.app and hasattr(self.app, 'video_preview'):
+            self.app.video_preview.update_wm_button_state()
 
         # Verhindere, dass die Reihe ausgewählt wird
         self.video_tree.selection_remove(self.video_tree.selection())

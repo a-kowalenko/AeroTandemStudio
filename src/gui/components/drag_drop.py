@@ -924,16 +924,35 @@ class DragDropFrame:
         self.clear_all()
 
     # NEU: Methoden für Video-Encoding-Fortschritt
-    def update_video_progress(self, video_index, progress_percent, fps=None, eta=None):
+    def update_video_progress(self, video_identifier, progress_percent, fps=None, eta=None):
         """
         Aktualisiert den Fortschritt für ein bestimmtes Video in der Tabelle.
 
         Args:
-            video_index: Index des Videos (0-basiert)
+            video_identifier: Dateipfad oder Index des Videos (0-basiert)
             progress_percent: Fortschritt in Prozent (0-100)
             fps: Optional FPS-Wert
             eta: Optional ETA-String (z.B. "1:23")
         """
+        # Bestimme den Index basierend auf dem Identifier
+        if isinstance(video_identifier, str):
+            # Identifier ist ein Dateipfad - finde den Index
+            try:
+                video_index = self.video_paths.index(video_identifier)
+            except ValueError:
+                # Pfad nicht in Liste - versuche Basis-Dateinamen zu vergleichen
+                basename = os.path.basename(video_identifier)
+                video_index = -1
+                for i, path in enumerate(self.video_paths):
+                    if os.path.basename(path) == basename:
+                        video_index = i
+                        break
+                if video_index == -1:
+                    return  # Video nicht gefunden
+        else:
+            # Identifier ist bereits ein Index
+            video_index = video_identifier
+
         if video_index < 0 or video_index >= len(self.video_paths):
             return
 
@@ -960,8 +979,27 @@ class DragDropFrame:
             values[7] = progress_text  # Progress ist Spalte 7 (0-basiert)
             self.video_tree.item(item, values=values)
 
-    def clear_video_progress(self, video_index):
+    def clear_video_progress(self, video_identifier):
         """Löscht den Fortschritt für ein bestimmtes Video"""
+        # Bestimme den Index basierend auf dem Identifier
+        if isinstance(video_identifier, str):
+            # Identifier ist ein Dateipfad - finde den Index
+            try:
+                video_index = self.video_paths.index(video_identifier)
+            except ValueError:
+                # Pfad nicht in Liste - versuche Basis-Dateinamen zu vergleichen
+                basename = os.path.basename(video_identifier)
+                video_index = -1
+                for i, path in enumerate(self.video_paths):
+                    if os.path.basename(path) == basename:
+                        video_index = i
+                        break
+                if video_index == -1:
+                    return  # Video nicht gefunden
+        else:
+            # Identifier ist bereits ein Index
+            video_index = video_identifier
+
         if video_index < 0 or video_index >= len(self.video_paths):
             return
 
@@ -972,14 +1010,33 @@ class DragDropFrame:
             values[7] = ""  # Leere Progress-Spalte
             self.video_tree.item(item, values=values)
 
-    def set_video_status(self, video_index, status_text):
+    def set_video_status(self, video_identifier, status_text):
         """
         Setzt einen Status-Text für ein Video (z.B. "Fertig", "Fehler", "Warte...")
 
         Args:
-            video_index: Index des Videos
+            video_identifier: Dateipfad oder Index des Videos
             status_text: Status-Text anzuzeigen
         """
+        # Bestimme den Index basierend auf dem Identifier
+        if isinstance(video_identifier, str):
+            # Identifier ist ein Dateipfad - finde den Index
+            try:
+                video_index = self.video_paths.index(video_identifier)
+            except ValueError:
+                # Pfad nicht in Liste - versuche Basis-Dateinamen zu vergleichen
+                basename = os.path.basename(video_identifier)
+                video_index = -1
+                for i, path in enumerate(self.video_paths):
+                    if os.path.basename(path) == basename:
+                        video_index = i
+                        break
+                if video_index == -1:
+                    return  # Video nicht gefunden
+        else:
+            # Identifier ist bereits ein Index
+            video_index = video_identifier
+
         if video_index < 0 or video_index >= len(self.video_paths):
             return
 

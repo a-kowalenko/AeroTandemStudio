@@ -810,13 +810,13 @@ class VideoPreview:
             for i, original_path, source_path, copy_path, filename in videos_to_process:
                 # Setze Status auf "Warte..." für alle Videos
                 if self.app and hasattr(self.app, 'drag_drop'):
-                    self.parent.after(0, self.app.drag_drop.set_video_status, i, "⏳ Warte...")
+                    self.parent.after(0, self.app.drag_drop.set_video_status, original_path, "⏳ Warte...")
 
-                def reencode_task(src=source_path, dst=copy_path, idx=i, task_id=None):
+                def reencode_task(src=source_path, dst=copy_path, orig_path=original_path, task_id=None):
                     # Setze Status auf "Kodiert..." wenn Task startet
                     if self.app and hasattr(self.app, 'drag_drop'):
-                        self.parent.after(0, self.app.drag_drop.set_video_status, idx, "🔄 Kodiert...")
-                    self._reencode_single_clip(src, dst, task_id, idx)
+                        self.parent.after(0, self.app.drag_drop.set_video_status, orig_path, "🔄 Kodiert...")
+                    self._reencode_single_clip(src, dst, task_id, orig_path)
                 tasks.append((reencode_task, (), {}))
 
             # Führe parallele Verarbeitung aus
@@ -889,10 +889,10 @@ class VideoPreview:
 
                 # Setze Status in DragDrop-Tabelle
                 if self.app and hasattr(self.app, 'drag_drop'):
-                    self.parent.after(0, self.app.drag_drop.set_video_status, i, "🔄 Kodiert...")
+                    self.parent.after(0, self.app.drag_drop.set_video_status, original_path, "🔄 Kodiert...")
 
                 try:
-                    self._reencode_single_clip(source_path, copy_path, video_index=i)
+                    self._reencode_single_clip(source_path, copy_path, video_index=original_path)
 
                     # Speichere Kodierzeit für ETA-Berechnung
                     encoding_time = time.time() - start_time

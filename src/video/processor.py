@@ -645,8 +645,10 @@ class VideoProcessor:
         # Task Name basierend auf task_id
         task_name = f"Wasserzeichen-Video (Task {task_id})" if task_id else "Wasserzeichen-Video"
 
-        # Verwende neue Methode mit Live-Fortschritt
-        self._run_ffmpeg_with_progress(command, total_duration, task_name, task_id)
+        # WICHTIG: task_id wird NICHT an _run_ffmpeg_with_progress übergeben,
+        # da das Wasserzeichen-Video nicht in der drag_drop Tabelle ist
+        # und der Progress-Balken daher nirgendwo angezeigt werden sollte
+        self._run_ffmpeg_with_progress(command, total_duration, task_name, task_id=None)
 
     def _create_intro_with_silent_audio(self, output_path, dauer, v_params, drawtext_filter):
         """

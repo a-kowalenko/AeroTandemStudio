@@ -53,4 +53,4 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'config.json')
 # --- Log-Dateipfad ---
 LOG_FILE = os.path.join(CONFIG_DIR, 'app.log')
 
-WASSERZEICHEN_PATH = get_resource_path("assets/skydivede_wasserzeichen.png")
+WASSERZEICHEN_PATH = get_resource_path("assets/preview_stempel.png")

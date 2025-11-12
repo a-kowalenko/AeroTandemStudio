@@ -125,7 +125,7 @@ class VideoGeneratorApp:
         self.left_frame = tk.Frame(self.main_container, width=600)
         self.left_frame.pack(side="left", fill="both", expand=True, padx=(0, 20))
 
-        self.right_frame = tk.Frame(self.main_container, width=350)
+        self.right_frame = tk.Frame(self.main_container, width=450)
         self.right_frame.pack(side="right", fill="y", padx=(20, 0))
 
         # Nächster Chunk

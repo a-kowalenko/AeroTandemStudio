@@ -589,10 +589,10 @@ class VideoProcessor:
         """
 
         # Pfad zum Wasserzeichen-Bild
-        wasserzeichen_path = os.path.join(os.path.dirname(self.hintergrund_path), "skydivede_wasserzeichen.png")
+        wasserzeichen_path = os.path.join(os.path.dirname(self.hintergrund_path), "preview_stempel.png")
 
         if not os.path.exists(wasserzeichen_path):
-            raise FileNotFoundError("skydivede_wasserzeichen.png fehlt im assets/ Ordner")
+            raise FileNotFoundError("preview_stempel.png fehlt im assets/ Ordner")
 
         # Hole Videodauer für Fortschrittsanzeige
         total_duration = self._get_video_duration(input_video_path)
@@ -821,10 +821,13 @@ class VideoProcessor:
 
     def _create_photo_with_watermark(self, input_photo_path, output_dir):
         """
-        Verwendet FFmpeg, um ein einzelnes Foto auf 720p (Höhe) zu skalieren
-        und ein Wasserzeichen (80% Transparenz, volle Breite) darüber zu legen.
+        Verwendet PIL/Pillow, um ein einzelnes Foto auf 720p (Höhe) zu skalieren
+        und ein Wasserzeichen (80% Transparenz) darüber zu legen.
+        Das Wasserzeichen wird so groß wie möglich gemacht, ohne das Seitenverhältnis zu ändern.
         """
-        wasserzeichen_path = os.path.join(os.path.dirname(self.hintergrund_path), "skydivede_wasserzeichen.png")
+        from PIL import Image
+
+        wasserzeichen_path = os.path.join(os.path.dirname(self.hintergrund_path), "preview_stempel.png")
 
         if not os.path.exists(wasserzeichen_path):
             print(f"Warnung: Wasserzeichen-Datei nicht gefunden: {wasserzeichen_path}")
@@ -837,22 +840,82 @@ class VideoProcessor:
         output_path = os.path.join(output_dir, output_filename)
 
         target_height = 720
-        alpha_level = 0.8  # 80% Transparenz
+        alpha_level = 1  # keine Transparenz
+
+        try:
+            # Lade Foto und Wasserzeichen
+            foto = Image.open(input_photo_path).convert('RGBA')
+            wasserzeichen = Image.open(wasserzeichen_path).convert('RGBA')
+
+            # Skaliere Foto auf Zielhöhe, behalte Seitenverhältnis
+            foto_aspect_ratio = foto.width / foto.height
+            new_foto_width = int(target_height * foto_aspect_ratio)
+            foto = foto.resize((new_foto_width, target_height), Image.Resampling.LANCZOS)
+
+            # Berechne optimale Wasserzeichen-Größe:
+            # Das Wasserzeichen soll so groß wie möglich sein, aber vollständig ins Foto passen
+            wm_aspect_ratio = wasserzeichen.width / wasserzeichen.height
+            foto_aspect = foto.width / foto.height
+
+            if wm_aspect_ratio > foto_aspect:
+                # Wasserzeichen ist breiter (im Verhältnis) -> Breite ist limitierend
+                new_wm_width = foto.width
+                new_wm_height = int(new_wm_width / wm_aspect_ratio)
+            else:
+                # Wasserzeichen ist höher (im Verhältnis) -> Höhe ist limitierend
+                new_wm_height = foto.height
+                new_wm_width = int(new_wm_height * wm_aspect_ratio)
+
+            # Skaliere Wasserzeichen
+            wasserzeichen = wasserzeichen.resize((new_wm_width, new_wm_height), Image.Resampling.LANCZOS)
+
+            # Setze Transparenz des Wasserzeichens
+            if wasserzeichen.mode == 'RGBA':
+                r, g, b, a = wasserzeichen.split()
+                # Multipliziere Alpha-Kanal mit Transparenz-Faktor
+                a = a.point(lambda x: int(x * alpha_level))
+                wasserzeichen = Image.merge('RGBA', (r, g, b, a))
+
+            # Berechne Position (mittig)
+            paste_x = (foto.width - wasserzeichen.width) // 2
+            paste_y = (foto.height - wasserzeichen.height) // 2
+
+            # Erstelle Composite-Bild
+            foto.paste(wasserzeichen, (paste_x, paste_y), wasserzeichen)
+
+            # Speichere als JPEG (konvertiere von RGBA zu RGB)
+            foto_rgb = foto.convert('RGB')
+            foto_rgb.save(output_path, 'JPEG', quality=90)
+
+        except Exception as e:
+            print(f"Fehler beim Erstellen des Wasserzeichen-Fotos für {output_filename}:")
+            print(f"Fehler: {e}")
+            # Fallback: Versuche es mit FFmpeg
+            self._create_photo_with_watermark_ffmpeg(input_photo_path, output_dir)
+
+    def _create_photo_with_watermark_ffmpeg(self, input_photo_path, output_dir):
+        """
+        Fallback: Verwendet FFmpeg für Wasserzeichen-Fotos.
+        """
+        wasserzeichen_path = os.path.join(os.path.dirname(self.hintergrund_path), "preview_stempel.png")
+        output_filename = os.path.basename(input_photo_path)
+        output_path = os.path.join(output_dir, output_filename)
+        target_height = 720
+        alpha_level = 1
 
         # FFmpeg Filter:
-        # 1. [0:v] (Input-Foto) skalieren auf 720px Höhe, Seitenverhältnis beibehalten
-        # 2. [1:v] (Wasserzeichen) auf Foto-Breite skalieren, Seitenverhältnis beibehalten
-        # 3. [wm_scaled] (Wasserzeichen) Transparenz auf 80% setzen
-        # 4. [v][wm_transparent] (beide) überlagern (mittig)
-
+        # Einfacher Ansatz: Skaliere Wasserzeichen mit scale, behalte Seitenverhältnis
         watermark_filter = (
+            # Skaliere Hauptfoto auf Zielhöhe (Breite automatisch berechnet)
             f"[0:v]scale=w=-2:h={target_height}[v];"
-            # Skaliere Wasserzeichen auf die VOLLE BREITE des Fotos (w=iw), behalte Seitenverhältnis
-            f"[1:v]scale=w=iw:h=-2[wm_scaled];"
-            # Setze Transparenz
+            # Skaliere Wasserzeichen: Erst auf Foto-Breite, Höhe automatisch (Seitenverhältnis erhalten)
+            # Dann prüfen ob es zu hoch ist und ggf. auf Foto-Höhe skalieren
+            f"[1:v]scale=w=iw:h=-2[wm_original];"
+            f"[wm_original][v]scale2ref=w='min(main_w,iw*main_h/ih)':h=-2:flags=bicubic[wm_scaled][v2];"
+            # Setze Transparenz auf dem skalierten Wasserzeichen
             f"[wm_scaled]colorchannelmixer=aa={alpha_level}[wm_transparent];"
-            # Überlagere mittig
-            f"[v][wm_transparent]overlay=(W-w)/2:(H-h)/2"
+            # Überlagere mittig (horizontal und vertikal zentriert)
+            f"[v2][wm_transparent]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2"
         )
 
         command = [

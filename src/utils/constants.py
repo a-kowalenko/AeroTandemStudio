@@ -38,6 +38,24 @@ LOGO_PATH = get_resource_path("assets/logo.png")
 PAYPAL_LOGO_PATH = get_resource_path("assets/paypal_logo.png")
 VLC_PATH = get_resource_path("dependency_installer/vlc")
 
+# --- Hintergrund- und Content-Area-Dimensionen ---
+# Original-Dimensionen des hintergrund.png
+HINTERGRUND_ORIGINAL_WIDTH = 3056
+HINTERGRUND_ORIGINAL_HEIGHT = 2037
+
+# Content-Bereich (absolut in Pixeln im Original-Hintergrund)
+# Ecken: (94, 94), (1626, 94), (94, 1974), (1626, 1974)
+CONTENT_AREA_X1 = 94
+CONTENT_AREA_Y1 = 94
+CONTENT_AREA_X2 = 1626
+CONTENT_AREA_Y2 = 1974
+
+# Padding innerhalb des Content-Bereichs (in Prozent pro Seite)
+CONTENT_AREA_PADDING_LEFT = 5    # Links: 5%
+CONTENT_AREA_PADDING_RIGHT = 2   # Rechts: 2% (weniger)
+CONTENT_AREA_PADDING_TOP = 5     # Oben: 5%
+CONTENT_AREA_PADDING_BOTTOM = 5  # Unten: 5%
+
 # --- Konfigurationsdatei-Pfad ---
 # Speichere config.json im Benutzer-AppData-Verzeichnis (nicht im Programm-Ordner)
 # Grund: Program Files hat keine Schreibrechte, AppData schon

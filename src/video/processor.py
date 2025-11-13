@@ -13,6 +13,12 @@ from .logger import CancellableProgressBarLogger, CancellationError
 from ..utils.file_utils import sanitize_filename
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.constants import HINTERGRUND_PATH
+from src.utils.constants import (
+    HINTERGRUND_ORIGINAL_WIDTH, HINTERGRUND_ORIGINAL_HEIGHT,
+    CONTENT_AREA_X1, CONTENT_AREA_Y1, CONTENT_AREA_X2, CONTENT_AREA_Y2,
+    CONTENT_AREA_PADDING_LEFT, CONTENT_AREA_PADDING_RIGHT,
+    CONTENT_AREA_PADDING_TOP, CONTENT_AREA_PADDING_BOTTOM
+)
 from src.utils.hardware_acceleration import HardwareAccelerationDetector
 
 
@@ -186,7 +192,7 @@ class VideoProcessor:
                 self._update_status("Bereite Text-Overlays vor...")
                 drawtext_filter = self._prepare_text_overlay(
                     gast, tandemmaster, videospringer, datum, ort,
-                    video_params['height'], outside_video_mode
+                    video_params['width'], video_params['height'], outside_video_mode
                 )
 
                 hintergrund_path = self.hintergrund_path
@@ -654,10 +660,17 @@ class VideoProcessor:
         """
         Erstellt den Intro-Clip inklusive einer passenden stillen Audiospur in einem einzigen Befehl.
         NEU: Nutzt erweiterte Parameter für maximale Kompatibilität und Hardware-Beschleunigung.
+        NEU: Behält Aspect-Ratio des Hintergrunds bei und fügt schwarze Balken hinzu statt zu strecken.
         """
         self._check_for_cancellation()
         print(f"Erstelle Intro mit erweiterten Parametern: {v_params}")
-        video_filters = f"scale={v_params['width']}:{v_params['height']},{drawtext_filter}"
+
+        # Aspect-Ratio-Preservation: scale + pad für schwarze Balken
+        video_filters = (
+            f"scale={v_params['width']}:{v_params['height']}:force_original_aspect_ratio=decrease,"
+            f"pad={v_params['width']}:{v_params['height']}:(ow-iw)/2:(oh-ih)/2:black,"
+            f"{drawtext_filter}"
+        )
 
         # Hole Encoding-Parameter (mit oder ohne Hardware-Beschleunigung)
         vcodec = v_params.get('vcodec', 'h264')
@@ -993,28 +1006,250 @@ class VideoProcessor:
             "level": video_stream.get("level"),
         }
 
-    def _prepare_text_overlay(self, gast, tandemmaster, videospringer, datum, ort, clip_height, outside_video):
-        """Bereitet die Text-Overlays für das Video vor"""
+    def _get_best_available_font(self):
+        """
+        Ermittelt den besten verfügbaren Font für die Text-Overlays.
+        Prüft in dieser Reihenfolge:
+        1. TheSans Bold (falls im assets-Ordner vorhanden)
+        2. Segoe UI Semibold (moderne Windows-Schriftart)
+        3. Arial Bold (Fallback)
+
+        Returns:
+            tuple: (font_name, fontfile_path_or_None)
+        """
+        # Prüfe ob TheSans im assets-Ordner liegt
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        thesans_path = os.path.join(base_dir, "assets", "fonts", "SansBlackCondRegular.ttf")
+
+        if os.path.exists(thesans_path):
+            return ("TheSans Bold", thesans_path)
+
+        # Prüfe ob Segoe UI Semibold verfügbar ist (Windows 7+)
+        # Segoe UI ist eine professionelle, moderne Sans-Serif
+        segoe_paths = [
+            "C:\\Windows\\Fonts\\segoeuib.ttf",  # Segoe UI Bold
+            "C:\\Windows\\Fonts\\seguisb.ttf"     # Segoe UI Semibold
+        ]
+
+        for path in segoe_paths:
+            if os.path.exists(path):
+                return ("Segoe UI Semibold", path)
+
+        # Fallback auf Arial Bold (immer verfügbar)
+        return ("Arial Bold", None)  # None = FFmpeg nutzt Systemfont
+
+    def _calculate_scaled_content_area(self, video_width, video_height):
+        """
+        Berechnet die skalierten Content-Area-Koordinaten basierend auf der Video-Auflösung.
+        Berücksichtigt das Aspect-Ratio des Hintergrunds und schwarze Balken (padding).
+
+        Args:
+            video_width: Ziel-Video-Breite in Pixeln
+            video_height: Ziel-Video-Höhe in Pixeln
+
+        Returns:
+            dict mit 'x_start', 'y_start', 'usable_width', 'usable_height' in Pixeln
+        """
+        # Berechne Aspect-Ratios
+        bg_aspect = HINTERGRUND_ORIGINAL_WIDTH / HINTERGRUND_ORIGINAL_HEIGHT
+        video_aspect = video_width / video_height
+
+        # Berechne tatsächliche Dimensionen des skalierten Hintergrunds
+        # force_original_aspect_ratio=decrease bedeutet: Hintergrund passt INNERHALB des Videos
+        if bg_aspect > video_aspect:
+            # Hintergrund ist breiter -> wird an Breite angepasst
+            scaled_bg_width = video_width
+            scaled_bg_height = int(video_width / bg_aspect)
+            offset_x = 0
+            offset_y = (video_height - scaled_bg_height) / 2
+        else:
+            # Hintergrund ist höher -> wird an Höhe angepasst
+            scaled_bg_height = video_height
+            scaled_bg_width = int(video_height * bg_aspect)
+            offset_x = (video_width - scaled_bg_width) / 2
+            offset_y = 0
+
+        # Skalierungsfaktor vom Original zum skalierten Hintergrund
+        scale_x = scaled_bg_width / HINTERGRUND_ORIGINAL_WIDTH
+        scale_y = scaled_bg_height / HINTERGRUND_ORIGINAL_HEIGHT
+
+        # Skaliere Content-Area-Koordinaten
+        content_x1_scaled = CONTENT_AREA_X1 * scale_x + offset_x
+        content_y1_scaled = CONTENT_AREA_Y1 * scale_y + offset_y
+        content_x2_scaled = CONTENT_AREA_X2 * scale_x + offset_x
+        content_y2_scaled = CONTENT_AREA_Y2 * scale_y + offset_y
+
+        # Berechne Breite und Höhe des Content-Bereichs
+        content_width = content_x2_scaled - content_x1_scaled
+        content_height = content_y2_scaled - content_y1_scaled
+
+        # Wende separate Padding-Werte für jede Seite an
+        padding_left = content_width * (CONTENT_AREA_PADDING_LEFT / 100)
+        padding_right = content_width * (CONTENT_AREA_PADDING_RIGHT / 100)
+        padding_top = content_height * (CONTENT_AREA_PADDING_TOP / 100)
+        padding_bottom = content_height * (CONTENT_AREA_PADDING_BOTTOM / 100)
+
+        return {
+            'x_start': int(content_x1_scaled + padding_left),
+            'y_start': int(content_y1_scaled + padding_top),
+            'usable_width': int(content_width - padding_left - padding_right),
+            'usable_height': int(content_height - padding_top - padding_bottom)
+        }
+
+    def _prepare_text_overlay(self, gast, tandemmaster, videospringer, datum, ort, video_width, video_height, outside_video):
+        """
+        Bereitet die Text-Overlays für das Video vor.
+        Positioniert Labels linksbündig innerhalb des Content-Bereichs mit automatischem Text-Wrapping.
+
+        Args:
+            gast, tandemmaster, videospringer, datum, ort: Text-Inhalte
+            video_width: Video-Breite in Pixeln
+            video_height: Video-Höhe in Pixeln
+            outside_video: Boolean, ob Videospringer angezeigt werden soll
+        """
 
         def ffmpeg_escape(text: str) -> str:
             return text.replace(":", r"\:").replace("'", r"\''").replace(",", r"\,")
 
-        text_inhalte = [f"Gast: {gast}", f"Tandemmaster: {tandemmaster}"]
-        if outside_video:
-            text_inhalte.append(f"Videospringer: {videospringer}")
-        text_inhalte.extend([f"Datum: {datum}", f"Ort: {ort}"])
-        text_inhalte = [ffmpeg_escape(t) for t in text_inhalte]
+        def estimate_text_width(text: str, font_size: int) -> int:
+            """
+            Schätzt die Textbreite in Pixeln (grobe Näherung).
+            Arial hat ca. 0.6 * font_size als durchschnittliche Zeichenbreite.
+            """
+            return int(len(text) * font_size * 0.6)
 
-        font_size = int(clip_height / 22)
-        y = clip_height * 0.15
-        y_step = clip_height * 0.15
+        def wrap_text(text: str, max_width: int, font_size: int) -> list:
+            """
+            Bricht Text manuell um, wenn er zu breit ist.
+            Gibt eine Liste von Zeilen zurück.
+            """
+            words = text.split(' ')
+            lines = []
+            current_line = []
+
+            for word in words:
+                test_line = ' '.join(current_line + [word])
+                if estimate_text_width(test_line, font_size) <= max_width:
+                    current_line.append(word)
+                else:
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                        current_line = [word]
+                    else:
+                        # Wort ist zu lang für eine Zeile - nimm es trotzdem
+                        lines.append(word)
+
+            if current_line:
+                lines.append(' '.join(current_line))
+
+            return lines if lines else [text]
+
+        # Berechne Content-Area basierend auf Video-Dimensionen
+        content_area = self._calculate_scaled_content_area(video_width, video_height)
+
+        x_start = content_area['x_start']
+        y_start = content_area['y_start']
+        usable_width = content_area['usable_width']
+        usable_height = content_area['usable_height']
+
+        # Ermittle verwendeten Font
+        # HINWEIS: Font-Dateien mit Pfaden verursachen Probleme in FFmpeg-Filtern (Sonderzeichen-Escaping)
+        # Daher nutzen wir immer Systemfonts, die FFmpeg über fontconfig findet
+        font_name, font_file = self._get_best_available_font()
+
+        if font_file:
+            # Auch wenn Font-Datei vorhanden ist, nutzen wir den Font-Namen
+            # FFmpeg findet Fonts über fontconfig (funktioniert mit installierten Fonts)
+            print(f"Font-Datei gefunden: {font_file}")
+            print(f"Nutze Systemfont-Fallback: Segoe UI Semibold (robuster für FFmpeg)")
+            font_name = "Segoe UI Semibold"
+        else:
+            print(f"Verwende Font: {font_name} (Systemfont)")
+
+        # Bereite Text-Inhalte vor - als Tupel (Label, Wert)
+        text_data = [
+            ("Gast:", gast),
+            ("Tandemmaster:", tandemmaster)
+        ]
+        if outside_video:
+            text_data.append(("Videospringer:", videospringer))
+        text_data.extend([
+            ("Datum:", datum),
+            ("Ort:", ort)
+        ])
+
+        # Berechne Schriftgröße basierend auf Content-Area-Höhe
+        # Mindestgröße von 28px für bessere Lesbarkeit, sonst basierend auf Höhe
+        font_size = max(28, int(usable_height / 18))
+
+        # Noch größerer Zeilenabstand für bessere Lesbarkeit (180%)
+        line_height = int(font_size * 2.5)
+
+        # Oben beginnen mit etwas Top-Padding (15% der Content-Höhe)
+        top_padding = int(usable_height * 0.10)
+        current_y = y_start + top_padding
+
         drawtext_cmds = []
 
-        for t in text_inhalte:
-            drawtext_cmds.append(
-                f"drawtext=text='{t}':x=(w-text_w)/2:y={int(y)}:fontsize={font_size}:fontcolor=black:font='Arial'"
-            )
-            y += y_step
+        # Position für Werte: Rechte Hälfte der Content-Box
+        # Werte beginnen bei 50% der Content-Breite (linksbündig in der rechten Hälfte)
+        value_x_start = x_start + int(usable_width * 0.5)
+
+        # Maximale Breite für Werte (rechte Hälfte der Content-Box)
+        max_value_width = int(usable_width * 0.5)
+
+        for label, value in text_data:
+            # Prüfe ob Wert zu lang ist und umbrechen muss
+            estimated_value_width = estimate_text_width(value, font_size)
+
+            if estimated_value_width > max_value_width:
+                # Wert ist zu lang - umbrechen in der rechten Hälfte
+                wrapped_values = wrap_text(value, max_value_width, font_size)
+            else:
+                # Wert passt in eine Zeile
+                wrapped_values = [value]
+
+            # Escape für FFmpeg
+            label_escaped = ffmpeg_escape(label)
+
+            # Label linksbündig am linken Rand
+            label_params = [
+                f"text='{label_escaped}'",
+                f"x={x_start}",
+                f"y={int(current_y)}",
+                f"fontsize={font_size}",
+                f"fontcolor=white",
+                f"borderw=3",
+                f"bordercolor=black",
+                f"font='{font_name}'"
+            ]
+            drawtext_cmds.append(f"drawtext={':'.join(label_params)}")
+
+            # Werte linksbündig in der rechten Hälfte (kann mehrere Zeilen sein)
+            value_y = current_y
+            for wrapped_value in wrapped_values:
+                value_escaped = ffmpeg_escape(wrapped_value)
+
+                # Wert linksbündig in rechter Hälfte
+                value_params = [
+                    f"text='{value_escaped}'",
+                    f"x={value_x_start}",  # Linksbündig in rechter Hälfte
+                    f"y={int(value_y)}",
+                    f"fontsize={font_size}",
+                    f"fontcolor=white",
+                    f"borderw=3",
+                    f"bordercolor=black",
+                    f"font='{font_name}'"
+                ]
+                drawtext_cmds.append(f"drawtext={':'.join(value_params)}")
+
+                # Nächste Zeile des gewrappten Werts
+                value_y += line_height
+
+            # Position für nächsten Eintrag
+            # Nutze die größere Höhe (entweder 1 Zeile oder mehrere Wert-Zeilen)
+            lines_used = max(1, len(wrapped_values))
+            current_y += line_height * lines_used
 
         return ",".join(drawtext_cmds)
 

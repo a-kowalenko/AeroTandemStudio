@@ -681,39 +681,217 @@ class SettingsDialog:
 
     def create_extras_tab(self):
         """Erstellt den Tab 'Extras'"""
-        # --- Info & Updates ---
-        info_frame = ttk.LabelFrame(self.tab_extras, text="Info & Updates", padding=(10, 10))
-        info_frame.pack(fill="x", pady=(0, 10))
-        info_frame.grid_columnconfigure(0, weight=1)
-        info_frame.grid_columnconfigure(1, weight=1)
+        # --- Updates & Versionen ---
+        version_frame = ttk.LabelFrame(self.tab_extras, text="Updates & Versionen", padding=(10, 10))
+        version_frame.pack(fill="both", expand=True, pady=(0, 10))
+        version_frame.grid_columnconfigure(1, weight=1)  # Dropdown column expands
+        version_frame.grid_rowconfigure(2, weight=1)  # Scrollable info panel row expands
 
-        # Update Button
+        # Variables for version switcher
+        self.available_versions = []  # Will be filled when loading
+        self.selected_version_data = None
+        self.version_var = tk.StringVar()
+
+        # Row 0: Update Button (top left) and empty space
         update_button = tk.Button(
-            info_frame, text="Nach Updates suchen", font=("Arial", 10),
+            version_frame, text="Nach Updates suchen", font=("Arial", 10),
             command=self.check_for_updates, bg="#2196F3", fg="white", width=20, height=1
         )
-        update_button.grid(row=0, column=0, columnspan=2, pady=5, padx=5)
+        update_button.grid(row=0, column=0, sticky="w", pady=(5, 10), padx=5)
 
-        # PayPal Button
+        # Row 1: Dropdown Label, Dropdown, and Apply Button in same row
+        dropdown_label = tk.Label(version_frame, text="Verfügbare Versionen:", font=("Arial", 10))
+        dropdown_label.grid(row=1, column=0, sticky="w", padx=(5, 10), pady=(5, 10))
+
+        self.version_dropdown = ttk.Combobox(
+            version_frame,
+            textvariable=self.version_var,
+            state="readonly",
+            font=("Arial", 10),
+            width=25,
+            height=10  # Maximal 10 Einträge gleichzeitig sichtbar
+        )
+        self.version_dropdown.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(5, 10))
+        self.version_dropdown.bind("<<ComboboxSelected>>", self.on_version_selected)
+
+        self.apply_version_button = tk.Button(
+            version_frame,
+            text="Version übernehmen",
+            font=("Arial", 10, "bold"),
+            command=self.on_apply_version,
+            bg="#FF9800",
+            fg="white",
+            width=18,
+            height=1,
+            state="disabled"
+        )
+        self.apply_version_button.grid(row=1, column=2, sticky="e", padx=5, pady=(5, 10))
+
+        # Row 2: Scrollable info panel container (entire panel scrollable)
+        info_panel_container = tk.Frame(version_frame, relief=tk.SUNKEN, borderwidth=1, bg="white")
+        info_panel_container.grid(row=2, column=0, columnspan=3, sticky="nsew", padx=5, pady=(0, 10))
+
+        # Create canvas and scrollbar for entire info panel
+        canvas = tk.Canvas(info_panel_container, bg="white", highlightthickness=0)
+        scrollbar = tk.Scrollbar(info_panel_container, orient="vertical", command=canvas.yview)
+
+        # Store scrollbar reference for dynamic show/hide
+        self.version_info_scrollbar = scrollbar
+
+        # Function to update scrollbar visibility based on content size
+        def _update_scrollbar_visibility():
+            canvas.update_idletasks()
+            bbox = canvas.bbox("all")
+            if bbox:
+                content_height = bbox[3] - bbox[1]
+                canvas_height = canvas.winfo_height()
+                if content_height > canvas_height:
+                    # Content is larger, show scrollbar
+                    scrollbar.pack(side="right", fill="y")
+                else:
+                    # Content fits, hide scrollbar
+                    scrollbar.pack_forget()
+
+        # Store for use in update methods
+        self._update_version_scrollbar_visibility = _update_scrollbar_visibility
+
+        # Scrollable frame inside canvas
+        scrollable_frame = tk.Frame(canvas, bg="white")
+
+        def _on_frame_configure(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            _update_scrollbar_visibility()
+
+        scrollable_frame.bind("<Configure>", _on_frame_configure)
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # Pack canvas (scrollbar will be packed dynamically)
+        canvas.pack(side="left", fill="both", expand=True)
+
+        # Version info labels inside scrollable frame
+        self.version_info_label = tk.Label(
+            scrollable_frame,
+            text="Wählen Sie eine Version aus der Liste",
+            font=("Arial", 10, "bold"),
+            bg="white",
+            anchor="w",
+            justify="left"
+        )
+        self.version_info_label.pack(fill="x", padx=10, pady=(10, 5))
+
+        self.release_date_label = tk.Label(
+            scrollable_frame,
+            text="",
+            font=("Arial", 9),
+            bg="white",
+            anchor="w",
+            fg="#666666"
+        )
+        self.release_date_label.pack(fill="x", padx=10, pady=(0, 10))
+
+        # Release Notes label
+        notes_label = tk.Label(
+            scrollable_frame,
+            text="Release Notes:",
+            font=("Arial", 9, "bold"),
+            bg="white",
+            anchor="w"
+        )
+        notes_label.pack(fill="x", padx=10, pady=(0, 5))
+
+        # Container frame for patch notes content (will be populated with labels)
+        self.patch_notes_container = tk.Frame(scrollable_frame, bg="white")
+        self.patch_notes_container.pack(fill="x", padx=0, pady=(0, 10))
+
+        # Store canvas reference for mousewheel scrolling
+        self.version_info_canvas = canvas
+
+        # Enable mousewheel scrolling for canvas
+        def _on_mousewheel(event):
+            # Only scroll if content is actually larger than the visible area
+            bbox = canvas.bbox("all")
+            if bbox:
+                content_height = bbox[3] - bbox[1]
+                canvas_height = canvas.winfo_height()
+                if content_height > canvas_height:
+                    canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
+        # Helper function to check if scrolling is needed
+        def _should_scroll():
+            bbox = canvas.bbox("all")
+            if bbox:
+                content_height = bbox[3] - bbox[1]
+                canvas_height = canvas.winfo_height()
+                return content_height > canvas_height
+            return False
+
+        # Linux scroll handlers
+        def _on_linux_scroll_up(e):
+            if _should_scroll():
+                canvas.yview_scroll(-1, "units")
+
+        def _on_linux_scroll_down(e):
+            if _should_scroll():
+                canvas.yview_scroll(1, "units")
+
+        # Bind mousewheel to all widgets in the scrollable frame
+        def _bind_to_mousewheel(widget):
+            """Recursively bind mousewheel to widget and all its children"""
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            widget.bind("<Button-4>", _on_linux_scroll_up)  # Linux scroll up
+            widget.bind("<Button-5>", _on_linux_scroll_down)  # Linux scroll down
+
+            for child in widget.winfo_children():
+                _bind_to_mousewheel(child)
+
+        # Store bind function for later use
+        self._bind_mousewheel_to_widget = _bind_to_mousewheel
+
+        # Bind mousewheel to scrollable_frame and all its children
+        _bind_to_mousewheel(scrollable_frame)
+
+        # Also bind to canvas itself
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        canvas.bind("<Button-4>", _on_linux_scroll_up)
+        canvas.bind("<Button-5>", _on_linux_scroll_down)
+
+        # Status/Error label for loading failures (initially shown)
+        self.version_status_label = tk.Label(
+            version_frame,
+            text="Lade verfügbare Versionen...",
+            font=("Arial", 9),
+            fg="#666666"
+        )
+        self.version_status_label.grid(row=3, column=0, columnspan=3, pady=(0, 5), padx=5)
+
+        # Store reference to status label grid info
+        self.version_status_label_shown = True
+
+        # Load available versions in background
+        self.load_available_versions()
+
+        # --- PayPal Button (outside the group, below) ---
         try:
             self.paypal_img = tk.PhotoImage(file=PAYPAL_LOGO_PATH, width=30)
             paypal_button = tk.Button(
-                info_frame, text="Entwicklung unterstützen", image=self.paypal_img, compound="left",
+                self.tab_extras, text="Entwicklung unterstützen", image=self.paypal_img, compound="left",
                 font=("Arial", 9), command=self.open_paypal_donation, bg="#f8f9fa",
                 fg="#0070ba", relief="flat", cursor="hand2", height=30
             )
         except tk.TclError:
             paypal_button = tk.Button(
-                info_frame, text="Entwicklung unterstützen (PayPal)",
+                self.tab_extras, text="Entwicklung unterstützen (PayPal)",
                 font=("Arial", 9), command=self.open_paypal_donation, bg="#f8f9fa",
                 fg="#0070ba", relief="flat", cursor="hand2", height=1
             )
-        paypal_button.grid(row=1, column=0, columnspan=2, pady=2, padx=5)
+        paypal_button.pack(pady=(5, 5))
 
-        # Autor
+        # --- Autor (outside the group, at bottom) ---
         author_text = f"Aero Tandem Studio v{self.APP_VERSION}\nby Andreas Kowalenko"
-        author_label = tk.Label(info_frame, text=author_text, font=("Arial", 9), fg="gray", justify="center")
-        author_label.grid(row=2, column=0, columnspan=2, pady=(10, 0), padx=5)
+        author_label = tk.Label(self.tab_extras, text=author_text, font=("Arial", 9), fg="gray", justify="center")
+        author_label.pack(pady=(5, 10))
 
 
     def check_for_updates(self):
@@ -735,6 +913,173 @@ class SettingsDialog:
             webbrowser.open_new(paypal_url)
         except Exception as e:
             messagebox.showerror("Fehler", f"PayPal Seite konnte nicht geöffnet werden:\n{str(e)}", parent=self.dialog)
+
+    def load_available_versions(self):
+        """Lädt verfügbare Versionen von GitHub im Hintergrund"""
+        import threading
+        from src.utils.constants import MIN_SWITCHABLE_VERSION
+
+        def fetch_versions():
+            from src.installer.updater import get_all_releases
+            releases = get_all_releases(min_version=MIN_SWITCHABLE_VERSION)
+
+            # Update UI in main thread
+            self.dialog.after(0, lambda: self._populate_version_dropdown(releases))
+
+        # Start in background thread
+        thread = threading.Thread(target=fetch_versions, daemon=True)
+        thread.start()
+
+    def _populate_version_dropdown(self, releases):
+        """Füllt Dropdown mit verfügbaren Versionen (wird im Main Thread aufgerufen)"""
+        if releases is None:
+            # Error loading releases
+            self.version_status_label.config(
+                text="Fehler beim Laden der Versionen. Bitte Internetverbindung prüfen.",
+                fg="red"
+            )
+            if not self.version_status_label_shown:
+                self.version_status_label.grid(row=3, column=0, columnspan=3, pady=(0, 5), padx=5)
+                self.version_status_label_shown = True
+            self.version_dropdown.config(state="disabled")
+            return
+
+        if not releases:
+            self.version_status_label.config(
+                text="Keine Versionen verfügbar.",
+                fg="#666666"
+            )
+            if not self.version_status_label_shown:
+                self.version_status_label.grid(row=3, column=0, columnspan=3, pady=(0, 5), padx=5)
+                self.version_status_label_shown = True
+            self.version_dropdown.config(state="disabled")
+            return
+
+        # Store releases data
+        self.available_versions = releases
+
+        # Build dropdown values (mark current version)
+        dropdown_values = []
+        for release in releases:
+            version_text = release['tag_name']
+            if version_text == self.APP_VERSION:
+                version_text += " (Installiert)"
+            dropdown_values.append(version_text)
+
+        self.version_dropdown['values'] = dropdown_values
+
+        # Hide status label when successful
+        if self.version_status_label_shown:
+            self.version_status_label.grid_forget()
+            self.version_status_label_shown = False
+
+        # Select current version by default if available
+        for idx, release in enumerate(releases):
+            if release['tag_name'] == self.APP_VERSION:
+                self.version_dropdown.current(idx)
+                self.on_version_selected(None)
+                break
+
+    def on_version_selected(self, event):
+        """Event handler wenn eine Version im Dropdown ausgewählt wird"""
+        selected_index = self.version_dropdown.current()
+        if selected_index < 0 or selected_index >= len(self.available_versions):
+            return
+
+        # Get selected version data
+        version_data = self.available_versions[selected_index]
+        self.selected_version_data = version_data
+
+        # Update info labels
+        version_tag = version_data['tag_name']
+        is_current = (version_tag == self.APP_VERSION)
+
+        self.version_info_label.config(text=f"Version: {version_tag}")
+
+        # Format and display release date
+        try:
+            from datetime import datetime
+            date_str = version_data['published_at']
+            # Parse ISO format: "2024-01-15T10:30:00Z"
+            dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ")
+            formatted_date = dt.strftime("%d.%m.%Y")
+            self.release_date_label.config(text=f"Veröffentlicht: {formatted_date}")
+        except:
+            self.release_date_label.config(text="Veröffentlicht: Unbekannt")
+
+        # Update patch notes by clearing and re-rendering content
+        # Clear all existing widgets in the container
+        for widget in self.patch_notes_container.winfo_children():
+            widget.destroy()
+
+        from src.installer.updater import render_markdown_to_frame
+        patch_notes = version_data['body']
+        if patch_notes:
+            render_markdown_to_frame(self.patch_notes_container, patch_notes)
+        else:
+            # Show "no notes available" message
+            no_notes_label = tk.Label(
+                self.patch_notes_container,
+                text="Keine Release Notes verfügbar.",
+                font=("Arial", 9),
+                bg="white",
+                fg="#666666",
+                anchor="w"
+            )
+            no_notes_label.pack(fill="x", padx=10, pady=5)
+
+        # Update canvas scroll region after content changes
+        self.patch_notes_container.update_idletasks()
+        self.version_info_canvas.configure(scrollregion=self.version_info_canvas.bbox("all"))
+
+        # Update scrollbar visibility based on new content size
+        if hasattr(self, '_update_version_scrollbar_visibility'):
+            self._update_version_scrollbar_visibility()
+
+        # Re-bind mousewheel to new labels in patch_notes_container
+        if hasattr(self, '_bind_mousewheel_to_widget'):
+            self._bind_mousewheel_to_widget(self.patch_notes_container)
+
+        # Enable/disable apply button (disable if current version is selected)
+        if is_current:
+            self.apply_version_button.config(state="disabled")
+        else:
+            self.apply_version_button.config(state="normal")
+
+    def on_apply_version(self):
+        """Event handler wenn 'Version übernehmen' geklickt wird"""
+        if not self.selected_version_data:
+            return
+
+        version_tag = self.selected_version_data['tag_name']
+        installer_url = self.selected_version_data['installer_url']
+
+        # Show warning dialog
+        from src.gui.components.warning_dialog import WarningDialog
+
+        warning_message = (
+            f"Möchten Sie wirklich zu Version {version_tag} wechseln?\n\n"
+            "Die Anwendung wird neu gestartet, um die Installation durchzuführen.\n"
+            "Bitte stellen Sie sicher, dass alle Arbeiten gespeichert sind."
+        )
+
+        dialog = WarningDialog(
+            self.dialog,
+            title="Versions-Wechsel bestätigen",
+            message=warning_message,
+            confirm_text="Jetzt wechseln",
+            cancel_text="Abbrechen"
+        )
+
+        if dialog.result:
+            # User confirmed - start installation
+            from src.installer.updater import install_specific_version
+
+            # Close settings dialog first
+            self.dialog.destroy()
+
+            # Start installation (will restart app)
+            install_specific_version(self.parent, installer_url)
 
     def waehle_speicherort(self):
         """Öffnet Dialog zur Auswahl des Speicherorts."""

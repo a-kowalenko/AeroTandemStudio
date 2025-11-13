@@ -212,18 +212,26 @@ class SettingsDialog:
         # --- Sektion 2: SD-Karten Backup ---
         backup_frame = ttk.LabelFrame(self.tab_allgemein, text="SD-Karten Backup", padding=(10, 10))
         backup_frame.pack(fill="x", pady=(0, 10))
-        backup_frame.grid_columnconfigure(1, weight=1)  # Entry-Spalte expandiert
+        backup_frame.grid_columnconfigure(1, weight=1)
 
-        # Backup Ordner - gleiche Struktur wie Speicherort
-        tk.Label(backup_frame, text="Backup Ordner:", font=("Arial", 11)).grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        # Backup Ordner - Entry-Feld über beide Spalten damit es die volle Breite nutzt
+        backup_folder_container = tk.Frame(backup_frame)
+        backup_folder_container.grid(row=0, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        backup_folder_container.grid_columnconfigure(1, weight=1)
 
-        backup_folder_entry = tk.Entry(backup_frame, textvariable=self.sd_backup_folder_var,
+        tk.Label(backup_folder_container, text="Backup Ordner:", font=("Arial", 11)).grid(row=0, column=0, sticky="w", padx=(0, 5))
+
+        backup_folder_entry_frame = tk.Frame(backup_folder_container)
+        backup_folder_entry_frame.grid(row=0, column=1, sticky="ew")
+        backup_folder_entry_frame.grid_columnconfigure(0, weight=1)
+
+        backup_folder_entry = tk.Entry(backup_folder_entry_frame, textvariable=self.sd_backup_folder_var,
                                        font=("Arial", 10), state="readonly")
-        backup_folder_entry.grid(row=0, column=1, sticky="ew", padx=(5, 5), pady=5)
+        backup_folder_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
 
-        backup_folder_button = tk.Button(backup_frame, text="Wählen...",
+        backup_folder_button = tk.Button(backup_folder_entry_frame, text="Wählen...",
                                          command=self.waehle_backup_ordner)
-        backup_folder_button.grid(row=0, column=2, sticky="e", padx=(0, 5), pady=5)
+        backup_folder_button.grid(row=0, column=1, sticky="e")
 
         # Haupt-Checkbox: Automatischer Backup
         self.sd_auto_backup_checkbox = tk.Checkbutton(
@@ -233,7 +241,7 @@ class SettingsDialog:
             font=("Arial", 10),
             command=self.on_auto_backup_toggle
         )
-        self.sd_auto_backup_checkbox.grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+        self.sd_auto_backup_checkbox.grid(row=1, column=0, sticky="w", padx=5, pady=2)
 
         # Abhängige Checkboxen (nur sichtbar wenn Auto-Backup aktiviert)
 
@@ -556,14 +564,14 @@ class SettingsDialog:
         if is_enabled:
             # Zeige abhängige Checkboxen in neuer Reihenfolge (alle eingerückt mit padx=30)
             # 1. Automatisch importieren (ERSTE Option)
-            self.sd_auto_import_checkbox.grid(row=2, column=0, columnspan=2, sticky="w", padx=30, pady=2)
+            self.sd_auto_import_checkbox.grid(row=2, column=0, sticky="w", padx=30, pady=2)
 
             # 2. Größen-Limit Option
-            self.sd_size_limit_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", padx=30, pady=(8, 2))
+            self.sd_size_limit_checkbox.grid(row=3, column=0, sticky="w", padx=30, pady=(8, 2))
             self.on_size_limit_toggle()  # Zeige/Verstecke Eingabefeld
 
             # 3. SD-Karte leeren
-            self.sd_clear_checkbox.grid(row=5, column=0, columnspan=2, sticky="w", padx=30, pady=2)
+            self.sd_clear_checkbox.grid(row=5, column=0, sticky="w", padx=30, pady=2)
         else:
             # Verstecke und deaktiviere alle abhängigen Checkboxen
             self.sd_auto_import_checkbox.grid_forget()
@@ -589,7 +597,7 @@ class SettingsDialog:
 
         if is_enabled:
             # Zeige Sub-Option für manuellen Import (eingerückt)
-            self.sd_skip_manual_checkbox.grid(row=8, column=0, columnspan=2, sticky="w", padx=30, pady=(0, 2))
+            self.sd_skip_manual_checkbox.grid(row=8, column=0, sticky="w", padx=30, pady=(0, 2))
         else:
             # Verstecke Sub-Option
             self.sd_skip_manual_checkbox.grid_forget()
@@ -601,7 +609,7 @@ class SettingsDialog:
 
         if is_enabled:
             # Zeige Eingabefeld (noch mehr eingerückt als Checkbox)
-            self.sd_size_limit_frame.grid(row=4, column=0, columnspan=2, sticky="w", padx=50, pady=(0, 2))
+            self.sd_size_limit_frame.grid(row=4, column=0, sticky="w", padx=50, pady=(0, 2))
         else:
             # Verstecke Eingabefeld
             self.sd_size_limit_frame.grid_forget()

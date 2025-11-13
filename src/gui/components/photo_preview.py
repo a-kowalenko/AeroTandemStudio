@@ -108,6 +108,9 @@ class PhotoPreview:
 
         # Vollbild-Fenster
         self.fullscreen_window = None
+        self.fullscreen_canvas = None
+        self.fullscreen_image_id = None
+        self.fullscreen_info_text_id = None
 
         # --- Thumbnail-Galerie ---
         thumbnail_frame = tk.Frame(self.frame)
@@ -882,15 +885,62 @@ class PhotoPreview:
         self.fullscreen_window.attributes('-fullscreen', True)
         self.fullscreen_window.configure(bg='black')
 
-        # Canvas für Vollbild-Foto
-        fullscreen_canvas = tk.Canvas(
+        # Canvas für Vollbild-Foto (als Instanzvariable speichern)
+        self.fullscreen_canvas = tk.Canvas(
             self.fullscreen_window,
             bg='black',
             highlightthickness=0
         )
-        fullscreen_canvas.pack(fill="both", expand=True)
+        self.fullscreen_canvas.pack(fill="both", expand=True)
 
-        # Lade aktuelles Foto in voller Auflösung
+        # Bildschirmgröße ermitteln
+        screen_width = self.fullscreen_window.winfo_screenwidth()
+        screen_height = self.fullscreen_window.winfo_screenheight()
+
+        # Erstelle Platzhalter für Bild und Texte (werden später aktualisiert)
+        x = screen_width // 2
+        y = screen_height // 2
+        self.fullscreen_image_id = self.fullscreen_canvas.create_image(x, y, anchor="center")
+
+        # Info-Text (unten links) - Platzhalter
+        self.fullscreen_info_text_id = self.fullscreen_canvas.create_text(
+            20, screen_height - 20,
+            text="",
+            fill="white",
+            font=("Arial", 12),
+            anchor="sw"
+        )
+
+        # Hinweis-Text (unten rechts) - bleibt statisch
+        help_text = "ESC: Beenden | ← →: Navigation"
+        self.fullscreen_canvas.create_text(
+            screen_width - 20, screen_height - 20,
+            text=help_text,
+            fill="white",
+            font=("Arial", 11),
+            anchor="se"
+        )
+
+        # Lade das erste Foto
+        self._update_fullscreen_photo()
+
+        # Event-Bindings für Vollbild
+        self.fullscreen_window.bind("<Escape>", lambda e: self._close_fullscreen())
+        self.fullscreen_window.bind("<Button-1>", lambda e: self._close_fullscreen())
+        self.fullscreen_window.bind("<Left>", self._on_fullscreen_key_left)
+        self.fullscreen_window.bind("<Right>", self._on_fullscreen_key_right)
+
+        # Focus setzen
+        self.fullscreen_window.focus_set()
+
+    def _update_fullscreen_photo(self):
+        """Aktualisiert das Foto im Vollbild-Modus ohne das Fenster zu schließen"""
+        if not self.fullscreen_window or not self.fullscreen_canvas:
+            return
+
+        if not self.photo_paths or self.current_photo_index < 0:
+            return
+
         photo_path = self.photo_paths[self.current_photo_index]
         try:
             img = Image.open(photo_path)
@@ -903,62 +953,50 @@ class PhotoPreview:
             img.thumbnail((screen_width, screen_height), Image.LANCZOS)
             photo_image = ImageTk.PhotoImage(img)
 
-            # Zentriert anzeigen
-            x = screen_width // 2
-            y = screen_height // 2
-            fullscreen_canvas.create_image(x, y, image=photo_image, anchor="center")
+            # Aktualisiere das Bild im Canvas
+            self.fullscreen_canvas.itemconfig(self.fullscreen_image_id, image=photo_image)
 
-            # Referenz behalten
-            fullscreen_canvas.image = photo_image
+            # Referenz behalten (wichtig, sonst wird das Bild vom GC gelöscht)
+            self.fullscreen_canvas.image = photo_image
 
-            # Info-Text (unten links)
+            # Info-Text aktualisieren (unten links)
             filename = os.path.basename(photo_path)
             info_text = f"{self.current_photo_index + 1}/{len(self.photo_paths)} - {filename}"
-            fullscreen_canvas.create_text(
-                20, screen_height - 20,
-                text=info_text,
-                fill="white",
-                font=("Arial", 12),
-                anchor="sw"
-            )
-
-            # Hinweis-Text (unten rechts)
-            help_text = "ESC: Beenden | ← →: Navigation"
-            fullscreen_canvas.create_text(
-                screen_width - 20, screen_height - 20,
-                text=help_text,
-                fill="white",
-                font=("Arial", 11),
-                anchor="se"
-            )
+            self.fullscreen_canvas.itemconfig(self.fullscreen_info_text_id, text=info_text)
 
         except Exception as e:
             print(f"Fehler beim Laden des Vollbild-Fotos: {e}")
 
-        # Event-Bindings für Vollbild
-        self.fullscreen_window.bind("<Escape>", lambda e: self.fullscreen_window.destroy())
-        self.fullscreen_window.bind("<Button-1>", lambda e: self.fullscreen_window.destroy())
-        self.fullscreen_window.bind("<Left>", self._on_fullscreen_key_left)
-        self.fullscreen_window.bind("<Right>", self._on_fullscreen_key_right)
-
-        # Focus setzen
-        self.fullscreen_window.focus_set()
+    def _close_fullscreen(self):
+        """Schließt den Vollbild-Modus"""
+        if self.fullscreen_window:
+            self.fullscreen_window.destroy()
+            self.fullscreen_window = None
+            self.fullscreen_canvas = None
+            self.fullscreen_image_id = None
+            self.fullscreen_info_text_id = None
 
     def _on_fullscreen_key_left(self, event):
         """Behandelt linke Pfeiltaste im Vollbild-Modus"""
         if self.current_photo_index > 0:
-            self.fullscreen_window.destroy()
-            self._show_previous_photo()
-            # Kurz warten, dann Vollbild wieder öffnen
-            self.frame.after(50, self._open_fullscreen)
+            self.current_photo_index -= 1
+            # Aktualisiere das Foto im Vollbild-Modus
+            self._update_fullscreen_photo()
+            # Aktualisiere auch die Haupt-UI im Hintergrund (ohne sichtbar zu werden)
+            self._update_large_preview()
+            self._update_thumbnails()
+            self._update_info()
 
     def _on_fullscreen_key_right(self, event):
         """Behandelt rechte Pfeiltaste im Vollbild-Modus"""
         if self.current_photo_index < len(self.photo_paths) - 1:
-            self.fullscreen_window.destroy()
-            self._show_next_photo()
-            # Kurz warten, dann Vollbild wieder öffnen
-            self.frame.after(50, self._open_fullscreen)
+            self.current_photo_index += 1
+            # Aktualisiere das Foto im Vollbild-Modus
+            self._update_fullscreen_photo()
+            # Aktualisiere auch die Haupt-UI im Hintergrund (ohne sichtbar zu werden)
+            self._update_large_preview()
+            self._update_thumbnails()
+            self._update_info()
 
     def _update_info(self):
         """Aktualisiert die Foto-Informationen"""

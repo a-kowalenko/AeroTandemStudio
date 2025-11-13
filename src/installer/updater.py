@@ -10,8 +10,10 @@ from packaging import version
 import tkinter as tk
 from tkinter import ttk, messagebox
 import requests
+import webbrowser
+from datetime import datetime
 
-from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
+from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW, MIN_SWITCHABLE_VERSION
 
 # Windows-API für UAC-Adminrechte
 if sys.platform == "win32":
@@ -19,6 +21,7 @@ if sys.platform == "win32":
 
 # Konfiguration
 GITHUB_API_URL = "https://api.github.com/repos/a-kowalenko/AeroTandemStudio/releases/latest"
+GITHUB_ALL_RELEASES_URL = "https://api.github.com/repos/a-kowalenko/AeroTandemStudio/releases"
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 SETTINGS_FILE = os.path.join(PROJECT_ROOT, "updater_settings.json")
 DOWNLOAD_NAME = "setup_update.exe"
@@ -184,6 +187,136 @@ def _insert_formatted_text(text_widget, text):
         remaining = remaining[match.end():]
 
 
+def render_markdown_to_frame(parent_frame, markdown_text):
+    """Rendert Markdown-Text direkt in ein Frame mit Labels
+
+    Diese Funktion erstellt Labels für jeden Markdown-Block und fügt sie
+    direkt in das parent_frame ein. Dies ermöglicht natürliches Scrolling
+    ohne ein Text-Widget mit eigener Scrollfähigkeit.
+
+    Unterstützt:
+    - # Überschriften (H1-H4)
+    - **Bold** und *Italic* (eingeschränkt)
+    - - Aufzählungen
+    - 1. Nummerierte Listen
+    - Normale Textzeilen
+    """
+    lines = markdown_text.split('\n')
+
+    for line in lines:
+        # Leere Zeilen überspringen
+        if not line.strip():
+            continue
+
+        # H1 Überschrift (# )
+        if line.startswith('# ') and not line.startswith('## '):
+            label = tk.Label(
+                parent_frame,
+                text=line[2:],
+                font=("Arial", 14, "bold"),
+                bg="white",
+                anchor="w",
+                justify="left"
+            )
+            label.pack(fill="x", padx=10, pady=(10, 5))
+
+        # H2 Überschrift (## )
+        elif line.startswith('## ') and not line.startswith('### '):
+            label = tk.Label(
+                parent_frame,
+                text=line[3:],
+                font=("Arial", 12, "bold"),
+                bg="white",
+                anchor="w",
+                justify="left"
+            )
+            label.pack(fill="x", padx=10, pady=(8, 4))
+
+        # H3 Überschrift (### )
+        elif line.startswith('### ') and not line.startswith('#### '):
+            label = tk.Label(
+                parent_frame,
+                text=line[4:],
+                font=("Arial", 10, "bold"),
+                bg="white",
+                anchor="w",
+                justify="left"
+            )
+            label.pack(fill="x", padx=10, pady=(6, 3))
+
+        # H4 Überschrift (#### )
+        elif line.startswith('#### '):
+            label = tk.Label(
+                parent_frame,
+                text=line[5:],
+                font=("Arial", 9, "bold"),
+                bg="white",
+                anchor="w",
+                justify="left"
+            )
+            label.pack(fill="x", padx=10, pady=(4, 2))
+
+        # Bullet Point (- oder *)
+        elif line.strip().startswith('- ') or line.strip().startswith('* '):
+            content = line.strip()[2:]
+            # Entferne einfache Markdown-Formatierung für Label
+            content = re.sub(r'\*\*(.+?)\*\*', r'\1', content)  # **bold** -> text
+            content = re.sub(r'\*(.+?)\*', r'\1', content)      # *italic* -> text
+            content = re.sub(r'`(.+?)`', r'\1', content)        # `code` -> text
+
+            label = tk.Label(
+                parent_frame,
+                text=f"  • {content}",
+                font=("Arial", 9),
+                bg="white",
+                anchor="w",
+                justify="left",
+                wraplength=550  # Zeilenumbruch bei langen Texten
+            )
+            label.pack(fill="x", padx=20, pady=1)
+
+        # Nummerierte Liste (1. 2. etc.)
+        elif re.match(r'^\d+\.\s', line.strip()):
+            match = re.match(r'^(\d+)\.\s(.+)', line.strip())
+            if match:
+                number, content = match.groups()
+                # Entferne einfache Markdown-Formatierung für Label
+                content = re.sub(r'\*\*(.+?)\*\*', r'\1', content)
+                content = re.sub(r'\*(.+?)\*', r'\1', content)
+                content = re.sub(r'`(.+?)`', r'\1', content)
+
+                label = tk.Label(
+                    parent_frame,
+                    text=f"  {number}. {content}",
+                    font=("Arial", 9),
+                    bg="white",
+                    anchor="w",
+                    justify="left",
+                    wraplength=550
+                )
+                label.pack(fill="x", padx=20, pady=1)
+
+        else:
+            # Normale Zeile
+            content = line
+            # Entferne einfache Markdown-Formatierung für Label
+            content = re.sub(r'\*\*(.+?)\*\*', r'\1', content)
+            content = re.sub(r'\*(.+?)\*', r'\1', content)
+            content = re.sub(r'`(.+?)`', r'\1', content)
+
+            if content.strip():  # Nur nicht-leere Zeilen
+                label = tk.Label(
+                    parent_frame,
+                    text=content,
+                    font=("Arial", 9),
+                    bg="white",
+                    anchor="w",
+                    justify="left",
+                    wraplength=550
+                )
+                label.pack(fill="x", padx=10, pady=1)
+
+
 def load_settings():
     """Lädt gespeicherte Einstellungen wie ignorierte Versionen"""
     if not os.path.exists(SETTINGS_FILE):
@@ -203,6 +336,74 @@ def save_settings(settings):
             json.dump(settings, f, indent=2)
     except Exception as e:
         print(f"Einstellungen konnten nicht gespeichert werden: {e}")
+
+
+def get_all_releases(min_version=None):
+    """Holt alle verfügbaren Releases von GitHub
+
+    Args:
+        min_version: Minimale Version (String), die berücksichtigt werden soll
+
+    Returns:
+        List of dicts mit: {
+            'tag_name': str,      # z.B. "0.5.1.2"
+            'published_at': str,  # z.B. "2024-01-15T10:30:00Z"
+            'body': str,          # Release Notes (Markdown)
+            'installer_url': str  # Download-URL für .exe
+        }
+        Oder None bei Fehler
+    """
+    try:
+        response = requests.get(GITHUB_ALL_RELEASES_URL, timeout=10)
+        response.raise_for_status()
+        releases_data = response.json()
+
+        releases = []
+        min_ver = version.parse(min_version) if min_version else None
+
+        for release in releases_data:
+            # Parse version (entferne 'v' prefix)
+            tag = release.get("tag_name", "").lstrip('v')
+            if not tag:
+                continue
+
+            # Filter nach min_version
+            if min_ver:
+                try:
+                    rel_ver = version.parse(tag)
+                    if rel_ver < min_ver:
+                        continue
+                except:
+                    continue
+
+            # Suche .exe Installer
+            assets = release.get("assets", [])
+            installer_url = ""
+            for asset in assets:
+                if asset.get("name", "").endswith(".exe"):
+                    installer_url = asset.get("browser_download_url")
+                    break
+
+            # Nur Releases mit Installer aufnehmen
+            if installer_url:
+                releases.append({
+                    'tag_name': tag,
+                    'published_at': release.get("published_at", ""),
+                    'body': release.get("body", "Keine Details verfügbar."),
+                    'installer_url': installer_url
+                })
+
+        # Sortiere absteigend nach Version
+        releases.sort(key=lambda r: version.parse(r['tag_name']), reverse=True)
+
+        return releases
+
+    except requests.RequestException as e:
+        print(f"Netzwerkfehler beim Abrufen der Releases: {e}")
+        return None
+    except Exception as e:
+        print(f"Fehler beim Abrufen der Releases: {e}")
+        return None
 
 
 def check_for_updates_thread(root_gui, app_version, show_no_update_message=False, force_check=False):
@@ -291,6 +492,16 @@ def prompt_user_for_update(root_gui, app_version, latest_version, release_notes,
     dialog = AskUpdateDialog(root_gui, app_version, latest_version, release_notes)
     if dialog.result == "yes":
         UpdateProgressDialog(root_gui, installer_url)
+
+
+def install_specific_version(root_gui, installer_url):
+    """Startet Installation einer spezifischen Version
+
+    Args:
+        root_gui: Tkinter Root-Widget
+        installer_url: Download-URL des Installers
+    """
+    UpdateProgressDialog(root_gui, installer_url)
 
 
 def download_and_install_thread(installer_url, progress_queue, cancel_event):

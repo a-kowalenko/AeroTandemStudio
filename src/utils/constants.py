@@ -72,3 +72,8 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, 'config.json')
 LOG_FILE = os.path.join(CONFIG_DIR, 'app.log')
 
 WASSERZEICHEN_PATH = get_resource_path("assets/preview_stempel.png")
+
+# --- Update/Version-Switching ---
+# Minimale Version, die dem User zum Wechseln angeboten wird
+# Ältere Versionen werden nicht im Dropdown angezeigt
+MIN_SWITCHABLE_VERSION = "0.0.5.0"

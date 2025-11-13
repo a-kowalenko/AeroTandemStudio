@@ -506,6 +506,11 @@ class DragDropFrame:
         self._update_video_table()
         self._update_photo_table()
 
+        # NEU: Wenn Videos hinzugefügt wurden und Wasserzeichen-Spalte sichtbar ist,
+        # aber noch kein Video markiert ist, wähle automatisch das längste aus
+        if new_videos_added and self.show_watermark_column and self.watermark_clip_index is None:
+            self._auto_select_longest_video()
+
         # Vorschau nur mit Videos aktualisieren
         if new_videos_added:
             self._update_app_preview()
@@ -924,16 +929,35 @@ class DragDropFrame:
         self.clear_all()
 
     # NEU: Methoden für Video-Encoding-Fortschritt
-    def update_video_progress(self, video_index, progress_percent, fps=None, eta=None):
+    def update_video_progress(self, video_identifier, progress_percent, fps=None, eta=None):
         """
         Aktualisiert den Fortschritt für ein bestimmtes Video in der Tabelle.
 
         Args:
-            video_index: Index des Videos (0-basiert)
+            video_identifier: Dateipfad oder Index des Videos (0-basiert)
             progress_percent: Fortschritt in Prozent (0-100)
             fps: Optional FPS-Wert
             eta: Optional ETA-String (z.B. "1:23")
         """
+        # Bestimme den Index basierend auf dem Identifier
+        if isinstance(video_identifier, str):
+            # Identifier ist ein Dateipfad - finde den Index
+            try:
+                video_index = self.video_paths.index(video_identifier)
+            except ValueError:
+                # Pfad nicht in Liste - versuche Basis-Dateinamen zu vergleichen
+                basename = os.path.basename(video_identifier)
+                video_index = -1
+                for i, path in enumerate(self.video_paths):
+                    if os.path.basename(path) == basename:
+                        video_index = i
+                        break
+                if video_index == -1:
+                    return  # Video nicht gefunden
+        else:
+            # Identifier ist bereits ein Index
+            video_index = video_identifier
+
         if video_index < 0 or video_index >= len(self.video_paths):
             return
 
@@ -960,8 +984,27 @@ class DragDropFrame:
             values[7] = progress_text  # Progress ist Spalte 7 (0-basiert)
             self.video_tree.item(item, values=values)
 
-    def clear_video_progress(self, video_index):
+    def clear_video_progress(self, video_identifier):
         """Löscht den Fortschritt für ein bestimmtes Video"""
+        # Bestimme den Index basierend auf dem Identifier
+        if isinstance(video_identifier, str):
+            # Identifier ist ein Dateipfad - finde den Index
+            try:
+                video_index = self.video_paths.index(video_identifier)
+            except ValueError:
+                # Pfad nicht in Liste - versuche Basis-Dateinamen zu vergleichen
+                basename = os.path.basename(video_identifier)
+                video_index = -1
+                for i, path in enumerate(self.video_paths):
+                    if os.path.basename(path) == basename:
+                        video_index = i
+                        break
+                if video_index == -1:
+                    return  # Video nicht gefunden
+        else:
+            # Identifier ist bereits ein Index
+            video_index = video_identifier
+
         if video_index < 0 or video_index >= len(self.video_paths):
             return
 
@@ -972,14 +1015,33 @@ class DragDropFrame:
             values[7] = ""  # Leere Progress-Spalte
             self.video_tree.item(item, values=values)
 
-    def set_video_status(self, video_index, status_text):
+    def set_video_status(self, video_identifier, status_text):
         """
         Setzt einen Status-Text für ein Video (z.B. "Fertig", "Fehler", "Warte...")
 
         Args:
-            video_index: Index des Videos
+            video_identifier: Dateipfad oder Index des Videos
             status_text: Status-Text anzuzeigen
         """
+        # Bestimme den Index basierend auf dem Identifier
+        if isinstance(video_identifier, str):
+            # Identifier ist ein Dateipfad - finde den Index
+            try:
+                video_index = self.video_paths.index(video_identifier)
+            except ValueError:
+                # Pfad nicht in Liste - versuche Basis-Dateinamen zu vergleichen
+                basename = os.path.basename(video_identifier)
+                video_index = -1
+                for i, path in enumerate(self.video_paths):
+                    if os.path.basename(path) == basename:
+                        video_index = i
+                        break
+                if video_index == -1:
+                    return  # Video nicht gefunden
+        else:
+            # Identifier ist bereits ein Index
+            video_index = video_identifier
+
         if video_index < 0 or video_index >= len(self.video_paths):
             return
 
@@ -1234,14 +1296,77 @@ class DragDropFrame:
     # NEU: Methoden für Wasserzeichen-Spalte
     def set_watermark_column_visible(self, visible: bool):
         """Zeigt oder verbirgt die Wasserzeichen-Spalte"""
+        was_visible = self.show_watermark_column
         self.show_watermark_column = visible
+
         if visible:
             self.video_tree.column("WM", width=20, minwidth=30, stretch=False)
+
+            # NEU: Automatisch längstes Video auswählen, wenn Spalte neu sichtbar wird
+            # und noch kein Video markiert ist
+            if not was_visible and self.watermark_clip_index is None and self.video_paths:
+                self._auto_select_longest_video()
         else:
             self.video_tree.column("WM", width=0, minwidth=0, stretch=False)
 
         # Aktualisiere die Tabelle, um die Änderungen sofort zu reflektieren
         self.video_tree.update_idletasks()
+
+    def _auto_select_longest_video(self):
+        """
+        Wählt automatisch das längste Video als Wasserzeichen aus.
+        Wird aufgerufen, wenn die Wasserzeichen-Spalte sichtbar wird.
+        """
+        if not self.video_paths:
+            return
+
+        longest_index = None
+        longest_duration = 0.0
+
+        for i, video_path in enumerate(self.video_paths):
+            # Versuche Dauer aus Metadaten-Cache zu holen
+            duration_seconds = 0.0
+
+            if self.app and hasattr(self.app, 'video_preview'):
+                metadata = self.app.video_preview.get_cached_metadata(video_path)
+                if metadata:
+                    duration_str = metadata.get("duration", "0:00")
+                    # Konvertiere "MM:SS" zu Sekunden
+                    try:
+                        parts = duration_str.split(':')
+                        if len(parts) == 2:
+                            duration_seconds = int(parts[0]) * 60 + int(parts[1])
+                    except:
+                        pass
+
+            # Fallback: ffprobe verwenden
+            if duration_seconds == 0.0:
+                try:
+                    result = subprocess.run([
+                        'ffprobe', '-v', 'error', '-show_entries',
+                        'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1',
+                        video_path
+                    ], capture_output=True, text=True, timeout=5, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+                    if result.returncode == 0:
+                        duration_seconds = float(result.stdout.strip())
+                except:
+                    pass
+
+            # Vergleiche mit bisherigem Maximum
+            if duration_seconds > longest_duration:
+                longest_duration = duration_seconds
+                longest_index = i
+
+        # Wähle das längste Video aus
+        if longest_index is not None:
+            self.watermark_clip_index = longest_index
+            print(f"✅ Automatisch längstes Video als Wasserzeichen ausgewählt: Index {longest_index}, Dauer {longest_duration:.1f}s")
+            self._update_video_table()
+
+            # Synchronisiere mit video_preview
+            if self.app and hasattr(self.app, 'video_preview'):
+                self.app.video_preview.update_wm_button_state()
 
     def get_watermark_clip_index(self):
         """Gibt den Index des für Wasserzeichen ausgewählten Clips zurück (oder None)"""
@@ -1291,6 +1416,10 @@ class DragDropFrame:
 
         self._update_video_table()
 
+        # NEU: Synchronisiere mit video_preview
+        if self.app and hasattr(self.app, 'video_preview'):
+            self.app.video_preview.update_wm_button_state()
+
     def is_video_watermarked(self, index):
         """Prüft, ob ein bestimmter Video-Index als Wasserzeichen markiert ist."""
         return self.watermark_clip_index == index
@@ -1308,6 +1437,10 @@ class DragDropFrame:
             self.watermark_photo_indices.append(index)
 
         self._update_photo_table()
+
+        # NEU: Synchronisiere mit photo_preview
+        if self.app and hasattr(self.app, 'photo_preview'):
+            self.app.photo_preview.update_wm_button_state()
 
     def is_photo_watermarked(self, index):
         """Prüft, ob ein bestimmter Foto-Index als Wasserzeichen markiert ist."""
@@ -1341,6 +1474,10 @@ class DragDropFrame:
             self.watermark_photo_indices.append(index)
 
         self._update_photo_table()
+
+        # NEU: Synchronisiere mit photo_preview
+        if self.app and hasattr(self.app, 'photo_preview'):
+            self.app.photo_preview.update_wm_button_state()
 
         # Verhindere, dass die Reihe ausgewählt wird (optional, aber gut für Checkbox-Feeling)
         self.photo_tree.selection_remove(self.photo_tree.selection())
@@ -1377,6 +1514,10 @@ class DragDropFrame:
             self.watermark_clip_index = index
 
         self._update_video_table()
+
+        # NEU: Synchronisiere mit video_preview
+        if self.app and hasattr(self.app, 'video_preview'):
+            self.app.video_preview.update_wm_button_state()
 
         # Verhindere, dass die Reihe ausgewählt wird
         self.video_tree.selection_remove(self.video_tree.selection())

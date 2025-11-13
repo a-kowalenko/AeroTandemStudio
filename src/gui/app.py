@@ -97,7 +97,7 @@ class VideoGeneratorApp:
         self.root.title("Aero Tandem Studio")
 
         # Zentriere Fenster auf dem Bildschirm
-        window_width = 1400
+        window_width = 1500
         window_height = 800
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
@@ -125,7 +125,7 @@ class VideoGeneratorApp:
         self.left_frame = tk.Frame(self.main_container, width=600)
         self.left_frame.pack(side="left", fill="both", expand=True, padx=(0, 20))
 
-        self.right_frame = tk.Frame(self.main_container, width=350)
+        self.right_frame = tk.Frame(self.main_container, width=450)
         self.right_frame.pack(side="right", fill="y", padx=(20, 0))
 
         # Nächster Chunk
@@ -297,7 +297,7 @@ class VideoGeneratorApp:
         self.root.title("Aero Tandem Studio")
 
         # Zentriere Fenster auf dem Bildschirm
-        window_width = 1400
+        window_width = 1500
         window_height = 800
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
@@ -1699,6 +1699,10 @@ class VideoGeneratorApp:
             elif status_type == 'clearing_finished':
                 self.sd_status_indicator.set_clearing_active(False)
                 self.progress_handler.set_status("Status: SD-Karte geleert")
+
+            elif status_type == 'clearing_skipped_selective':
+                # SD-Karte wurde nicht geleert wegen selektivem Import
+                self.progress_handler.set_status("Status: SD-Karte wurde nicht geleert (selektiver Import)")
 
             elif status_type == 'size_limit_exceeded':
                 # NEU: Größen-Limit überschritten - zeige Dialog

@@ -108,6 +108,9 @@ class PhotoPreview:
 
         # Vollbild-Fenster
         self.fullscreen_window = None
+        self.fullscreen_canvas = None
+        self.fullscreen_image_id = None
+        self.fullscreen_info_text_id = None
 
         # --- Thumbnail-Galerie ---
         thumbnail_frame = tk.Frame(self.frame)
@@ -218,7 +221,7 @@ class PhotoPreview:
 
         self.delete_button = tk.Button(
             button_frame,
-            text="Foto löschen",
+            text="Entfernen",
             command=self._delete_current_photo,
             bg="#f44336",
             fg="white",
@@ -242,25 +245,26 @@ class PhotoPreview:
         # QR-Code-Scan Button
         self.qr_scan_button = tk.Button(
             button_frame,
-            text="🔍",  # QR-Code ähnliches Symbol (Box mit Kreuz)
+            text="🔍 QR",
             command=self._scan_current_photo_qr,
             bg="#2196F3",
             fg="white",
             font=("Arial", 9),
-            width=3,
+            width=6,
             state="disabled"
         )
         self.qr_scan_button.grid(row=0, column=2, sticky="ew", padx=(5, 0))
 
         # --- NEU: Wasserzeichen-Button ---
+        self.wm_button_var = tk.BooleanVar(value=False)
         self.wm_button = tk.Button(
             button_frame,
-            text="💧",
+            text="Preview ☐",
             command=self._on_wm_button_click,
             bg="#f0f0f0",
             fg="black",
             font=("Arial", 9),
-            width=3,
+            width=10,
             state="disabled"
         )
         # INITIAL VERSTECKT - wird von app.py gesteuert
@@ -881,15 +885,62 @@ class PhotoPreview:
         self.fullscreen_window.attributes('-fullscreen', True)
         self.fullscreen_window.configure(bg='black')
 
-        # Canvas für Vollbild-Foto
-        fullscreen_canvas = tk.Canvas(
+        # Canvas für Vollbild-Foto (als Instanzvariable speichern)
+        self.fullscreen_canvas = tk.Canvas(
             self.fullscreen_window,
             bg='black',
             highlightthickness=0
         )
-        fullscreen_canvas.pack(fill="both", expand=True)
+        self.fullscreen_canvas.pack(fill="both", expand=True)
 
-        # Lade aktuelles Foto in voller Auflösung
+        # Bildschirmgröße ermitteln
+        screen_width = self.fullscreen_window.winfo_screenwidth()
+        screen_height = self.fullscreen_window.winfo_screenheight()
+
+        # Erstelle Platzhalter für Bild und Texte (werden später aktualisiert)
+        x = screen_width // 2
+        y = screen_height // 2
+        self.fullscreen_image_id = self.fullscreen_canvas.create_image(x, y, anchor="center")
+
+        # Info-Text (unten links) - Platzhalter
+        self.fullscreen_info_text_id = self.fullscreen_canvas.create_text(
+            20, screen_height - 20,
+            text="",
+            fill="white",
+            font=("Arial", 12),
+            anchor="sw"
+        )
+
+        # Hinweis-Text (unten rechts) - bleibt statisch
+        help_text = "ESC: Beenden | ← →: Navigation"
+        self.fullscreen_canvas.create_text(
+            screen_width - 20, screen_height - 20,
+            text=help_text,
+            fill="white",
+            font=("Arial", 11),
+            anchor="se"
+        )
+
+        # Lade das erste Foto
+        self._update_fullscreen_photo()
+
+        # Event-Bindings für Vollbild
+        self.fullscreen_window.bind("<Escape>", lambda e: self._close_fullscreen())
+        self.fullscreen_window.bind("<Button-1>", lambda e: self._close_fullscreen())
+        self.fullscreen_window.bind("<Left>", self._on_fullscreen_key_left)
+        self.fullscreen_window.bind("<Right>", self._on_fullscreen_key_right)
+
+        # Focus setzen
+        self.fullscreen_window.focus_set()
+
+    def _update_fullscreen_photo(self):
+        """Aktualisiert das Foto im Vollbild-Modus ohne das Fenster zu schließen"""
+        if not self.fullscreen_window or not self.fullscreen_canvas:
+            return
+
+        if not self.photo_paths or self.current_photo_index < 0:
+            return
+
         photo_path = self.photo_paths[self.current_photo_index]
         try:
             img = Image.open(photo_path)
@@ -902,62 +953,50 @@ class PhotoPreview:
             img.thumbnail((screen_width, screen_height), Image.LANCZOS)
             photo_image = ImageTk.PhotoImage(img)
 
-            # Zentriert anzeigen
-            x = screen_width // 2
-            y = screen_height // 2
-            fullscreen_canvas.create_image(x, y, image=photo_image, anchor="center")
+            # Aktualisiere das Bild im Canvas
+            self.fullscreen_canvas.itemconfig(self.fullscreen_image_id, image=photo_image)
 
-            # Referenz behalten
-            fullscreen_canvas.image = photo_image
+            # Referenz behalten (wichtig, sonst wird das Bild vom GC gelöscht)
+            self.fullscreen_canvas.image = photo_image
 
-            # Info-Text (unten links)
+            # Info-Text aktualisieren (unten links)
             filename = os.path.basename(photo_path)
             info_text = f"{self.current_photo_index + 1}/{len(self.photo_paths)} - {filename}"
-            fullscreen_canvas.create_text(
-                20, screen_height - 20,
-                text=info_text,
-                fill="white",
-                font=("Arial", 12),
-                anchor="sw"
-            )
-
-            # Hinweis-Text (unten rechts)
-            help_text = "ESC: Beenden | ← →: Navigation"
-            fullscreen_canvas.create_text(
-                screen_width - 20, screen_height - 20,
-                text=help_text,
-                fill="white",
-                font=("Arial", 11),
-                anchor="se"
-            )
+            self.fullscreen_canvas.itemconfig(self.fullscreen_info_text_id, text=info_text)
 
         except Exception as e:
             print(f"Fehler beim Laden des Vollbild-Fotos: {e}")
 
-        # Event-Bindings für Vollbild
-        self.fullscreen_window.bind("<Escape>", lambda e: self.fullscreen_window.destroy())
-        self.fullscreen_window.bind("<Button-1>", lambda e: self.fullscreen_window.destroy())
-        self.fullscreen_window.bind("<Left>", self._on_fullscreen_key_left)
-        self.fullscreen_window.bind("<Right>", self._on_fullscreen_key_right)
-
-        # Focus setzen
-        self.fullscreen_window.focus_set()
+    def _close_fullscreen(self):
+        """Schließt den Vollbild-Modus"""
+        if self.fullscreen_window:
+            self.fullscreen_window.destroy()
+            self.fullscreen_window = None
+            self.fullscreen_canvas = None
+            self.fullscreen_image_id = None
+            self.fullscreen_info_text_id = None
 
     def _on_fullscreen_key_left(self, event):
         """Behandelt linke Pfeiltaste im Vollbild-Modus"""
         if self.current_photo_index > 0:
-            self.fullscreen_window.destroy()
-            self._show_previous_photo()
-            # Kurz warten, dann Vollbild wieder öffnen
-            self.frame.after(50, self._open_fullscreen)
+            self.current_photo_index -= 1
+            # Aktualisiere das Foto im Vollbild-Modus
+            self._update_fullscreen_photo()
+            # Aktualisiere auch die Haupt-UI im Hintergrund (ohne sichtbar zu werden)
+            self._update_large_preview()
+            self._update_thumbnails()
+            self._update_info()
 
     def _on_fullscreen_key_right(self, event):
         """Behandelt rechte Pfeiltaste im Vollbild-Modus"""
         if self.current_photo_index < len(self.photo_paths) - 1:
-            self.fullscreen_window.destroy()
-            self._show_next_photo()
-            # Kurz warten, dann Vollbild wieder öffnen
-            self.frame.after(50, self._open_fullscreen)
+            self.current_photo_index += 1
+            # Aktualisiere das Foto im Vollbild-Modus
+            self._update_fullscreen_photo()
+            # Aktualisiere auch die Haupt-UI im Hintergrund (ohne sichtbar zu werden)
+            self._update_large_preview()
+            self._update_thumbnails()
+            self._update_info()
 
     def _update_info(self):
         """Aktualisiert die Foto-Informationen"""
@@ -1025,11 +1064,11 @@ class PhotoPreview:
         if self.photo_paths and effective_selection:
             count = len(effective_selection)
             if count == 1:
-                self.delete_button.config(text="Foto löschen", state="normal")
+                self.delete_button.config(text="Entfernen", state="normal")
             else:
-                self.delete_button.config(text=f"{count} Fotos löschen", state="normal")
+                self.delete_button.config(text=f"{count} Entfernen", state="normal")
         else:
-            self.delete_button.config(text="Foto löschen", state="disabled")
+            self.delete_button.config(text="Entfernen", state="disabled")
 
         # Clear-Selection-Button nur anzeigen wenn explizite Markierung vorhanden
         if self.explicitly_selected and self.selected_photos:
@@ -1174,16 +1213,18 @@ class PhotoPreview:
         """
         if (not self.app or not hasattr(self.app, 'drag_drop') or
             self.current_photo_index < 0 or not self.photo_paths):
-            self.wm_button.config(text="💧", state="disabled", bg="#f0f0f0")
+            self.wm_button.config(text="Preview ☐", state="disabled", bg="#f0f0f0")
+            self.wm_button_var.set(False)
             return
 
         # Lese den Status direkt von drag_drop (via app)
         is_marked = self.app.drag_drop.is_photo_watermarked(self.current_photo_index)
+        self.wm_button_var.set(is_marked)
 
         if is_marked:
-            self.wm_button.config(text="💧", state="normal", bg="#D32F2F", fg="white")
+            self.wm_button.config(text="Preview ☑", state="normal", bg="#4CAF50", fg="white")
         else:
-            self.wm_button.config(text="💧", state="normal", bg="#FF9800", fg="black")
+            self.wm_button.config(text="Preview ☐", state="normal", bg="#f0f0f0", fg="black")
 
     def pack(self, **kwargs):
         """Packt den Frame"""

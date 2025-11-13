@@ -231,22 +231,25 @@ class SDCardMonitor:
                 backup_type = "full"
 
             # Erstelle Backup (mit optionaler Dateiauswahl)
-            backup_path, error_message = self._create_backup(drive, backup_folder, selected_files)
+            backup_path, error_message, copied_files = self._create_backup(drive, backup_folder, selected_files)
 
             if backup_path:
                 print(f"Backup erfolgreich: {backup_path}")
 
-                # Leere SD-Karte wenn gewünscht
-                if settings.get("sd_clear_after_backup", False):
+                # Lösche erfolgreich gesicherte Dateien von SD-Karte wenn gewünscht
+                if settings.get("sd_clear_after_backup", False) and copied_files:
                     # Status-Callback: Leerung gestartet
                     if self.on_status_change:
                         self.on_status_change('clearing_started', drive)
 
-                    self._clear_sd_card(drive)
+                    self._clear_sd_files(copied_files)
 
                     # Status-Callback: Leerung beendet
                     if self.on_status_change:
                         self.on_status_change('clearing_finished', drive)
+                elif settings.get("sd_clear_after_backup", False) and not copied_files:
+                    # Keine Dateien zum Löschen
+                    print("Keine Dateien zum Löschen (keine Dateien wurden kopiert)")
 
                 # Werfe SD-Karte aus (optional, erstmal deaktiviert da komplex in Windows)
                 # self._eject_drive(drive)
@@ -411,11 +414,13 @@ class SDCardMonitor:
                            Wenn None, werden alle Dateien kopiert.
 
         Returns:
-            Tuple (backup_path, error_message):
+            Tuple (backup_path, error_message, copied_files):
                 - backup_path: Pfad zum Backup-Ordner oder None bei Fehler
                 - error_message: Fehlermeldung oder None bei Erfolg
+                - copied_files: Liste der erfolgreich kopierten Quelldateien (Pfade auf SD-Karte)
         """
         backup_path = None
+        copied_source_files = []  # NEU: Tracke erfolgreich kopierte Quelldateien
         try:
             # Erstelle Zeitstempel-basierten Ordnernamen
             timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -432,7 +437,7 @@ class SDCardMonitor:
             if not os.path.isdir(dcim_source):
                 error_msg = f"DCIM Ordner nicht gefunden: {dcim_source}"
                 print(error_msg)
-                return None, error_msg
+                return None, error_msg, []
 
             # Erstelle Backup-Ordner
             os.makedirs(backup_path, exist_ok=True)
@@ -465,7 +470,7 @@ class SDCardMonitor:
             if not media_files:
                 error_msg = "Keine Mediendateien auf der SD-Karte gefunden"
                 print(error_msg)
-                return None, error_msg
+                return None, error_msg, []
 
             # Optional: Duplikate überspringen
             settings = self.config.get_settings()
@@ -491,7 +496,7 @@ class SDCardMonitor:
             if not filtered_files:
                 error_msg = f"Keine neuen Dateien zum Sichern. Übersprungen: {skipped_count}"
                 print(error_msg)
-                return None, error_msg
+                return None, error_msg, []
 
             # Berechne Gesamtgröße basierend auf gefilterter Liste
             total_size = 0
@@ -531,6 +536,7 @@ class SDCardMonitor:
                     # Kopiere Datei
                     file_size = os.path.getsize(src_file)
                     shutil.copy2(src_file, dst_file)
+                    copied_source_files.append(src_file)  # NEU: Tracke erfolgreich kopierte Datei
                     copied_size += file_size
                     copied_count += 1
 
@@ -553,14 +559,14 @@ class SDCardMonitor:
                     # IO-Fehler deutet auf SD-Entfernung hin
                     error_msg = f"SD-Karte wurde während des Backups entfernt: {str(e)}"
                     print(f"  ⚠️ {error_msg}")
-                    return None, error_msg
+                    return None, error_msg, copied_source_files  # Gebe bereits kopierte Dateien zurück
                 except Exception as e:
                     print(f"  ⚠️ Fehler beim Kopieren von {src_file}: {e}")
                     # Weiter mit nächster Datei
 
             print(f"Backup abgeschlossen: {copied_count} neue Mediendateien kopiert")
 
-            return backup_path, None  # Erfolg: Pfad und kein Fehler
+            return backup_path, None, copied_source_files  # Erfolg: Pfad, kein Fehler, kopierte Dateien
 
         except Exception as e:
             error_msg = f"Fehler beim Erstellen des Backups: {str(e)}"
@@ -571,32 +577,77 @@ class SDCardMonitor:
                     shutil.rmtree(backup_path)
                 except Exception:
                     pass
-            return None, error_msg  # Fehler: kein Pfad, aber Fehlermeldung
+            return None, error_msg, []  # Fehler: kein Pfad, Fehlermeldung, keine Dateien
 
-    def _clear_sd_card(self, drive):
-        """Löscht den Inhalt des DCIM Ordners auf der SD-Karte"""
+    def _clear_sd_files(self, files_to_delete):
+        """
+        Löscht spezifische Dateien von der SD-Karte
+
+        Args:
+            files_to_delete: Liste von Dateipfaden die gelöscht werden sollen
+        """
+        if not files_to_delete:
+            print("Keine Dateien zum Löschen angegeben")
+            return
+
+        deleted_count = 0
+        error_count = 0
+
+        print(f"Lösche {len(files_to_delete)} erfolgreich gesicherte Dateien von SD-Karte...")
+
+        for file_path in files_to_delete:
+            try:
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+                    deleted_count += 1
+                    print(f"  ✓ Gelöscht: {os.path.basename(file_path)}")
+                else:
+                    print(f"  ⚠️ Datei nicht gefunden: {file_path}")
+            except Exception as e:
+                error_count += 1
+                print(f"  ✗ Fehler beim Löschen von {file_path}: {e}")
+
+        print(f"Löschen abgeschlossen: {deleted_count} Dateien gelöscht, {error_count} Fehler")
+
+        # Optional: Lösche leere Verzeichnisse
         try:
-            dcim_path = os.path.join(drive, "DCIM")
-            if not os.path.isdir(dcim_path):
-                return
-
-            print(f"Lösche DCIM Ordner auf {drive}...")
-
-            # Lösche alle Unterordner und Dateien im DCIM Ordner
-            for item in os.listdir(dcim_path):
-                item_path = os.path.join(dcim_path, item)
-                try:
-                    if os.path.isfile(item_path):
-                        os.remove(item_path)
-                    elif os.path.isdir(item_path):
-                        shutil.rmtree(item_path)
-                except Exception as e:
-                    print(f"Konnte {item_path} nicht löschen: {e}")
-
-            print("SD-Karte geleert")
-
+            deleted_dirs = self._clean_empty_directories(files_to_delete)
+            if deleted_dirs > 0:
+                print(f"  ℹ️ {deleted_dirs} leere Verzeichnisse entfernt")
         except Exception as e:
-            print(f"Fehler beim Leeren der SD-Karte: {e}")
+            print(f"  ⚠️ Fehler beim Aufräumen leerer Verzeichnisse: {e}")
+
+    def _clean_empty_directories(self, file_paths):
+        """
+        Entfernt leere Verzeichnisse nach dem Löschen von Dateien
+
+        Args:
+            file_paths: Liste der gelöschten Dateipfade
+
+        Returns:
+            Anzahl der gelöschten Verzeichnisse
+        """
+        # Sammle alle parent directories
+        directories = set()
+        for file_path in file_paths:
+            parent_dir = os.path.dirname(file_path)
+            if parent_dir:
+                directories.add(parent_dir)
+
+        deleted_count = 0
+        # Sortiere nach Tiefe (tiefste zuerst) um von unten nach oben zu löschen
+        sorted_dirs = sorted(directories, key=lambda x: x.count(os.sep), reverse=True)
+
+        for directory in sorted_dirs:
+            try:
+                # Nur löschen wenn Verzeichnis leer ist
+                if os.path.isdir(directory) and not os.listdir(directory):
+                    os.rmdir(directory)
+                    deleted_count += 1
+            except Exception:
+                pass  # Ignoriere Fehler beim Löschen von Verzeichnissen
+
+        return deleted_count
 
     def _eject_drive(self, drive):
         """
@@ -633,4 +684,3 @@ class SDCardMonitor:
         drive = drives[0]
         self._handle_new_sd_card(drive)
         return True
-

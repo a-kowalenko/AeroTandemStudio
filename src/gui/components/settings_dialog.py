@@ -269,7 +269,7 @@ class SettingsDialog:
         # 3. SD-Karte nach Backup leeren
         self.sd_clear_checkbox = tk.Checkbutton(
             backup_frame,
-            text="SD-Karte nach Backup leeren",
+            text="SD-Karte nach Backup leeren (löscht nur erfolgreich gesicherte Dateien)",
             variable=self.sd_clear_var,
             font=("Arial", 10)
         )

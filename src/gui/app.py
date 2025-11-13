@@ -1700,6 +1700,10 @@ class VideoGeneratorApp:
                 self.sd_status_indicator.set_clearing_active(False)
                 self.progress_handler.set_status("Status: SD-Karte geleert")
 
+            elif status_type == 'clearing_skipped_selective':
+                # SD-Karte wurde nicht geleert wegen selektivem Import
+                self.progress_handler.set_status("Status: SD-Karte wurde nicht geleert (selektiver Import)")
+
             elif status_type == 'size_limit_exceeded':
                 # NEU: Größen-Limit überschritten - zeige Dialog
                 self._show_size_limit_dialog(data)

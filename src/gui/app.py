@@ -122,11 +122,13 @@ class VideoGeneratorApp:
         self.main_container = tk.Frame(self.root)
         self.main_container.pack(fill="both", expand=True)
 
-        self.left_frame = tk.Frame(self.main_container, width=600)
-        self.left_frame.pack(side="left", fill="both", expand=True, padx=(0, 20))
+        self.left_frame = tk.Frame(self.main_container, width=350)
+        self.left_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        self.left_frame.pack_propagate(False)  # Erzwingt die width-Einstellung
 
-        self.right_frame = tk.Frame(self.main_container, width=450)
-        self.right_frame.pack(side="right", fill="y", padx=(20, 0))
+        self.right_frame = tk.Frame(self.main_container, width=700)
+        self.right_frame.pack(side="right", fill="y", padx=(10, 0))
+        self.right_frame.pack_propagate(False)  # Erzwingt die width-Einstellung
 
         # Nächster Chunk
         self.root.after(1, self._setup_gui_step_3)

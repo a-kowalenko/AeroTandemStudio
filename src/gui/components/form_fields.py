@@ -742,24 +742,45 @@ class FormFields:
         """
         Aktiviert automatisch die Produkt-Checkboxen basierend auf
         hinzugefügten Dateien und dem aktuellen Modus.
-        Funktioniert nur im 'manual'-Modus.
-        """
-        # Nur im manuellen Modus automatisch ändern
-        if self.form_mode != 'manual':
-            return
 
+        Funktioniert in beiden Modi (manual und kunde).
+        - Bereits aktivierte Optionen werden nicht überschrieben
+        - Neu aktivierte Optionen werden als "nicht bezahlt" markiert
+        - Bezahlt-Status von bereits aktiven Optionen bleibt erhalten
+        """
         mode = self.video_mode_var.get()
 
         if mode == "handcam":
-            if has_videos:
+            # Video-Option aktivieren wenn Videos importiert wurden
+            # Aber nur wenn noch nicht aktiv
+            if has_videos and not self.handcam_video_var.get():
                 self.handcam_video_var.set(True)
-            if has_photos:
+                # Neu aktivierte Option als "nicht bezahlt" markieren
+                # (Bezahlt-Status bleibt True wenn bereits gesetzt, z.B. vom QR-Code)
+                if not self.handcam_video_bezahlt_var.get():
+                    self.handcam_video_bezahlt_var.set(False)
+
+            # Foto-Option aktivieren wenn Fotos importiert wurden
+            if has_photos and not self.handcam_foto_var.get():
                 self.handcam_foto_var.set(True)
+                # Neu aktivierte Option als "nicht bezahlt" markieren
+                if not self.handcam_foto_bezahlt_var.get():
+                    self.handcam_foto_bezahlt_var.set(False)
+
         elif mode == "outside":
-            if has_videos:
+            # Video-Option aktivieren wenn Videos importiert wurden
+            if has_videos and not self.outside_video_var.get():
                 self.outside_video_var.set(True)
-            if has_photos:
+                # Neu aktivierte Option als "nicht bezahlt" markieren
+                if not self.outside_video_bezahlt_var.get():
+                    self.outside_video_bezahlt_var.set(False)
+
+            # Foto-Option aktivieren wenn Fotos importiert wurden
+            if has_photos and not self.outside_foto_var.get():
                 self.outside_foto_var.set(True)
+                # Neu aktivierte Option als "nicht bezahlt" markieren
+                if not self.outside_foto_bezahlt_var.get():
+                    self.outside_foto_bezahlt_var.set(False)
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)

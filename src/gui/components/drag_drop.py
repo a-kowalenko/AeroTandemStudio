@@ -519,6 +519,15 @@ class DragDropFrame:
         if new_photos_added:
             self._update_photo_preview()
 
+        # NEU: Aktiviere automatisch die entsprechenden Produkt-Optionen
+        # wenn Videos oder Fotos importiert wurden
+        if (new_videos_added or new_photos_added) and self.app and hasattr(self.app, 'form_fields'):
+            self.app.form_fields.auto_check_products(new_videos_added, new_photos_added)
+
+            # Aktualisiere Wasserzeichen-Spalten-Sichtbarkeit wenn Produkt-Status sich geändert hat
+            if hasattr(self.app, 'update_watermark_column_visibility'):
+                self.app.update_watermark_column_visibility()
+
     def _import_video(self, source_path):
         """
         Importiert ein Video in den Working-Folder mit Original-Dateinamen.

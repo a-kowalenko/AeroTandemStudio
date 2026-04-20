@@ -15,9 +15,19 @@ try:
     WINDOWS_API_AVAILABLE = True
 except ImportError:
     WINDOWS_API_AVAILABLE = False
-    print("Warnung: pywin32 nicht verfügbar. SD-Karten Monitor wird nicht funktionieren.")
+    print("Warnung: pywin32 nicht verfügbar. SD-Karten Monitor Windows-Features werden nicht funktionieren.")
+
+try:
+    import pyudev
+    import psutil
+    LINUX_API_AVAILABLE = True
+except ImportError:
+    LINUX_API_AVAILABLE = False
+    if os.name == 'posix':
+        print("Warnung: pyudev/psutil nicht verfügbar. SD-Karten Monitor Linux-Features werden nicht funktionieren.")
 
 from src.utils.media_history import MediaHistoryStore, get_media_type_from_filename  # NEU
+import sys
 
 
 class SDCardMonitor:
@@ -58,8 +68,12 @@ class SDCardMonitor:
 
     def start_monitoring(self):
         """Startet die Überwachung von SD-Karten"""
-        if not WINDOWS_API_AVAILABLE:
+        if sys.platform == "win32" and not WINDOWS_API_AVAILABLE:
             print("SD-Karten Monitor kann nicht gestartet werden: pywin32 nicht verfügbar")
+            return
+
+        if sys.platform == "linux" and not LINUX_API_AVAILABLE:
+            print("SD-Karten Monitor kann nicht gestartet werden: pyudev/psutil nicht verfügbar")
             return
 
         if self.monitoring:
@@ -95,6 +109,13 @@ class SDCardMonitor:
 
     def _get_available_drives(self):
         """Gibt alle verfügbaren Laufwerke zurück"""
+        if sys.platform == "linux" and LINUX_API_AVAILABLE:
+            drives = set()
+            for part in psutil.disk_partitions(all=False):
+                if '/snap/' not in part.mountpoint and '/boot' not in part.mountpoint:
+                    drives.add(part.mountpoint)
+            return drives
+
         if not WINDOWS_API_AVAILABLE:
             return set()
         drives = set()
@@ -107,6 +128,10 @@ class SDCardMonitor:
 
     def _is_removable_drive(self, drive):
         """Prüft ob ein Laufwerk ein Wechseldatenträger ist"""
+        if sys.platform == "linux" and LINUX_API_AVAILABLE:
+            # Unter Linux greifen wir heuristisch auf typische Einhängepunkte zurück
+            return drive.startswith('/media/') or drive.startswith('/run/media/') or drive.startswith('/mnt/')
+
         if not WINDOWS_API_AVAILABLE:
             return False
         try:
@@ -123,7 +148,7 @@ class SDCardMonitor:
         """
         try:
             # Versuche auf das Root-Verzeichnis zuzugreifen
-            drive_path = drive + "\\"
+            drive_path = drive if sys.platform != "win32" else drive + "\\"
             os.listdir(drive_path)
             return True
         except (OSError, PermissionError):

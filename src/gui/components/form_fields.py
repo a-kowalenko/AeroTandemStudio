@@ -1,7 +1,8 @@
 ﻿import tkinter as tk
 from tkcalendar import DateEntry
 from datetime import date
-
+import re
+from src.utils.constants import REGEX_EMAIL, REGEX_PHONE
 
 class FormFields:
     def __init__(self, parent, config, app_instance):
@@ -59,6 +60,14 @@ class FormFields:
         self.entry_nachname = None  # NEU
         self.entry_email = None
         self.entry_telefon = None
+        self.lbl_email_error = None
+        self.lbl_telefon_error = None
+        self.is_valid = True
+        
+        # --- Tracking für Touched State ---
+        self.email_touched = False
+        self.telefon_touched = False
+
         self.entry_tandemmaster = None
         self.entry_datum = None
         self.label_videospringer = None
@@ -66,8 +75,7 @@ class FormFields:
 
         # NEU: Platzhalter für Bearbeiten-Buttons
         self.btn_gast = None  # Bleibt (kontrolliert jetzt Vor- und Nachname)
-        self.btn_email = None
-        self.btn_telefon = None
+        self.btn_kontakt = None
         self.btn_video_mode = None
 
         # NEU: Liste für Video-Widgets (Radios, Checkboxen)
@@ -84,6 +92,66 @@ class FormFields:
         self.load_initial_settings()
         self.build_manual_form()
 
+    def _on_field_focus_out(self, field):
+        """Setzt den Touch-Status bei verlassen des Felds und triggert die Validierung"""
+        if field == 'email':
+            self.email_touched = True
+        elif field == 'telefon':
+            self.telefon_touched = True
+        self._validate_inputs()
+
+    def _validate_inputs(self, *args):
+        """Echtzeit-Validierung für E-Mail und Telefon. Deaktiviert den Start-Button bei Fehlern."""
+        valid_email = True
+        valid_telefon = True
+
+        # Email Prüfung (Pflichtfeld)
+        email = self.email_var.get().strip()
+        email_error_msg = ""
+        if not email:
+            valid_email = False
+            email_error_msg = "E-Mail ist ein Pflichtfeld"
+        elif not re.match(REGEX_EMAIL, email):
+            valid_email = False
+            email_error_msg = "Ungültige E-Mail-Adresse"
+
+        if not valid_email and self.email_touched:
+            if self.lbl_email_error:
+                self.lbl_email_error.config(text=email_error_msg)
+            if self.entry_email:
+                self.entry_email.config(bg="#ffcccc")
+        else:
+            if self.lbl_email_error:
+                self.lbl_email_error.config(text="")
+            if self.entry_email:
+                self.entry_email.config(bg="white" if self.entry_email.cget('state') == 'normal' else '#f0f0f0')
+
+        # Telefon Prüfung (Optional)
+        telefon = self.telefon_var.get().strip()
+        telefon_error_msg = ""
+        if telefon and not re.match(REGEX_PHONE, telefon):
+            valid_telefon = False
+            telefon_error_msg = "Ungültige Telefonnummer"
+
+        if not valid_telefon and self.telefon_touched:
+            if self.lbl_telefon_error:
+                self.lbl_telefon_error.config(text=telefon_error_msg)
+            if self.entry_telefon:
+                self.entry_telefon.config(bg="#ffcccc")
+        else:
+            if self.lbl_telefon_error:
+                self.lbl_telefon_error.config(text="")
+            if self.entry_telefon:
+                self.entry_telefon.config(bg="white" if self.entry_telefon.cget('state') == 'normal' else '#f0f0f0')
+
+        # Update Gesamt-State
+        old_state = self.is_valid
+        self.is_valid = valid_email and valid_telefon
+
+        # Button State in GUI updaten
+        if old_state != self.is_valid and hasattr(self.app, 'update_start_button_state'):
+            self.app.update_start_button_state()
+
     def clear_form(self):
         """Entfernt alle Widgets aus dem Frame."""
         for widget in self.frame.winfo_children():
@@ -98,13 +166,18 @@ class FormFields:
         self.entry_nachname = None
         self.entry_email = None
         self.entry_telefon = None
+        self.lbl_email_error = None
+        self.lbl_telefon_error = None
+        
+        self.email_touched = False
+        self.telefon_touched = False
+
         self.entry_tandemmaster = None
         self.entry_datum = None
         self.label_videospringer = None
         self.entry_videospringer = None
         self.btn_gast = None
-        self.btn_email = None
-        self.btn_telefon = None
+        self.btn_kontakt = None
         self.btn_video_mode = None
         self.handcam_frame = None
         self.outside_frame = None
@@ -162,24 +235,30 @@ class FormFields:
         self.btn_gast.grid(row=row, column=4, padx=5, pady=5)
         row += 1
 
-        # Email (vorbelegt, nicht bearbeitbar)
+        # Email & Telefon (in einer Zeile, vorbelegt, nicht bearbeitbar)
         tk.Label(self.frame, text="Email:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
         self.email_var.set(kunde.email)
         self.entry_email = tk.Entry(self.frame, textvariable=self.email_var, font=("Arial", 11),
                                     state='disabled', relief='flat', bg='#f0f0f0')
-        self.entry_email.grid(row=row, column=1, columnspan=3, padx=5, pady=5, sticky="ew")  # Colspan 3
-        self.btn_email = tk.Button(self.frame, text="Bearbeiten", command=self.toggle_edit_email)
-        self.btn_email.grid(row=row, column=4, padx=5, pady=5)
-        row += 1
-
-        # Telefon (vorbelegt, nicht bearbeitbar)
-        tk.Label(self.frame, text="Telefon:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        self.entry_email.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
+        self.entry_email.bind("<FocusOut>", lambda e: self._on_field_focus_out('email'))
+        
+        tk.Label(self.frame, text="Telefon:", font=("Arial", 11)).grid(row=row, column=2, padx=(10, 5), pady=5, sticky="w")
         self.telefon_var.set(kunde.telefon)
         self.entry_telefon = tk.Entry(self.frame, textvariable=self.telefon_var, font=("Arial", 11),
                                       state='disabled', relief='flat', bg='#f0f0f0')
-        self.entry_telefon.grid(row=row, column=1, columnspan=3, padx=5, pady=5, sticky="ew")  # Colspan 3
-        self.btn_telefon = tk.Button(self.frame, text="Bearbeiten", command=self.toggle_edit_telefon)
-        self.btn_telefon.grid(row=row, column=4, padx=5, pady=5)
+        self.entry_telefon.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
+        self.entry_telefon.bind("<FocusOut>", lambda e: self._on_field_focus_out('telefon'))
+        
+        self.btn_kontakt = tk.Button(self.frame, text="Bearbeiten", command=self.toggle_edit_kontakt)
+        self.btn_kontakt.grid(row=row, column=4, padx=5, pady=5)
+        row += 1
+        
+        self.lbl_email_error = tk.Label(self.frame, text="", font=("Arial", 9), fg="red")
+        self.lbl_email_error.grid(row=row, column=1, padx=5, pady=(0, 5), sticky="nw")
+        
+        self.lbl_telefon_error = tk.Label(self.frame, text="", font=("Arial", 9), fg="red")
+        self.lbl_telefon_error.grid(row=row, column=3, padx=5, pady=(0, 5), sticky="nw")
         row += 1
 
         # --- VERSCHOBENE Felder ---
@@ -289,6 +368,17 @@ class FormFields:
             else:
                 self.video_mode_var.set("handcam")  # Standard ist Handcam, wenn Handcam gebucht
 
+        # Setup Echtzeit-Validierungs Trace erst nachdem alles gefüllt ist,
+        # damit die Initiale Eingabe gleich validiert wird.
+        for trace_id in self.email_var.trace_info():
+            self.email_var.trace_remove(*trace_id)
+        for trace_id in self.telefon_var.trace_info():
+            self.telefon_var.trace_remove(*trace_id)
+        self.email_var.trace_add('write', self._validate_inputs)
+        self.telefon_var.trace_add('write', self._validate_inputs)
+        
+        self._validate_inputs()
+        
         row += 1  # Wichtig: Zeile für die Frames erhöhen
         self.toggle_video_mode_visibility()  # Rufe auf, um korrekte Sektion anzuzeigen
 
@@ -312,10 +402,26 @@ class FormFields:
         self.entry_nachname.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
         row += 1
 
-        # Email (im manuellen Modus nicht vorhanden)
+        # Email und Telefon (bearbeitbar, in einer Zeile)
+        tk.Label(self.frame, text="Email:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
         self.email_var.set("")
-        # Telefon (im manuellen Modus nicht vorhanden)
+        self.entry_email = tk.Entry(self.frame, textvariable=self.email_var, font=("Arial", 11))
+        self.entry_email.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
+        self.entry_email.bind("<FocusOut>", lambda e: self._on_field_focus_out('email'))
+        
+        tk.Label(self.frame, text="Telefon:", font=("Arial", 11)).grid(row=row, column=2, padx=(10, 5), pady=5, sticky="w")
         self.telefon_var.set("")
+        self.entry_telefon = tk.Entry(self.frame, textvariable=self.telefon_var, font=("Arial", 11))
+        self.entry_telefon.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
+        self.entry_telefon.bind("<FocusOut>", lambda e: self._on_field_focus_out('telefon'))
+        row += 1
+        
+        self.lbl_email_error = tk.Label(self.frame, text="", font=("Arial", 9), fg="red")
+        self.lbl_email_error.grid(row=row, column=1, padx=5, pady=(0, 5), sticky="nw")
+        
+        self.lbl_telefon_error = tk.Label(self.frame, text="", font=("Arial", 9), fg="red")
+        self.lbl_telefon_error.grid(row=row, column=3, padx=5, pady=(0, 5), sticky="nw")
+        row += 1
 
         # --- VERSCHOBENE Felder ---
         row = self._create_tandemmaster_field(row)
@@ -404,6 +510,15 @@ class FormFields:
                                  font=("Arial", 11))
         chk_ovb.grid(row=1, column=1, padx=10, pady=5, sticky="w")
         self.video_widgets_list.append(chk_ovb)  # Hinzufügen
+
+        # Setup Traces
+        for trace_id in self.email_var.trace_info():
+            self.email_var.trace_remove(*trace_id)
+        for trace_id in self.telefon_var.trace_info():
+            self.telefon_var.trace_remove(*trace_id)
+        self.email_var.trace_add('write', self._validate_inputs)
+        self.telefon_var.trace_add('write', self._validate_inputs)
+        self._validate_inputs()
 
         # Setze initialen Modus (aus geladenen Settings)
         self.video_mode_var.set(self.config.get_settings().get("video_mode", "handcam"))
@@ -630,13 +745,29 @@ class FormFields:
             # Widget existiert möglicherweise nicht mehr
             print("Fehler beim Umschalten des Widget-Status (Gast).")
 
-    def toggle_edit_email(self):
-        """Schaltet das 'Email'-Feld um."""
-        self.toggle_edit_state(self.entry_email, self.btn_email)
+    def toggle_edit_kontakt(self):
+        """Schaltet das 'Email' und 'Telefon'-Feld um."""
+        if not self.btn_kontakt or not self.entry_email or not self.entry_telefon:
+            return
 
-    def toggle_edit_telefon(self):
-        """Schaltet das 'Telefon'-Feld um."""
-        self.toggle_edit_state(self.entry_telefon, self.btn_telefon)
+        try:
+            if self.btn_kontakt.cget('text') == "Bearbeiten":
+                new_state = 'normal'
+                new_text = "Übernehmen"
+                new_relief = 'sunken'
+                new_bg = 'white'
+            else:
+                new_state = 'disabled'
+                new_text = "Bearbeiten"
+                new_relief = 'flat'
+                new_bg = '#f0f0f0'
+
+            self.btn_kontakt.config(text=new_text)
+
+            self.entry_email.config(state=new_state, relief=new_relief, bg=new_bg)
+            self.entry_telefon.config(state=new_state, relief=new_relief, bg=new_bg)
+        except tk.TclError:
+            print("Fehler beim Umschalten des Widget-Status (Kontakt).")
 
     def toggle_edit_video_mode(self):
         """Schaltet alle Radio-Buttons und Checkboxen für den Video-Modus um."""
@@ -693,13 +824,13 @@ class FormFields:
         if self.form_mode == 'kunde':
             data["kunde_id"] = self.kunde_id_var.get()
             # gast, vorname, nachname sind schon gesetzt
-            data["email"] = self.email_var.get()
-            data["telefon"] = self.telefon_var.get()
+            data["email"] = self.email_var.get().strip()
+            data["telefon"] = self.telefon_var.get().strip()
         else:  # 'manual'
             data["kunde_id"] = self.kunde_id_var.get().strip()
             # gast, vorname, nachname sind schon gesetzt
-            data["email"] = ""  # Nicht im Formular
-            data["telefon"] = ""  # Nicht im Formular
+            data["email"] = self.email_var.get().strip()
+            data["telefon"] = self.telefon_var.get().strip()
 
         # Werte nur basierend auf dem Modus setzen
         mode = self.video_mode_var.get()
@@ -742,24 +873,45 @@ class FormFields:
         """
         Aktiviert automatisch die Produkt-Checkboxen basierend auf
         hinzugefügten Dateien und dem aktuellen Modus.
-        Funktioniert nur im 'manual'-Modus.
-        """
-        # Nur im manuellen Modus automatisch ändern
-        if self.form_mode != 'manual':
-            return
 
+        Funktioniert in beiden Modi (manual und kunde).
+        - Bereits aktivierte Optionen werden nicht überschrieben
+        - Neu aktivierte Optionen werden als "nicht bezahlt" markiert
+        - Bezahlt-Status von bereits aktiven Optionen bleibt erhalten
+        """
         mode = self.video_mode_var.get()
 
         if mode == "handcam":
-            if has_videos:
+            # Video-Option aktivieren wenn Videos importiert wurden
+            # Aber nur wenn noch nicht aktiv
+            if has_videos and not self.handcam_video_var.get():
                 self.handcam_video_var.set(True)
-            if has_photos:
+                # Neu aktivierte Option als "nicht bezahlt" markieren
+                # (Bezahlt-Status bleibt True wenn bereits gesetzt, z.B. vom QR-Code)
+                if not self.handcam_video_bezahlt_var.get():
+                    self.handcam_video_bezahlt_var.set(False)
+
+            # Foto-Option aktivieren wenn Fotos importiert wurden
+            if has_photos and not self.handcam_foto_var.get():
                 self.handcam_foto_var.set(True)
+                # Neu aktivierte Option als "nicht bezahlt" markieren
+                if not self.handcam_foto_bezahlt_var.get():
+                    self.handcam_foto_bezahlt_var.set(False)
+
         elif mode == "outside":
-            if has_videos:
+            # Video-Option aktivieren wenn Videos importiert wurden
+            if has_videos and not self.outside_video_var.get():
                 self.outside_video_var.set(True)
-            if has_photos:
+                # Neu aktivierte Option als "nicht bezahlt" markieren
+                if not self.outside_video_bezahlt_var.get():
+                    self.outside_video_bezahlt_var.set(False)
+
+            # Foto-Option aktivieren wenn Fotos importiert wurden
+            if has_photos and not self.outside_foto_var.get():
                 self.outside_foto_var.set(True)
+                # Neu aktivierte Option als "nicht bezahlt" markieren
+                if not self.outside_foto_bezahlt_var.get():
+                    self.outside_foto_bezahlt_var.set(False)
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)

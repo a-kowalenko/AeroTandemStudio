@@ -24,6 +24,9 @@ if pyzbar_file.exists():
 else:
     print("[BUILD] Warnung: pyzbar_binaries.txt nicht gefunden!")
 
+if sys.platform != 'win32':
+    pyzbar_libs = []
+
 a = Analysis(
     ['run.py'],
     pathex=[],
@@ -43,6 +46,13 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+if sys.platform == 'win32':
+    icon_path = os.path.join('assets', 'icon.ico')
+    version_file = 'version_info.txt'
+else:
+    icon_path = os.path.join('assets', 'logo.png')
+    version_file = None
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -59,8 +69,8 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets\\icon.ico'],
-    version='version_info.txt',  # 👈 Version-Metadaten einbetten!
+    icon=[icon_path],
+    version=version_file,  # 👈 Version-Metadaten einbetten! (Nur Windows)
 )
 
 coll = COLLECT(

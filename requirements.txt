@@ -16,8 +16,10 @@ proglog
 # Bildverarbeitung
 Pillow
 
-# Windows API (for SD card monitoring)
-pywin32
+# System Utilities (Platform specific)
+pywin32; sys_platform == 'win32'
+pyudev; sys_platform == 'linux'
+psutil; sys_platform == 'linux'
 
 # HTTP/Networking
 requests
@@ -34,4 +36,3 @@ pytest-mock
 # impacket - hat Build-Probleme auf Windows, verwenden Sie stattdessen:
 # - tests/simple_smb_server.py (Windows net share)
 # - tests/smb_mock.py (Mock für Unit-Tests)
-

@@ -58,6 +58,9 @@ def find_pyzbar_dlls():
     Findet pyzbar DLLs im site-packages Verzeichnis.
     Schreibt die Pfade in pyzbar_binaries.txt für PyInstaller.
     """
+    if sys.platform != 'win32':
+        return []
+
     import site
     import glob
 
@@ -87,6 +90,9 @@ def update_version_info():
     Aktualisiert version_info.txt mit der aktuellen Version aus VERSION.txt
     Diese Datei wird von PyInstaller für Windows-Metadaten verwendet.
     """
+    if sys.platform != 'win32':
+        return
+
     # Version aus VERSION.txt lesen
     version_file = Path("VERSION.txt")
     version_str = version_file.read_text(encoding="utf-8").strip()
@@ -151,6 +157,11 @@ VSVersionInfo(
 
 def find_makensis():
     """Findet makensis.exe in üblichen Installationspfaden"""
+    if sys.platform != 'win32':
+        # makensis kann theoretisch auch unter Linux laufen,
+        # wir machen aber eine tarball.
+        return None
+        
     possible_paths = [
         r"C:\Program Files (x86)\NSIS\makensis.exe",
         r"C:\Program Files\NSIS\makensis.exe",
@@ -222,6 +233,27 @@ def main():
         print("ℹ️  NSIS Installer wird NICHT erstellt (kein 'setup' Parameter)")
         print("   Zum Erstellen des Installers verwenden Sie: python build.py setup")
         print()
+    elif sys.platform == 'linux':
+        print(f"📦 Schritt 2/{total_steps}: Linux Tarball erstellen")
+        print("-" * 70)
+        
+        version = Path("VERSION.txt").read_text(encoding="utf-8").strip()
+        build_dir = Path(f"dist/Aero Tandem Studio v{version}")
+        
+        if build_dir.exists():
+            tarball_name = f"AeroTandemStudio_Installer_v{version}_linux"
+            try:
+                shutil.make_archive(tarball_name, 'gztar', "dist", f"Aero Tandem Studio v{version}")
+                print()
+                print("✅ Linux Tarball erfolgreich erstellt!")
+                print()
+            except Exception as e:
+                print()
+                print(f"❌ Fehler beim Erstellen des Tarballs: {e}")
+                return 1
+        else:
+            print("❌ Build Directory für Tarball nicht gefunden!")
+            return 1
     else:
         print(f"📦 Schritt 2/{total_steps}: NSIS Installer erstellen")
         print("-" * 70)
@@ -303,6 +335,13 @@ def main():
         installer_size = installer_file.stat().st_size / (1024 * 1024)
         print(f"  ✅ {installer_file}")
         print(f"     ({installer_size:.1f} MB)")
+        
+    if sys.platform == 'linux' and create_installer:
+        tarball_file = Path(f"AeroTandemStudio_Installer_v{version}_linux.tar.gz")
+        if tarball_file.exists():
+            installer_size = tarball_file.stat().st_size / (1024 * 1024)
+            print(f"  ✅ {tarball_file}")
+            print(f"     ({installer_size:.1f} MB)")
 
     print()
 

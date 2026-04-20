@@ -1,4 +1,6 @@
 ﻿import os
+import re
+from src.utils.constants import REGEX_EMAIL, REGEX_PHONE
 
 
 def validate_form_data(form_data, video_paths):
@@ -9,12 +11,21 @@ def validate_form_data(form_data, video_paths):
         ("load", "Load Nr"),
         ("gast", "Gast"),
         ("tandemmaster", "Tandemmaster"),
-        ("datum", "Datum")
+        ("datum", "Datum"),
+        ("email", "Email")
     ]
 
     for field_key, field_name in required_fields:
         if not form_data.get(field_key, "").strip():
             errors.append(f"{field_name} ist erforderlich")
+
+    email = form_data.get("email", "").strip()
+    if email and not re.match(REGEX_EMAIL, email):
+        errors.append("Ungültige E-Mail-Adresse")
+
+    telefon = form_data.get("telefon", "").strip()
+    if telefon and not re.match(REGEX_PHONE, telefon):
+        errors.append("Ungültige Telefonnummer")
 
     if form_data.get("outside_video") and not form_data.get("videospringer", "").strip():
         errors.append("Videospringer ist erforderlich bei Outside Video")

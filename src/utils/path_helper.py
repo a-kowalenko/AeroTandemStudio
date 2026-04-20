@@ -84,8 +84,24 @@ def setup_vlc_paths():
 
             # Standard VLC Plugin Pfad für Linux
             linux_plugin_path = "/usr/lib/vlc/plugins"
+            if os.path.exists("/usr/lib/x86_64-linux-gnu/vlc/plugins"):
+                linux_plugin_path = "/usr/lib/x86_64-linux-gnu/vlc/plugins"
+                
             if os.path.isdir(linux_plugin_path):
                 os.environ['VLC_PLUGIN_PATH'] = linux_plugin_path
+                
+            # Helper for python-vlc to find the actual .so
+            # python-vlc uses PYTHON_VLC_MODULE_PATH to load libvlc if needed
+            possible_libs = [
+                "/usr/lib/x86_64-linux-gnu/libvlc.so.5",
+                "/usr/lib/libvlc.so.5",
+                "/usr/lib64/libvlc.so.5"
+            ]
+            for lib in possible_libs:
+                if os.path.exists(lib):
+                    os.environ["PYTHON_VLC_MODULE_PATH"] = os.path.dirname(lib)
+                    os.environ["PYTHON_VLC_LIB_PATH"] = lib
+                    break
 
     # Wenn wir in der IDE laufen, wird VLC über den System-PATH gefunden
     # (vorausgesetzt, VLC ist normal installiert).

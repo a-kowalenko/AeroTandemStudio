@@ -260,27 +260,27 @@ def main():
 
         version = Path("VERSION.txt").read_text(encoding="utf-8").strip()
         build_dir = Path(f"dist/Aero Tandem Studio v{version}")
+        app_path = Path("dist/Aero Tandem Studio.app")
 
-        if build_dir.exists():
+        if app_path.exists():
             dmg_name = f"AeroTandemStudio_Installer_v{version}_mac.dmg"
             try:
                 # Info-ReadMe für den Nutzer anlegen
-                readme_path = build_dir / "WICHTIG - BITTE LESEN.txt"
+                readme_path = Path("dist") / "WICHTIG - BITTE LESEN.txt"
                 readme_path.write_text("WICHTIGER HINWEIS:\n\nDa diese App kein teures Apple-Entwicklerzertifikat nutzt, zeigt macOS beim ersten Start möglicherweise eine Sicherheitswarnung ('App kann nicht geöffnet werden, da sie nicht von einem verifizierten Entwickler stammt').\n\nLÖSUNG:\nMachen Sie einen Rechtsklick (oder Control+Klick) auf 'Aero Tandem Studio.app' und wählen Sie 'Öffnen'. Bestätigen Sie den Vorgang mit einem weiteren Klick auf 'Öffnen'. Dies muss nur ein einziges Mal durchgeführt werden!\n", encoding="utf-8")
 
                 print("Erstelle MacOS DMG...")
+                dmg_staging = Path("dmg_staging")
+                if dmg_staging.exists():
+                    shutil.rmtree(dmg_staging)
+                dmg_staging.mkdir()
+
+                # Verschiebe App und Readme in Staging
+                shutil.copytree(app_path, dmg_staging / "Aero Tandem Studio.app")
+                shutil.copy2(readme_path, dmg_staging / "WICHTIG - BITTE LESEN.txt")
+
                 if shutil.which("create-dmg"):
                     # create-dmg von Homebrew nutzen für schicke Installation
-                    dmg_staging = Path("dmg_staging")
-                    if dmg_staging.exists():
-                        shutil.rmtree(dmg_staging)
-                    dmg_staging.mkdir()
-
-                    app_path = build_dir / "Aero Tandem Studio.app"
-                    # Verschiebe App und Readme in Staging
-                    shutil.copytree(app_path, dmg_staging / "Aero Tandem Studio.app")
-                    shutil.copy2(readme_path, dmg_staging / "WICHTIG - BITTE LESEN.txt")
-
                     subprocess.run([
                         "create-dmg",
                         "--volname", "Aero Tandem Studio",
@@ -292,13 +292,13 @@ def main():
                         dmg_name,
                         str(dmg_staging)
                     ], check=True)
-
-                    shutil.rmtree(dmg_staging)
                 else:
                     print("⚠️  'create-dmg' nicht installiert. Erstelle stattdessen ZIP Fallback...")
                     tarball_name = f"AeroTandemStudio_Installer_v{version}_mac"
-                    shutil.make_archive(tarball_name, 'zip', "dist", f"Aero Tandem Studio v{version}")
+                    # Zip the staging directory
+                    shutil.make_archive(tarball_name, 'zip', str(dmg_staging))
 
+                shutil.rmtree(dmg_staging)
                 print()
                 print("✅ MacOS Release erfolgreich erstellt!")
                 print()
@@ -307,7 +307,7 @@ def main():
                 print(f"❌ Fehler beim Erstellen des MacOS Releases: {e}")
                 return 1
         else:
-            print("❌ Build Directory für MacOS nicht gefunden!")
+            print("❌ App Bundle für MacOS nicht gefunden!")
             return 1
     else:
         print(f"📦 Schritt 2/{total_steps}: NSIS Installer erstellen")

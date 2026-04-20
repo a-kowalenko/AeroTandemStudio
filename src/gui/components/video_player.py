@@ -63,10 +63,13 @@ class VideoPlayer:
                 '--reset-plugins-cache',
                 '--ignore-config',
                 '--no-xlib',
-                '--avcodec-hw=none',  # Deaktiviert problematische Hardware-Beschleunigung
                 '--quiet',  # Reduziert Console-Spam
                 '--no-video-title-show',  # Keine Titel-Overlays
             ]
+
+            # Hardwaresbeschleunigungs-Option unterscheidet sich je nach Plattform
+            if sys.platform == 'win32':
+                vlc_args.append('--avcodec-hw=none')  # Deaktiviert problematische HW-Beschleunigung auf Win
 
             self.vlc_instance = vlc.Instance(*vlc_args)
             self.media_player = self.vlc_instance.media_player_new()

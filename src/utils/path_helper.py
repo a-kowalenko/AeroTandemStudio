@@ -63,17 +63,29 @@ def setup_vlc_paths():
 
     # Wenn wir gebündelt sind (als EXE laufen)
     if hasattr(sys, '_MEIPASS'):
-        # sys._MEIPASS ist der PyInstaller-Bundle-Ordner (z.B. dist/main)
-        # Wir erwarten VLC unter C:\Programme\VideoLAN\VLC
-        # Diese Pfade sind Standard für VLC
-        vlc_plugin_path = os.path.join("C:", "Program Files", "VideoLAN", "VLC", "plugins")
-        vlc_lib_path = os.path.join("C:", "Program Files", "VideoLAN", "VLC")
 
-        # Prüfen, ob die Pfade existieren, bevor wir sie setzen
-        if os.path.isdir(vlc_lib_path):
-            os.add_dll_directory(vlc_lib_path)
-        if os.path.isdir(vlc_plugin_path):
-            os.environ['VLC_PLUGIN_PATH'] = vlc_plugin_path
+        if sys.platform == 'win32':
+            # sys._MEIPASS ist der PyInstaller-Bundle-Ordner (z.B. dist/main)
+            # Wir erwarten VLC unter C:\Programme\VideoLAN\VLC
+            # Diese Pfade sind Standard für VLC
+            vlc_plugin_path = os.path.join("C:", "Program Files", "VideoLAN", "VLC", "plugins")
+            vlc_lib_path = os.path.join("C:", "Program Files", "VideoLAN", "VLC")
+
+            # Prüfen, ob die Pfade existieren, bevor wir sie setzen
+            if os.path.isdir(vlc_lib_path):
+                os.add_dll_directory(vlc_lib_path)
+            if os.path.isdir(vlc_plugin_path):
+                os.environ['VLC_PLUGIN_PATH'] = vlc_plugin_path
+        else:
+            # Auf Linux/Mac überschreibt PyInstaller die LD_LIBRARY_PATH, was VLC kaputt macht.
+            # VLC braucht Zugriff auf System-Plugins.
+            if 'LD_LIBRARY_PATH_ORIG' in os.environ:
+                os.environ['LD_LIBRARY_PATH'] = os.environ['LD_LIBRARY_PATH_ORIG']
+
+            # Standard VLC Plugin Pfad für Linux
+            linux_plugin_path = "/usr/lib/vlc/plugins"
+            if os.path.isdir(linux_plugin_path):
+                os.environ['VLC_PLUGIN_PATH'] = linux_plugin_path
 
     # Wenn wir in der IDE laufen, wird VLC über den System-PATH gefunden
     # (vorausgesetzt, VLC ist normal installiert).

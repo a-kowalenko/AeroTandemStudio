@@ -30,6 +30,12 @@ jobs:
       - name: Install NSIS
         run: |
           choco install nsis
+          
+      - name: Download VLC and FFmpeg dependencies
+        run: |
+          mkdir -p dependency_installer
+          Invoke-WebRequest -Uri "https://download.videolan.org/pub/videolan/vlc/3.0.21/win64/vlc-3.0.21-win64.exe" -OutFile "dependency_installer/vlc-3.0.21-win64.exe"
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "dependency_installer/ffmpeg-8.0-essentials_build.zip"
 
       - name: Build Windows Installer
         env:

@@ -25,8 +25,8 @@ class VideoPlayer:
             try:
                 import vlc as vlc_module
                 vlc = vlc_module
-            except ImportError:
-                print("⚠️ VLC Modul konnte nicht importiert werden")
+            except Exception as e:
+                print(f"⚠️ VLC Modul konnte nicht importiert werden: {e}")
                 vlc = None
 
         self.parent = parent
@@ -673,4 +673,3 @@ class VideoPlayer:
 
         self.media_player.set_position(0)
         self.parent.after(50, lambda: self.media_player.stop())
-

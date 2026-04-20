@@ -15,12 +15,13 @@ try:
 
     setup_vlc_paths()
 except ImportError:
-    print("Warnung: path_helper nicht gefunden. VLC funktioniert möglicherweise nicht in der gebündelten App.")
+    print("Warnung: path_helper nicht gefunden.")
+    vlc = None
 
 try:
     import vlc
-except ImportError:
-    print("FATAL: python-vlc Modul nicht gefunden. Bitte installieren Sie es.")
+except Exception as e:
+    print(f"FATAL: python-vlc Modul konnte nicht geladen werden: {e}")
     vlc = None
 
 from .circular_spinner import CircularSpinner

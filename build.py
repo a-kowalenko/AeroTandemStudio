@@ -271,6 +271,16 @@ def main():
                 print("Erstelle MacOS DMG...")
                 if shutil.which("create-dmg"):
                     # create-dmg von Homebrew nutzen für schicke Installation
+                    dmg_staging = Path("dmg_staging")
+                    if dmg_staging.exists():
+                        shutil.rmtree(dmg_staging)
+                    dmg_staging.mkdir()
+
+                    app_path = build_dir / "Aero Tandem Studio.app"
+                    # Verschiebe App und Readme in Staging
+                    shutil.copytree(app_path, dmg_staging / "Aero Tandem Studio.app")
+                    shutil.copy2(readme_path, dmg_staging / "WICHTIG - BITTE LESEN.txt")
+
                     subprocess.run([
                         "create-dmg",
                         "--volname", "Aero Tandem Studio",
@@ -280,8 +290,10 @@ def main():
                         "--app-drop-link", "400", "150",
                         "--icon", "Aero Tandem Studio.app", "150", "150",
                         dmg_name,
-                        str(build_dir)
+                        str(dmg_staging)
                     ], check=True)
+
+                    shutil.rmtree(dmg_staging)
                 else:
                     print("⚠️  'create-dmg' nicht installiert. Erstelle stattdessen ZIP Fallback...")
                     tarball_name = f"AeroTandemStudio_Installer_v{version}_mac"

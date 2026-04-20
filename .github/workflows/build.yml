@@ -32,10 +32,17 @@ jobs:
           choco install nsis
           
       - name: Download VLC and FFmpeg dependencies
+        shell: bash
         run: |
           mkdir -p dependency_installer
-          Invoke-WebRequest -Uri "https://download.videolan.org/pub/videolan/vlc/3.0.21/win64/vlc-3.0.21-win64.exe" -OutFile "dependency_installer/vlc-3.0.21-win64.exe"
-          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "dependency_installer/ffmpeg-8.0-essentials_build.zip"
+          curl -L -o "dependency_installer/vlc-3.0.21-win64.exe" "https://download.videolan.org/pub/videolan/vlc/3.0.21/win64/vlc-3.0.21-win64.exe"
+          curl -L -o "temp_ffmpeg.zip" "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          unzip -q temp_ffmpeg.zip -d temp_ffmpeg
+          # Das Gyan.dev ffmpeg zip hat internen Ordner (ffmpeg-7.0.2-essentials_build), wir wollen 'bin' direkt
+          cd temp_ffmpeg/*
+          zip -qr "../../dependency_installer/ffmpeg-8.0-essentials_build.zip" *
+          cd ../..
+          rm -rf temp_ffmpeg temp_ffmpeg.zip
 
       - name: Build Windows Installer
         env:

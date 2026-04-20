@@ -254,6 +254,49 @@ def main():
         else:
             print("❌ Build Directory für Tarball nicht gefunden!")
             return 1
+    elif sys.platform == 'darwin':
+        print(f"📦 Schritt 2/{total_steps}: MacOS DMG erstellen")
+        print("-" * 70)
+
+        version = Path("VERSION.txt").read_text(encoding="utf-8").strip()
+        build_dir = Path(f"dist/Aero Tandem Studio v{version}")
+
+        if build_dir.exists():
+            dmg_name = f"AeroTandemStudio_Installer_v{version}_mac.dmg"
+            try:
+                # Info-ReadMe für den Nutzer anlegen
+                readme_path = build_dir / "WICHTIG - BITTE LESEN.txt"
+                readme_path.write_text("WICHTIGER HINWEIS:\n\nDa diese App kein teures Apple-Entwicklerzertifikat nutzt, zeigt macOS beim ersten Start möglicherweise eine Sicherheitswarnung ('App kann nicht geöffnet werden, da sie nicht von einem verifizierten Entwickler stammt').\n\nLÖSUNG:\nMachen Sie einen Rechtsklick (oder Control+Klick) auf 'Aero Tandem Studio.app' und wählen Sie 'Öffnen'. Bestätigen Sie den Vorgang mit einem weiteren Klick auf 'Öffnen'. Dies muss nur ein einziges Mal durchgeführt werden!\n", encoding="utf-8")
+
+                print("Erstelle MacOS DMG...")
+                if shutil.which("create-dmg"):
+                    # create-dmg von Homebrew nutzen für schicke Installation
+                    subprocess.run([
+                        "create-dmg",
+                        "--volname", "Aero Tandem Studio",
+                        "--window-pos", "200", "120",
+                        "--window-size", "600", "400",
+                        "--icon-size", "100",
+                        "--app-drop-link", "400", "150",
+                        "--icon", "Aero Tandem Studio.app", "150", "150",
+                        dmg_name,
+                        str(build_dir)
+                    ], check=True)
+                else:
+                    print("⚠️  'create-dmg' nicht installiert. Erstelle stattdessen ZIP Fallback...")
+                    tarball_name = f"AeroTandemStudio_Installer_v{version}_mac"
+                    shutil.make_archive(tarball_name, 'zip', "dist", f"Aero Tandem Studio v{version}")
+
+                print()
+                print("✅ MacOS Release erfolgreich erstellt!")
+                print()
+            except Exception as e:
+                print()
+                print(f"❌ Fehler beim Erstellen des MacOS Releases: {e}")
+                return 1
+        else:
+            print("❌ Build Directory für MacOS nicht gefunden!")
+            return 1
     else:
         print(f"📦 Schritt 2/{total_steps}: NSIS Installer erstellen")
         print("-" * 70)
@@ -342,6 +385,16 @@ def main():
             installer_size = tarball_file.stat().st_size / (1024 * 1024)
             print(f"  ✅ {tarball_file}")
             print(f"     ({installer_size:.1f} MB)")
+
+    if sys.platform == 'darwin' and create_installer:
+        dmg_file = Path(f"AeroTandemStudio_Installer_v{version}_mac.dmg")
+        zip_file = Path(f"AeroTandemStudio_Installer_v{version}_mac.zip")
+
+        for mac_file in [dmg_file, zip_file]:
+            if mac_file.exists():
+                installer_size = mac_file.stat().st_size / (1024 * 1024)
+                print(f"  ✅ {mac_file}")
+                print(f"     ({installer_size:.1f} MB)")
 
     print()
 

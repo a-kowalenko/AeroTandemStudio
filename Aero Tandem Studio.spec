@@ -82,3 +82,17 @@ coll = COLLECT(
     upx_exclude=[],
     name=f"Aero Tandem Studio v{CURRENT_VERSION}",
 )
+
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        coll,
+        name='Aero Tandem Studio.app',
+        icon=icon_path,
+        bundle_identifier=None,
+        version=CURRENT_VERSION,
+        info_plist={
+            'NSHighResolutionCapable': 'True',
+            'LSBackgroundOnly': 'False',
+            'NSRequiresAquaSystemAppearance': 'False'
+        }
+    )

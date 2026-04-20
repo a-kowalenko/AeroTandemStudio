@@ -19,7 +19,7 @@ Pillow
 # System Utilities (Platform specific)
 pywin32; sys_platform == 'win32'
 pyudev; sys_platform == 'linux'
-psutil; sys_platform == 'linux'
+psutil; sys_platform != 'win32'
 
 # HTTP/Networking
 requests

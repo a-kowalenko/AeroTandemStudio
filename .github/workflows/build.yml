@@ -83,8 +83,41 @@ jobs:
           name: linux-tarball
           path: '*.tar.gz'
 
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          brew install python-tk zbar ffmpeg vlc create-dmg
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build MacOS Release
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python build.py setup
+
+      - name: Upload MacOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: '*.dmg'
+
   create-release:
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, build-macos]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -98,6 +131,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: linux-tarball
+          path: artifacts
+
+      - name: Download MacOS Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-dmg
           path: artifacts
 
       - name: Create GitHub Release

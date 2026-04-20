@@ -35,7 +35,7 @@ a = Analysis(
         ('VERSION.txt', '.'),   # Version-Datei mit einbinden
         ('assets', 'assets')    # Assets-Ordner mitnehmen
     ],
-    hiddenimports=['pyzbar', 'pyzbar.pyzbar'],  # pyzbar explizit importieren
+    hiddenimports=['pyzbar', 'pyzbar.pyzbar', 'vlc'],  # pyzbar & vlc explizit importieren
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

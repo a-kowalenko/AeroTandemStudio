@@ -44,6 +44,10 @@ a = Analysis(
     optimize=0,
 )
 
+# Linux: Remove libvlc from bundled binaries so python-vlc uses the system one natively
+if sys.platform == 'linux':
+    a.binaries = [x for x in a.binaries if not x[0].startswith('libvlc')]
+
 pyz = PYZ(a.pure)
 
 if sys.platform == 'win32':

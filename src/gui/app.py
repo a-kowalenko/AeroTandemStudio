@@ -1973,7 +1973,7 @@ class VideoGeneratorApp:
 
                 print("Prüfe auf bereits importierte Dateien...")
 
-                # Videos filtern - nur importierte überspringen, nicht gesicherte
+                # Videos filtern - nur importierte überspringen, nicht nur gesicherte
                 for file_path in video_files:
                     identity = history_store.compute_identity(file_path)
                     if identity:
@@ -1987,7 +1987,7 @@ class VideoGeneratorApp:
                         # Bei Hash-Fehler: Datei trotzdem importieren
                         filtered_videos.append(file_path)
 
-                # Fotos filtern - nur importierte überspringen, nicht gesicherte
+                # Fotos filtern - nur importierte überspringen, nicht nur gesicherte
                 for file_path in photo_files:
                     identity = history_store.compute_identity(file_path)
                     if identity:

@@ -77,3 +77,7 @@ WASSERZEICHEN_PATH = get_resource_path("assets/preview_stempel.png")
 # Minimale Version, die dem User zum Wechseln angeboten wird
 # Ältere Versionen werden nicht im Dropdown angezeigt
 MIN_SWITCHABLE_VERSION = "0.0.5.0"
+
+# --- Validierung (Regex) ---
+REGEX_EMAIL = r"^[\w\.-]+@[\w\.-]+\.\w+$"
+REGEX_PHONE = r"^[\d\+\-\/\s]+$"

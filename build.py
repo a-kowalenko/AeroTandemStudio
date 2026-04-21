@@ -45,8 +45,11 @@ def bump_version(level="build"):
         build = 0
     elif level == "build":
         build += 1
+    elif level == "none":
+        print(f"   Version bleibt unverändert: {version}")
+        return version
     else:
-        raise ValueError(f"Unknown level '{level}', use: major | minor | patch | build")
+        raise ValueError(f"Unknown level '{level}', use: major | minor | patch | build | none")
 
     new_version = f"{major}.{minor}.{patch}.{build}"
     version_file.write_text(new_version + "\n", encoding="utf-8")
@@ -190,8 +193,13 @@ def main():
     build_levels = [arg for arg in args if arg != 'setup']
     level = build_levels[0] if build_levels else "build"
 
+    # Verhindere automatischen Version-Bump in GitHub Actions
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        print("ℹ️  GitHub Actions erkannt: Version wird nicht hochgezählt.")
+        level = "none"
+
     # Validiere Build-Level
-    valid_levels = ["build", "minor", "patch", "major"]
+    valid_levels = ["build", "minor", "patch", "major", "none"]
     if level not in valid_levels:
         print(f"❌ Ungültiger Build-Level: '{level}'")
         print(f"   Gültige Werte: {', '.join(valid_levels)}")

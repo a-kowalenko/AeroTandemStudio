@@ -111,6 +111,18 @@ def ensure_ffmpeg_installed(progress_callback=None, install_dir=None, add_to_use
     bin_path = os.path.join(install_dir, "bin", bin_name)
 
     if os.path.exists(bin_path):
+        # On Linux, if it's the old John Van Sickle build without hwaccel, delete it
+        if system == "Linux":
+            try:
+                import subprocess
+                res = subprocess.run([bin_path, "-version"], capture_output=True, text=True, timeout=5)
+                if "johnvansickle" in res.stdout or "johnvansickle" in res.stderr:
+                    report("Found old static FFmpeg without HW acceleration. Replacing...")
+                    shutil.rmtree(install_dir)
+            except Exception:
+                pass
+                
+    if os.path.exists(bin_path):
         report(f"FFmpeg already present at `{bin_path}`")
         # ensure it's on current PATH for this process
         if os.path.dirname(bin_path) not in os.environ.get("PATH", ""):
@@ -120,7 +132,7 @@ def ensure_ffmpeg_installed(progress_callback=None, install_dir=None, add_to_use
     report("FFmpeg not found — downloading and installing to user location...")
 
     ffmpeg_zip_url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" if system == "Windows" else \
-                     "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+                     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
     temp_zip = os.path.join(tempfile.gettempdir(), "ffmpeg_download.tmp")
 
     try:

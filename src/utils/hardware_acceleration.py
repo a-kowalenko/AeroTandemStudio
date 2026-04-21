@@ -21,7 +21,7 @@ class HardwareAccelerationDetector:
         self.hw_type = None
         self._cache_file = os.path.join(CONFIG_DIR, 'hw_cache.json')
         self._detection_timeout = 2.0  # Maximale Zeit für Hardware-Erkennung
-        self._cache_version = 2  # WICHTIG: Erhöhen wenn sich GOP-Parameter ändern!
+        self._cache_version = 3  # WICHTIG: Erhöhen wenn sich GOP-Parameter ändern!
 
     def detect_hardware(self):
         """
@@ -328,6 +328,9 @@ class HardwareAccelerationDetector:
 
         # 2. Prüfe VAAPI (Intel/AMD unter Linux)
         if self._check_vaapi_available():
+            import glob
+            nodes = glob.glob('/dev/dri/renderD*')
+            node = nodes[0] if nodes else '/dev/dri/renderD128'
             return {
                 'available': True,
                 'type': 'vaapi',
@@ -335,7 +338,7 @@ class HardwareAccelerationDetector:
                 'encoder_hevc': 'hevc_vaapi',
                 'decoder': None,
                 'hwaccel': 'vaapi',
-                'device': '/dev/dri/renderD128',
+                'device': node,
                 'extra_params': ['-g', '30']
             }
 
@@ -435,9 +438,10 @@ class HardwareAccelerationDetector:
     def _check_vaapi_available(self):
         """Prüft ob VAAPI (Linux) verfügbar ist"""
         try:
-            # Prüfe ob /dev/dri/renderD128 existiert
-            import os
-            if not os.path.exists('/dev/dri/renderD128'):
+            import glob
+            # Prüfe ob /dev/dri/renderD existiert
+            render_nodes = glob.glob('/dev/dri/renderD*')
+            if not render_nodes:
                 return False
 
             result = subprocess.run(

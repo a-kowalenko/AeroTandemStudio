@@ -874,6 +874,27 @@ class DragDropFrame:
             self._update_photo_table()
             self._update_photo_preview()
 
+    def remove_video(self, video_path, update_preview=True):
+        """Entfernt ein bestimmtes Video aus der Liste"""
+        if video_path in self.video_paths:
+            index = self.video_paths.index(video_path)
+            self.video_paths.pop(index)
+
+            # Cache leeren
+            if self.app and hasattr(self.app, 'video_preview'):
+                self.app.video_preview.remove_path_from_cache(video_path)
+
+            # Wasserzeichen-Index aktualisieren
+            if getattr(self, 'watermark_clip_index', None) == index:
+                self.watermark_clip_index = None
+            elif getattr(self, 'watermark_clip_index', None) is not None and self.watermark_clip_index > index:
+                self.watermark_clip_index -= 1
+
+            self._update_video_table()
+
+            if update_preview:
+                self._update_app_preview()
+
     def clear_videos(self):
         """Entfernt alle Videos"""
         self.video_paths.clear()

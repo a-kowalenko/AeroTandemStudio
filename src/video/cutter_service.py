@@ -32,6 +32,9 @@ class VideoInfo:
     audio_bitrate: Optional[int]
     sample_rate: Optional[str]
     channels: Optional[int]
+    timescale: str = "25"
+    profile: Optional[str] = None
+    level: Optional[str] = None
 
 
 @dataclass
@@ -94,6 +97,9 @@ class VideoCutterService:
         except:
             fps = 30.0
 
+        time_base = video_stream.get("time_base", "1/25").split('/')
+        timescale = time_base[1] if len(time_base) == 2 else "25"
+
         # Video-Parameter
         video_info = VideoInfo(
             duration_ms=duration_ms,
@@ -107,6 +113,9 @@ class VideoCutterService:
             audio_bitrate=int(audio_stream.get('bit_rate', 0)) if audio_stream and audio_stream.get('bit_rate') else None,
             sample_rate=audio_stream.get('sample_rate') if audio_stream else None,
             channels=audio_stream.get('channels') if audio_stream else None,
+            timescale=timescale,
+            profile=video_stream.get("profile"),
+            level=video_stream.get("level"),
         )
 
         return video_info
@@ -311,8 +320,6 @@ class VideoCutterService:
                         "-rc", "vbr",
                         "-cq", "19",
                         "-b:v", "0",
-                        "-g", "30",
-                        "-keyint_min", "30",
                         "-pix_fmt", "yuv420p"
                     ])
                 elif hw_type == 'intel':
@@ -321,9 +328,6 @@ class VideoCutterService:
                         "-global_quality", "19",
                         "-preset", "medium",
                         "-look_ahead", "0",  # Deaktiviert für Stabilität
-                        "-g", "30",  # GOP-Size fest auf 30 (bei 30fps = 1 Keyframe/Sekunde)
-                        "-keyint_min", "30",
-                        "-bf", "0",  # Keine B-Frames für bessere Schneidbarkeit
                         "-pix_fmt", "nv12"
                     ])
                 elif hw_type == 'amd':
@@ -332,16 +336,12 @@ class VideoCutterService:
                         "-rc", "cqp",
                         "-qp_i", "19",
                         "-qp_p", "19",
-                        "-g", "30",
-                        "-keyint_min", "30",
                         "-pix_fmt", "nv12"
                     ])
                 elif hw_type == 'videotoolbox':
                     cmd.extend([
                         "-b:v", "0",
                         "-q:v", "65",
-                        "-g", "30",
-                        "-keyint_min", "30",
                         "-pix_fmt", "nv12"
                     ])
             else:
@@ -354,15 +354,26 @@ class VideoCutterService:
                 cmd.extend([
                     "-crf", "18",
                     "-preset", "medium",
-                    "-pix_fmt", "yuv420p",
-                    "-g", "30",  # GOP-Size fest auf 30
-                    "-keyint_min", "30",
-                    "-bf", "0"  # Keine B-Frames
+                    "-pix_fmt", "yuv420p"
                 ])
+                
+                # Maintain original profile and level if available
+                if video_info.profile:
+                    profile_str = str(video_info.profile).lower().replace(" ", "")
+                    # ffmpeg does not support all reported profiles identically, but we try commonly matching ones
+                    if profile_str in ["baseline", "main", "high", "high10", "high422", "high444"]:
+                        cmd.extend(["-profile:v", profile_str])
+                    
+                if video_info.level:
+                    try:
+                        level_str = str(float(video_info.level) / 10.0)
+                        cmd.extend(["-level:v", level_str])
+                    except (ValueError, TypeError):
+                        pass
 
             # Keyframe am Anfang erzwingen wenn gefordert
             if segment.get('force_keyframe'):
-                cmd.extend(["-force_key_frames", "0"])
+                cmd.extend(["-force_key_frames", "expr:eq(t,0)"])
 
             # Audio-Codec
             if video_info.acodec:
@@ -392,6 +403,7 @@ class VideoCutterService:
             "-avoid_negative_ts", "make_zero",
             "-fflags", "+genpts",
             "-movflags", "+faststart",
+            "-video_track_timescale", video_info.timescale,
             "-map", "0:v:0?", "-map", "0:a:0?",
             output_path
         ])

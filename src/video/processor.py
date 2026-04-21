@@ -228,7 +228,25 @@ class VideoProcessor:
                     # Für VP9/AV1: Verwende concat demuxer (concat:file:...)
                     # Keine Konvertierung nötig, verwende MP4-Dateien direkt
                     temp_intro_path = temp_intro_with_audio_path
-                    temp_combined_path = combined_video_path
+                    
+                    if not video_params.get("has_audio", True):
+                        self._update_status("Erzeuge stille Audiospur für Hauptvideo...")
+                        temp_combined_path = os.path.join(tempfile.gettempdir(), "combined_with_silent_audio.mp4")
+                        temp_files.append(temp_combined_path)
+                        
+                        cmd = [
+                            "ffmpeg", "-y", 
+                            "-i", combined_video_path,
+                            "-f", "lavfi", "-i", f"anullsrc=channel_layout={video_params['channel_layout']}:sample_rate={video_params['sample_rate']}",
+                            "-c:v", "copy",
+                            "-c:a", video_params['acodec'],
+                            "-shortest",
+                            temp_combined_path
+                        ]
+                        subprocess.run(cmd, capture_output=True, text=True, check=True,
+                                      creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                    else:
+                        temp_combined_path = combined_video_path
 
                     # Erstelle concat-Liste
                     concat_list_path = os.path.join(tempfile.gettempdir(), "final_concat_list.txt")
@@ -267,7 +285,19 @@ class VideoProcessor:
                     temp_combined_ts_path = os.path.join(tempfile.gettempdir(), "combined.ts")
                     temp_files.append(temp_combined_ts_path)
 
-                    combined_cmd = ["ffmpeg", "-y", "-i", combined_video_path, "-c", "copy"]
+                    if not video_params.get("has_audio", True):
+                        self._update_status("Erzeuge stille Audiospur für Hauptvideo (MPEG-TS)...")
+                        combined_cmd = [
+                            "ffmpeg", "-y", 
+                            "-i", combined_video_path,
+                            "-f", "lavfi", "-i", f"anullsrc=channel_layout={video_params['channel_layout']}:sample_rate={video_params['sample_rate']}",
+                            "-c:v", "copy",
+                            "-c:a", video_params['acodec'],
+                            "-shortest"
+                        ]
+                    else:
+                        combined_cmd = ["ffmpeg", "-y", "-i", combined_video_path, "-c", "copy"]
+
                     if bsf:
                         combined_cmd.extend(["-bsf:v", bsf])
                     combined_cmd.extend(["-f", "mpegts", temp_combined_ts_path])
@@ -966,8 +996,8 @@ class VideoProcessor:
 
         if not video_stream:
             raise ValueError("Kein Video-Stream in der Eingabedatei gefunden.")
-        if not audio_stream:
-            raise ValueError("Kein Audio-Stream in der Eingabedatei gefunden.")
+        
+        has_audio = audio_stream is not None
 
         time_base = video_stream.get("time_base", "1/25").split('/')
         timescale = time_base[1] if len(time_base) == 2 else "25"
@@ -995,9 +1025,10 @@ class VideoProcessor:
             "pix_fmt": video_stream.get("pix_fmt"),
             "vcodec": vcodec,
             "vtag": vtag,
-            "acodec": audio_stream.get("codec_name"),
-            "sample_rate": audio_stream.get("sample_rate"),
-            "channel_layout": audio_stream.get("channel_layout", "stereo"),
+            "has_audio": has_audio,
+            "acodec": audio_stream.get("codec_name") if has_audio and audio_stream.get("codec_name") else "aac",
+            "sample_rate": audio_stream.get("sample_rate") if has_audio and audio_stream.get("sample_rate") else "48000",
+            "channel_layout": audio_stream.get("channel_layout", "stereo") if has_audio else "stereo",
             "color_range": video_stream.get("color_range"),
             "colorspace": video_stream.get("color_space"),
             "color_primaries": video_stream.get("color_primaries"),

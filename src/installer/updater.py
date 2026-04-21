@@ -111,8 +111,6 @@ def _insert_formatted_text(text_widget, text):
         link_match = re.search(r'\[(.+?)\]\((.+?)\)', remaining)  # [text](url)
         mention_match = re.search(r'@([\w\-\.]+)', remaining)  # @username (mit Bindestrich und Punkt)
 
-        # ...existing code...
-
         # Finde welcher Match zuerst kommt
         matches = []
         if bold_match:
@@ -376,11 +374,18 @@ def get_all_releases(min_version=None):
                 except:
                     continue
 
-            # Suche .exe Installer
+            # Suche OS-spezifischen Installer
             assets = release.get("assets", [])
             installer_url = ""
             for asset in assets:
-                if asset.get("name", "").endswith(".exe"):
+                name = asset.get("name", "")
+                if sys.platform == "win32" and name.endswith(".exe"):
+                    installer_url = asset.get("browser_download_url")
+                    break
+                elif sys.platform == "darwin" and name.endswith("_mac.dmg"):
+                    installer_url = asset.get("browser_download_url")
+                    break
+                elif sys.platform == "linux" and name.endswith("_linux.tar.gz"):
                     installer_url = asset.get("browser_download_url")
                     break
 
@@ -433,20 +438,27 @@ def check_for_updates_thread(root_gui, app_version, show_no_update_message=False
         if latest_version > current_version and not is_ignored:
             release_notes = data.get("body", "Keine Details verfügbar.")  # Korrektur: 'body' statt 'release_notes'
 
-            # Suche nach .exe Installer in den Release-Assets
+            # Suche nach OS-spezifischem Installer in den Release-Assets
             assets = data.get("assets", [])
             installer_url = ""
             for asset in assets:
-                if asset.get("name", "").endswith(".exe"):
+                name = asset.get("name", "")
+                if sys.platform == "win32" and name.endswith(".exe"):
+                    installer_url = asset.get("browser_download_url")
+                    break
+                elif sys.platform == "darwin" and name.endswith("_mac.dmg"):
+                    installer_url = asset.get("browser_download_url")
+                    break
+                elif sys.platform == "linux" and name.endswith("_linux.tar.gz"):
                     installer_url = asset.get("browser_download_url")
                     break
 
             if not installer_url:
-                print("Update gefunden, aber keine .exe-Datei im Release.")
+                print("Update gefunden, aber keine passende Installer-Datei im Release.")
                 if show_no_update_message:
                     root_gui.after(0, lambda: messagebox.showinfo(
                         "Update-Prüfung",
-                        f"Update {latest_version_str} verfügbar, aber kein Installer gefunden."
+                        f"Update {latest_version_str} verfügbar, aber kein passender Installer gefunden."
                     ))
                 return
 
@@ -507,7 +519,15 @@ def install_specific_version(root_gui, installer_url):
 def download_and_install_thread(installer_url, progress_queue, cancel_event):
     """Lädt Installer herunter und startet ihn mit Admin-Rechten"""
     temp_dir = tempfile.gettempdir()
-    installer_path = os.path.join(temp_dir, DOWNLOAD_NAME)
+    
+    if sys.platform == "win32":
+        ext = ".exe"
+    elif sys.platform == "darwin":
+        ext = ".dmg"
+    else:
+        ext = ".tar.gz"
+        
+    installer_path = os.path.join(temp_dir, f"setup_update{ext}")
 
     try:
         headers = {'User-Agent': 'AeroTandemStudio-Updater (requests)'}
@@ -545,9 +565,41 @@ def download_and_install_thread(installer_url, progress_queue, cancel_event):
                 )
                 if ret <= 32:  # Fehler bei ShellExecute
                     raise Exception("UAC_CANCELLED_OR_FAILED")
+            elif sys.platform == "darwin":
+                # macOS Update Script
+                app_path = os.path.abspath(os.path.join(os.path.dirname(sys.executable), "../../.."))
+                if not app_path.endswith(".app"):
+                    app_path = PROJECT_ROOT
+                
+                script_path = os.path.join(temp_dir, "update_mac.sh")
+                with open(script_path, "w") as f:
+                    f.write(f'''#!/bin/bash
+sleep 2
+hdiutil attach "{installer_path}" -mountpoint /Volumes/AeroTandemStudioUpdate -nobrowse
+cp -R /Volumes/AeroTandemStudioUpdate/*.app/ "{app_path}/"
+hdiutil detach /Volumes/AeroTandemStudioUpdate
+open "{app_path}"
+''')
+                os.chmod(script_path, 0o755)
+                subprocess.Popen(["/bin/bash", script_path], start_new_session=True)
             else:
-                # Fallback für Nicht-Windows
-                subprocess.Popen([installer_path, "/S"], start_new_session=True, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                # Linux Update Script
+                if getattr(sys, 'frozen', False):
+                    app_dir = os.path.dirname(sys.executable)
+                    executable = sys.executable
+                else:
+                    app_dir = PROJECT_ROOT
+                    executable = sys.executable
+                    
+                script_path = os.path.join(temp_dir, "update_linux.sh")
+                with open(script_path, "w") as f:
+                    f.write(f'''#!/bin/bash
+sleep 2
+tar -xzf "{installer_path}" -C "{app_dir}" --strip-components=1
+nohup "{executable}" > /dev/null 2>&1 &
+''')
+                os.chmod(script_path, 0o755)
+                subprocess.Popen(["/bin/bash", script_path], start_new_session=True)
 
             progress_queue.put("EXIT_APP")
 
@@ -836,3 +888,4 @@ def initialize_updater(root_gui, app_version, show_no_update_message=False, forc
         daemon=True
     )
     update_thread.start()
+

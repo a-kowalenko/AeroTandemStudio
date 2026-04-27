@@ -657,6 +657,34 @@ class DragDropFrame:
                 if hasattr(self.app, 'update_watermark_column_visibility'):
                     self.app.update_watermark_column_visibility()
 
+            # Wenn ausschließlich Fotos hinzugefügt wurden, automatisch
+            # auf Foto-Tab (links) und Foto Vorschau (rechts) wechseln.
+            if new_photos_added and not new_videos_added:
+                try:
+                    self.notebook.select(self.photo_tab)
+                except Exception as e:
+                    print(f"⚠️ Fehler beim Wechsel auf Foto-Tab: {e}")
+
+                try:
+                    if self.app and hasattr(self.app, 'preview_notebook') and hasattr(self.app, 'foto_tab'):
+                        self.app.preview_notebook.select(self.app.foto_tab)
+                except Exception as e:
+                    print(f"⚠️ Fehler beim Wechsel auf Foto Vorschau-Tab: {e}")
+
+            # Wenn ausschließlich Videos hinzugefügt wurden, automatisch
+            # auf Video-Tab (links) und Video Vorschau (rechts) wechseln.
+            if new_videos_added and not new_photos_added:
+                try:
+                    self.notebook.select(self.video_tab)
+                except Exception as e:
+                    print(f"⚠️ Fehler beim Wechsel auf Video-Tab: {e}")
+
+                try:
+                    if self.app and hasattr(self.app, 'preview_notebook') and hasattr(self.app, 'video_tab'):
+                        self.app.preview_notebook.select(self.app.video_tab)
+                except Exception as e:
+                    print(f"⚠️ Fehler beim Wechsel auf Video Vorschau-Tab: {e}")
+
     def _import_video(self, source_path):
         """
         Importiert ein Video in den Working-Folder mit Original-Dateinamen.

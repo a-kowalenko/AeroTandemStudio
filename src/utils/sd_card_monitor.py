@@ -7,6 +7,7 @@ import time
 import threading
 import shutil
 import string
+import sys
 
 try:
     import win32api
@@ -19,12 +20,11 @@ except ImportError:
 
 try:
     import pyudev
-    import psutil
-    LINUX_API_AVAILABLE = True
+    PYUDEV_AVAILABLE = True
 except ImportError:
-    LINUX_API_AVAILABLE = False
-    if os.name == 'posix':
-        print("Warnung: pyudev/psutil nicht verfügbar. SD-Karten Monitor Linux-Features werden nicht funktionieren.")
+    PYUDEV_AVAILABLE = False
+    if sys.platform == "linux":
+        print("Hinweis: pyudev nicht verfügbar. Es wird der psutil-basierte Linux-Fallback verwendet.")
 
 try:
     import psutil
@@ -32,8 +32,9 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
+LINUX_API_AVAILABLE = True
+
 from src.utils.media_history import MediaHistoryStore, get_media_type_from_filename  # NEU
-import sys
 
 
 class SDCardMonitor:
@@ -79,7 +80,7 @@ class SDCardMonitor:
             return
             
         if sys.platform == "linux" and not LINUX_API_AVAILABLE:
-            print("SD-Karten Monitor kann nicht gestartet werden: pyudev/psutil nicht verfügbar")
+            print("SD-Karten Monitor kann nicht gestartet werden: psutil nicht verfügbar")
             return
 
         if sys.platform == "darwin" and not PSUTIL_AVAILABLE:
@@ -124,6 +125,30 @@ class SDCardMonitor:
             for part in psutil.disk_partitions(all=False):
                 if '/snap/' not in part.mountpoint and '/boot' not in part.mountpoint:
                     drives.add(part.mountpoint)
+            return drives
+
+        # Linux-Fallback ohne psutil: typische Mount-Pfade prüfen
+        if sys.platform == "linux":
+            drives = set()
+            candidate_roots = ("/media", "/run/media", "/mnt")
+            for root in candidate_roots:
+                if not os.path.isdir(root):
+                    continue
+                try:
+                    for entry in os.listdir(root):
+                        path = os.path.join(root, entry)
+                        if os.path.isdir(path):
+                            drives.add(path)
+                            # /run/media/<user>/<label> hat oft eine zusätzliche Ebene
+                            try:
+                                for sub_entry in os.listdir(path):
+                                    sub_path = os.path.join(path, sub_entry)
+                                    if os.path.isdir(sub_path):
+                                        drives.add(sub_path)
+                            except Exception:
+                                pass
+                except Exception:
+                    continue
             return drives
             
         if not WINDOWS_API_AVAILABLE:

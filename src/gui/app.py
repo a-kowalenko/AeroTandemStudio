@@ -1424,6 +1424,7 @@ class VideoGeneratorApp:
 
         # Nach kurzer Verzögerung: Button als "Abbrechen" aktivieren
         def enable_cancel_button():
+            self._cancel_timer_id = None
             self.erstellen_button.config(
                 text="Abbrechen",
                 command=self.abbrechen_prozess,
@@ -1432,7 +1433,7 @@ class VideoGeneratorApp:
             )
 
         # Aktiviere den Abbrechen-Button nach 500ms
-        self.root.after(500, enable_cancel_button)
+        self._cancel_timer_id = self.root.after(500, enable_cancel_button)
 
         # Zeige Progress-Elemente rechts oben
         self.progress_handler.pack_progress_bar_right()
@@ -1440,6 +1441,10 @@ class VideoGeneratorApp:
 
     def _switch_to_create_mode(self):
         """Wechselt den Button zurück zum Erstellen-Modus"""
+        if hasattr(self, '_cancel_timer_id') and self._cancel_timer_id:
+            self.root.after_cancel(self._cancel_timer_id)
+            self._cancel_timer_id = None
+
         self.erstellen_button.config(
             text="Erstellen",
             command=self.erstelle_video,

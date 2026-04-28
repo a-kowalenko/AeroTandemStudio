@@ -1048,13 +1048,16 @@ class VideoGeneratorApp:
         """
         try:
             if qr_scan_success and kunde:
-                print(f"QR-Code gescannt: Kunde ID {kunde.kunde_id}, Email: {kunde.email}, Telefon: {kunde.telefon}, "
+                print(f"QR-Code gescannt: Kunden ID Hash {kunde.kunden_id_hash}, "
+                      f"Booking ID Hash {kunde.booking_id_hash}, "
+                      f"Email: {kunde.email}, Telefon: {kunde.telefon}, "
                       f"Handcam Foto: {kunde.handcam_foto}, Handcam Video: {kunde.handcam_video}, "
                       f"Outside Foto: {kunde.outside_foto}, Outside Video: {kunde.outside_video}")
 
                 info_text = (
                     f"Kunde erkannt:\n\n"
-                    f"ID: {kunde.kunde_id}\n"
+                    f"Kunden ID Hash: {kunde.kunden_id_hash}\n"
+                    f"Booking ID Hash: {kunde.booking_id_hash}\n"
                     f"Name: {kunde.vorname} {kunde.nachname}\n"
                     f"Email: {kunde.email}\n"
                     f"Telefon: {kunde.telefon}\n"
@@ -1094,7 +1097,8 @@ class VideoGeneratorApp:
         """
         try:
             if qr_scan_success and kunde:
-                print(f"QR-Code im Foto gescannt: Kunde ID {kunde.kunde_id}, Email: {kunde.email}, "
+                print(f"QR-Code im Foto gescannt: Kunden ID Hash {kunde.kunden_id_hash}, "
+                      f"Booking ID Hash {kunde.booking_id_hash}, Email: {kunde.email}, "
                       f"Name: {kunde.vorname} {kunde.nachname}")
 
                 # Formular automatisch füllen
@@ -1186,9 +1190,17 @@ class VideoGeneratorApp:
             return
 
         # Parse Kundendaten aus der Formular-Eingabe
-        kunde_id_val = form_data.get("kunde_id", "").strip()
+        form_mode = form_data.get("form_mode")
+        kunden_id_hash_val = form_data.get("kunden_id_hash", "").strip()
+        booking_id_hash_val = form_data.get("booking_id_hash", "").strip()
+        kunden_id_val = form_data.get("kunden_id", "").strip()
+        booking_id_val = form_data.get("booking_id", "").strip()
+
         kunde = Kunde(
-            kunde_id=kunde_id_val or None,
+            kunden_id_hash=kunden_id_hash_val or None,
+            booking_id_hash=booking_id_hash_val or None,
+            kunden_id=(kunden_id_val or None) if form_mode == "manual" else None,
+            booking_id=(booking_id_val or None) if form_mode == "manual" else None,
             vorname=str(form_data["vorname"]),
             nachname=str(form_data["nachname"]),
             email=str(form_data["email"]),

@@ -1,9 +1,13 @@
-import cv2
 import json
 from pyzbar.pyzbar import decode
 from typing import Optional, Tuple
 
 from src.model.kunde import Kunde
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 
 def _parse_kunde_aus_qr_string(qr_daten_str: str) -> Kunde:
@@ -33,8 +37,18 @@ def _parse_kunde_aus_qr_string(qr_daten_str: str) -> Kunde:
 
     handcam_foto, handcam_video, outside_foto, outside_video = media_mapping[media_code]
 
+    kunde_id = daten_dict.get('Customer_ID', daten_dict.get('customer_id', daten_dict.get('hashid')))
+    if not kunde_id:
+        raise KeyError("Customer_ID")
+
+    booking_id = daten_dict.get('Booking_ID', daten_dict.get('booking_id'))
+
+    kunden_id_hash_str = str(kunde_id)
+    booking_id_hash_str = str(booking_id) if booking_id is not None else None
+
     return Kunde(
-        kunde_id=str(daten_dict['hashid']),
+        kunden_id_hash=kunden_id_hash_str,
+        booking_id_hash=booking_id_hash_str,
         email=None,
         vorname=str(daten_dict['vorname']),
         nachname=str(daten_dict['nachname']),
@@ -63,6 +77,10 @@ def analysiere_ersten_clip(video_pfad: str) -> Tuple[Optional[Kunde], bool]:
                                             geparsten Datenobjekt (oder None) und einem
                                             booleschen Erfolgsstatus.
     """
+
+    if cv2 is None:
+        print("Fehler: OpenCV (cv2) ist nicht installiert. Bitte 'opencv-python' installieren.")
+        return None, False
 
     cap = cv2.VideoCapture(video_pfad)
     if not cap.isOpened():
@@ -142,6 +160,10 @@ def analysiere_foto(foto_pfad: str) -> Tuple[Optional[Kunde], bool]:
                                             booleschen Erfolgsstatus.
     """
     try:
+        if cv2 is None:
+            print("Fehler: OpenCV (cv2) ist nicht installiert. Bitte 'opencv-python' installieren.")
+            return None, False
+
         # Lade das Bild mit OpenCV
         image = cv2.imread(foto_pfad)
 

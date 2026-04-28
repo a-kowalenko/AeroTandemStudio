@@ -8,7 +8,6 @@ def validate_form_data(form_data, video_paths):
     errors = []
 
     required_fields = [
-        ("gast", "Gast"),
         ("tandemmaster", "Tandemmaster"),
         ("datum", "Datum"),
     ]

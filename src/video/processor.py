@@ -530,10 +530,38 @@ class VideoProcessor:
             marker_path = os.path.join(base_output_dir, "_fertig.txt")
             with open(marker_path, 'w') as marker_file:
                 try:
+                    marker_type = "Outside" if outside_video_mode else "Handcam"
+                    form_mode = form_data.get("form_mode")
                     if kunde is not None and is_dataclass(kunde):
-                        marker_file.write(json.dumps(asdict(kunde), ensure_ascii=False))
+                        marker_data = asdict(kunde)
+                        marker_data["type"] = marker_type
+
+                        # ID-Felder strikt exklusiv halten (QR ODER manuell)
+                        marker_data.pop("kunden_id", None)
+                        marker_data.pop("booking_id", None)
+                        marker_data.pop("kunden_id_hash", None)
+                        marker_data.pop("booking_id_hash", None)
+
+                        if form_mode == "kunde":
+                            marker_data["kunden_id_hash"] = (form_data.get("kunden_id_hash", "") or "").strip() or None
+                            marker_data["booking_id_hash"] = (form_data.get("booking_id_hash", "") or "").strip() or None
+                        else:
+                            marker_data["kunden_id"] = (form_data.get("kunden_id", "") or "").strip() or None
+                            marker_data["booking_id"] = (form_data.get("booking_id", "") or "").strip() or None
+
+                        # Nicht gewünschte Felder explizit aus _fertig.txt entfernen
+                        excluded_fields = {
+                            "vorname", "nachname", "email", "telefon",
+                            "handcam_foto", "handcam_video", "outside_foto", "outside_video",
+                            "ist_bezahlt_handcam_foto", "ist_bezahlt_handcam_video",
+                            "ist_bezahlt_outside_foto", "ist_bezahlt_outside_video",
+                        }
+                        for field_name in excluded_fields:
+                            marker_data.pop(field_name, None)
+
+                        marker_file.write(json.dumps(marker_data, ensure_ascii=False))
                     else:
-                        marker_file.write(json.dumps({}, ensure_ascii=False))
+                        marker_file.write(json.dumps({"type": marker_type}, ensure_ascii=False))
                 except TypeError as json_err:
                     print(f"Fehler beim Serialisieren der 'kunde'-Daten: {json_err}")
 

@@ -23,6 +23,7 @@ class FormFields:
 
         # Variablen für Kunde/Manuell-Form
         self.kunde_id_var = tk.StringVar()
+        self.booking_id_var = tk.StringVar()
         self.vorname_var = tk.StringVar()  # NEU
         self.nachname_var = tk.StringVar()  # NEU
         self.email_var = tk.StringVar()
@@ -55,6 +56,7 @@ class FormFields:
 
         # --- Widget-Platzhalter ---
         self.entry_kunde_id = None
+        self.entry_booking_id = None
         self.entry_vorname = None  # NEU
         self.entry_nachname = None  # NEU
         self.entry_email = None
@@ -104,8 +106,8 @@ class FormFields:
         valid_email = True
         valid_telefon = True
 
-        # Email Prüfung (Pflichtfeld nur wenn Kontaktfeld sichtbar oder im manuellen Modus)
-        email_required = self.form_mode == 'manual' or self.entry_email is not None
+        # Email Prüfung nur wenn das Feld im aktuellen Formular sichtbar ist
+        email_required = self.entry_email is not None
         email = self.email_var.get().strip()
         email_error_msg = ""
         if email_required and not email:
@@ -162,6 +164,7 @@ class FormFields:
 
         # NEU: Referenzen auf zerstörte Widgets löschen, um Fehler zu vermeiden
         self.entry_kunde_id = None
+        self.entry_booking_id = None
         self.entry_vorname = None
         self.entry_nachname = None
         self.entry_email = None
@@ -209,7 +212,14 @@ class FormFields:
     def build_kunde_form(self, kunde):
         """Baut das Formular für einen erkannten Kunden."""
         row = 0
-        row = self._create_kunde_id_field(row, 'kunde', kunde.kunde_id)
+        row = self._create_id_fields(
+            row=row,
+            mode='kunde',
+            kunden_id_val=(kunde.kunden_id_hash or ""),
+            booking_id_val=(kunde.booking_id_hash or ""),
+            kunden_id_label="Kunden ID Hash:",
+            booking_id_label="Booking ID Hash:"
+        )
 
         # Name (Vorname, Nachname) - gleiches Layout wie im manuellen Modus
         tk.Label(self.frame, text="Vorname:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
@@ -387,42 +397,17 @@ class FormFields:
     def build_manual_form(self):
         """Baut das Formular für die manuelle Eingabe."""
         row = 0
-        row = self._create_kunde_id_field(row, 'manual')
-
-        # Vorname (bearbeitbar)
-        tk.Label(self.frame, text="Vorname:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
-        self.vorname_var.set("")  # Zurücksetzen
-        self.entry_vorname = tk.Entry(self.frame, textvariable=self.vorname_var, font=("Arial", 11))
-        self.entry_vorname.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
-
-        # Nachname (bearbeitbar)
-        tk.Label(self.frame, text="Nachname:", font=("Arial", 11)).grid(row=row, column=2, padx=(10, 5), pady=5,
-                                                                        sticky="w")
-        self.nachname_var.set("")  # Zurücksetzen
-        self.entry_nachname = tk.Entry(self.frame, textvariable=self.nachname_var, font=("Arial", 11))
-        self.entry_nachname.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
-        row += 1
-
-        # Email und Telefon (bearbeitbar, in einer Zeile)
-        tk.Label(self.frame, text="Email:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        row = self._create_id_fields(
+            row=row,
+            mode='manual',
+            kunden_id_label="Kunden ID:",
+            booking_id_label="Booking ID:"
+        )
+        # Kontakt-/Namensfelder im manuellen Modus bewusst ausblenden
+        self.vorname_var.set("")
+        self.nachname_var.set("")
         self.email_var.set("")
-        self.entry_email = tk.Entry(self.frame, textvariable=self.email_var, font=("Arial", 11))
-        self.entry_email.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
-        self.entry_email.bind("<FocusOut>", lambda e: self._on_field_focus_out('email'))
-        
-        tk.Label(self.frame, text="Telefon:", font=("Arial", 11)).grid(row=row, column=2, padx=(10, 5), pady=5, sticky="w")
         self.telefon_var.set("")
-        self.entry_telefon = tk.Entry(self.frame, textvariable=self.telefon_var, font=("Arial", 11))
-        self.entry_telefon.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
-        self.entry_telefon.bind("<FocusOut>", lambda e: self._on_field_focus_out('telefon'))
-        row += 1
-        
-        self.lbl_email_error = tk.Label(self.frame, text="", font=("Arial", 9), fg="red")
-        self.lbl_email_error.grid(row=row, column=1, padx=5, pady=(0, 5), sticky="nw")
-        
-        self.lbl_telefon_error = tk.Label(self.frame, text="", font=("Arial", 9), fg="red")
-        self.lbl_telefon_error.grid(row=row, column=3, padx=5, pady=(0, 5), sticky="nw")
-        row += 1
 
         # --- VERSCHOBENE Felder ---
         row = self._create_tandemmaster_field(row)
@@ -537,20 +522,38 @@ class FormFields:
 
     # --- Methoden zum Erstellen gemeinsamer Felder ---
 
-    def _create_kunde_id_field(self, row, mode, kunde_id_val=""):
-        """Erstellt das Feld für die Kunde ID."""
-        tk.Label(self.frame, text="Kunde ID:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5,
-                                                                        sticky="w")
+    def _create_id_fields(self, row, mode, kunden_id_val="", booking_id_val="", kunden_id_label="Kunden ID:",
+                          booking_id_label="Booking ID:"):
+        """Erstellt Kunden-ID und Booking-ID Felder."""
+        tk.Label(self.frame, text=kunden_id_label, font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        self.kunde_id_var.set(kunden_id_val)
 
-        self.kunde_id_var.set(kunde_id_val)
+        tk.Label(self.frame, text=booking_id_label, font=("Arial", 11)).grid(row=row, column=2, padx=(10, 5), pady=5, sticky="w")
+        self.booking_id_var.set(booking_id_val)
 
         if mode == 'kunde':
-            self.entry_kunde_id = tk.Entry(self.frame, textvariable=self.kunde_id_var, font=("Arial", 11),
-                                           state='disabled', relief='flat', bg='#f0f0f0')
-        else:  # 'manual'
+            self.entry_kunde_id = tk.Entry(
+                self.frame,
+                textvariable=self.kunde_id_var,
+                font=("Arial", 11),
+                state='disabled',
+                relief='flat',
+                bg='#f0f0f0'
+            )
+            self.entry_booking_id = tk.Entry(
+                self.frame,
+                textvariable=self.booking_id_var,
+                font=("Arial", 11),
+                state='disabled',
+                relief='flat',
+                bg='#f0f0f0'
+            )
+        else:
             self.entry_kunde_id = tk.Entry(self.frame, textvariable=self.kunde_id_var, font=("Arial", 11))
+            self.entry_booking_id = tk.Entry(self.frame, textvariable=self.booking_id_var, font=("Arial", 11))
 
-        self.entry_kunde_id.grid(row=row, column=1, columnspan=4, padx=5, pady=5, sticky="ew")
+        self.entry_kunde_id.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
+        self.entry_booking_id.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
         return row + 1
 
     def _create_tandemmaster_field(self, row):
@@ -809,12 +812,16 @@ class FormFields:
         data["gast"] = f"{data['vorname']} {data['nachname']}".strip()  # .strip() für leere Felder
 
         if self.form_mode == 'kunde':
-            data["kunde_id"] = self.kunde_id_var.get()
+            data["kunden_id_hash"] = self.kunde_id_var.get().strip()
+            data["booking_id_hash"] = self.booking_id_var.get().strip()
             # gast, vorname, nachname sind schon gesetzt
             data["email"] = self.email_var.get().strip()
             data["telefon"] = self.telefon_var.get().strip()
         else:  # 'manual'
-            data["kunde_id"] = self.kunde_id_var.get().strip()
+            data["kunden_id"] = self.kunde_id_var.get().strip()
+            data["booking_id"] = self.booking_id_var.get().strip()
+            if not data["gast"]:
+                data["gast"] = data["kunden_id"] or "Unbekannt"
             # gast, vorname, nachname sind schon gesetzt
             data["email"] = self.email_var.get().strip()
             data["telefon"] = self.telefon_var.get().strip()

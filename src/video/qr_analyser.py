@@ -6,6 +6,50 @@ from typing import Optional, Tuple
 from src.model.kunde import Kunde
 
 
+def _parse_kunde_aus_qr_string(qr_daten_str: str) -> Kunde:
+    """
+    Parst den QR-Inhalt in ein Kunde-Objekt.
+    Erwartet das neue Format als URL mit JSON-Fragment nach '#'.
+    """
+    payload_str = qr_daten_str.strip()
+    if '#' in payload_str:
+        payload_str = payload_str.split('#', 1)[1]
+
+    daten_dict = json.loads(payload_str)
+
+    media_code = str(daten_dict.get('media', 'none'))
+    media_mapping = {
+        'none': (False, False, False, False),
+        'hc_f': (True, False, False, False),
+        'hc_v': (False, True, False, False),
+        'hc_fv': (True, True, False, False),
+        'ou_f': (False, False, True, False),
+        'ou_v': (False, False, False, True),
+        'ou_fv': (False, False, True, True),
+    }
+
+    if media_code not in media_mapping:
+        raise ValueError(f"Unbekannter media-Code: {media_code}")
+
+    handcam_foto, handcam_video, outside_foto, outside_video = media_mapping[media_code]
+
+    return Kunde(
+        kunde_id=str(daten_dict['hashid']),
+        email=None,
+        vorname=str(daten_dict['vorname']),
+        nachname=str(daten_dict['nachname']),
+        telefon=None,
+        handcam_foto=handcam_foto,
+        handcam_video=handcam_video,
+        outside_foto=outside_foto,
+        outside_video=outside_video,
+        ist_bezahlt_handcam_foto=handcam_foto,
+        ist_bezahlt_handcam_video=handcam_video,
+        ist_bezahlt_outside_foto=outside_foto,
+        ist_bezahlt_outside_video=outside_video,
+    )
+
+
 def analysiere_ersten_clip(video_pfad: str) -> Tuple[Optional[Kunde], bool]:
     """
     Analysiert die ersten 5 Sekunden eines Videoclips auf einen QR-Code,
@@ -57,27 +101,7 @@ def analysiere_ersten_clip(video_pfad: str) -> Tuple[Optional[Kunde], bool]:
                     try:
                         # Dekodiere die Daten (sind Bytes) in einen String
                         qr_daten_str = code.data.decode('utf-8')
-
-                        # Parse den String (vermutlich JSON) in ein Dictionary
-                        daten_dict = json.loads(qr_daten_str)
-
-                        # Versuche, das Dictionary in unser Datenmodell zu parsen
-                        # Dies validiert auch, ob alle Felder vorhanden und vom richtigen Typ sind
-                        kunden_obj = Kunde(
-                            kunde_id=int(daten_dict.get('kunde_id')),
-                            email=str(daten_dict.get('email')),
-                            vorname=str(daten_dict.get('vorname')),
-                            nachname=str(daten_dict.get('nachname')),
-                            telefon=str(daten_dict.get('telefon')),
-                            handcam_foto=bool(daten_dict.get('handcam_foto')),
-                            handcam_video=bool(daten_dict.get('handcam_video')),
-                            outside_foto=bool(daten_dict.get('outside_foto')),
-                            outside_video=bool(daten_dict.get('outside_video')),
-                            ist_bezahlt_handcam_foto=bool(daten_dict.get('ist_bezahlt_handcam_foto')),
-                            ist_bezahlt_handcam_video=bool(daten_dict.get('ist_bezahlt_handcam_video')),
-                            ist_bezahlt_outside_foto=bool(daten_dict.get('ist_bezahlt_outside_foto')),
-                            ist_bezahlt_outside_video=bool(daten_dict.get('ist_bezahlt_outside_video'))
-                        )
+                        kunden_obj = _parse_kunde_aus_qr_string(qr_daten_str)
 
                         # Erfolgreich gefunden UND geparst!
                         # Wir können die Schleife sofort verlassen (effizient).
@@ -137,27 +161,7 @@ def analysiere_foto(foto_pfad: str) -> Tuple[Optional[Kunde], bool]:
             try:
                 # Dekodiere die Daten (sind Bytes) in einen String
                 qr_daten_str = code.data.decode('utf-8')
-
-                # Parse den String (vermutlich JSON) in ein Dictionary
-                daten_dict = json.loads(qr_daten_str)
-
-                # Versuche, das Dictionary in unser Datenmodell zu parsen
-                # Dies validiert auch, ob alle Felder vorhanden und vom richtigen Typ sind
-                kunden_obj = Kunde(
-                    kunde_id=int(daten_dict.get('kunde_id')),
-                    email=str(daten_dict.get('email')),
-                    vorname=str(daten_dict.get('vorname')),
-                    nachname=str(daten_dict.get('nachname')),
-                    telefon=str(daten_dict.get('telefon')),
-                    handcam_foto=bool(daten_dict.get('handcam_foto')),
-                    handcam_video=bool(daten_dict.get('handcam_video')),
-                    outside_foto=bool(daten_dict.get('outside_foto')),
-                    outside_video=bool(daten_dict.get('outside_video')),
-                    ist_bezahlt_handcam_foto=bool(daten_dict.get('ist_bezahlt_handcam_foto')),
-                    ist_bezahlt_handcam_video=bool(daten_dict.get('ist_bezahlt_handcam_video')),
-                    ist_bezahlt_outside_foto=bool(daten_dict.get('ist_bezahlt_outside_foto')),
-                    ist_bezahlt_outside_video=bool(daten_dict.get('ist_bezahlt_outside_video'))
-                )
+                kunden_obj = _parse_kunde_aus_qr_string(qr_daten_str)
 
                 # Erfolgreich gefunden UND geparst!
                 print(f"QR-Code im Foto gefunden und erfolgreich geparst: {foto_pfad}")

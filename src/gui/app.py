@@ -1186,9 +1186,9 @@ class VideoGeneratorApp:
             return
 
         # Parse Kundendaten aus der Formular-Eingabe
-        kunde_id_val = form_data.get("kunde_id")
+        kunde_id_val = form_data.get("kunde_id", "").strip()
         kunde = Kunde(
-            kunde_id=int(kunde_id_val) if kunde_id_val and kunde_id_val.isdigit() else 0,
+            kunde_id=kunde_id_val or None,
             vorname=str(form_data["vorname"]),
             nachname=str(form_data["nachname"]),
             email=str(form_data["email"]),

@@ -54,7 +54,6 @@ class FormFields:
         self.outside_video_bezahlt_var.trace_add('write', lambda *args: self._on_payment_status_changed('outside_video'))
 
         # --- Widget-Platzhalter ---
-        self.entry_load = None
         self.entry_kunde_id = None
         self.entry_vorname = None  # NEU
         self.entry_nachname = None  # NEU
@@ -105,15 +104,17 @@ class FormFields:
         valid_email = True
         valid_telefon = True
 
-        # Email Prüfung (Pflichtfeld)
+        # Email Prüfung (Pflichtfeld nur wenn Kontaktfeld sichtbar oder im manuellen Modus)
+        email_required = self.form_mode == 'manual' or self.entry_email is not None
         email = self.email_var.get().strip()
         email_error_msg = ""
-        if not email:
+        if email_required and not email:
             valid_email = False
             email_error_msg = "E-Mail ist ein Pflichtfeld"
         elif not re.match(REGEX_EMAIL, email):
-            valid_email = False
-            email_error_msg = "Ungültige E-Mail-Adresse"
+            if email:
+                valid_email = False
+                email_error_msg = "Ungültige E-Mail-Adresse"
 
         if not valid_email and self.email_touched:
             if self.lbl_email_error:
@@ -160,7 +161,6 @@ class FormFields:
         self.video_widgets_list = []
 
         # NEU: Referenzen auf zerstörte Widgets löschen, um Fehler zu vermeiden
-        self.entry_load = None
         self.entry_kunde_id = None
         self.entry_vorname = None
         self.entry_nachname = None
@@ -186,18 +186,15 @@ class FormFields:
         """
         Aktualisiert das Formular-Layout basierend auf dem QR-Scan-Ergebnis.
         """
-        # Aktuelle Load Nr speichern, falls vorhanden
-        load_nr_val = self.entry_load.get() if self.entry_load else ""
-
         self.clear_form()
 
         if qr_success and kunde:
             self.form_mode = 'kunde'
-            self.build_kunde_form(kunde, load_nr_val)
+            self.build_kunde_form(kunde)
         else:
             # Dies fängt qr_success=False ODER kunde=None ab
             self.form_mode = 'manual'
-            self.build_manual_form(load_nr_val)
+            self.build_manual_form()
 
         # NEU: Benachrichtige App über Wasserzeichen-Status-Änderungen nach Formular-Update
         # Nur aufrufen, wenn die App vollständig initialisiert ist
@@ -209,11 +206,10 @@ class FormFields:
 
     # --- Methoden zum Erstellen von Formular-Layouts ---
 
-    def build_kunde_form(self, kunde, load_nr_val=""):
+    def build_kunde_form(self, kunde):
         """Baut das Formular für einen erkannten Kunden."""
         row = 0
-        # Load Nr und Kunde ID in einer Zeile
-        row = self._create_load_kunde_id_fields(row, 'kunde', load_nr_val, kunde.kunde_id)
+        row = self._create_kunde_id_field(row, 'kunde', kunde.kunde_id)
 
         # Name (Vorname, Nachname) - gleiches Layout wie im manuellen Modus
         tk.Label(self.frame, text="Vorname:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
@@ -235,31 +231,37 @@ class FormFields:
         self.btn_gast.grid(row=row, column=4, padx=5, pady=5)
         row += 1
 
-        # Email & Telefon (in einer Zeile, vorbelegt, nicht bearbeitbar)
-        tk.Label(self.frame, text="Email:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
-        self.email_var.set(kunde.email)
-        self.entry_email = tk.Entry(self.frame, textvariable=self.email_var, font=("Arial", 11),
-                                    state='disabled', relief='flat', bg='#f0f0f0')
-        self.entry_email.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
-        self.entry_email.bind("<FocusOut>", lambda e: self._on_field_focus_out('email'))
-        
-        tk.Label(self.frame, text="Telefon:", font=("Arial", 11)).grid(row=row, column=2, padx=(10, 5), pady=5, sticky="w")
-        self.telefon_var.set(kunde.telefon)
-        self.entry_telefon = tk.Entry(self.frame, textvariable=self.telefon_var, font=("Arial", 11),
-                                      state='disabled', relief='flat', bg='#f0f0f0')
-        self.entry_telefon.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
-        self.entry_telefon.bind("<FocusOut>", lambda e: self._on_field_focus_out('telefon'))
-        
-        self.btn_kontakt = tk.Button(self.frame, text="Bearbeiten", command=self.toggle_edit_kontakt)
-        self.btn_kontakt.grid(row=row, column=4, padx=5, pady=5)
-        row += 1
-        
-        self.lbl_email_error = tk.Label(self.frame, text="", font=("Arial", 9), fg="red")
-        self.lbl_email_error.grid(row=row, column=1, padx=5, pady=(0, 5), sticky="nw")
-        
-        self.lbl_telefon_error = tk.Label(self.frame, text="", font=("Arial", 9), fg="red")
-        self.lbl_telefon_error.grid(row=row, column=3, padx=5, pady=(0, 5), sticky="nw")
-        row += 1
+        # Email & Telefon nur anzeigen, wenn im QR-Kundenobjekt vorhanden
+        has_email = bool((kunde.email or "").strip())
+        has_telefon = bool((kunde.telefon or "").strip())
+        if has_email or has_telefon:
+            tk.Label(self.frame, text="Email:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
+            self.email_var.set(kunde.email or "")
+            self.entry_email = tk.Entry(self.frame, textvariable=self.email_var, font=("Arial", 11),
+                                        state='disabled', relief='flat', bg='#f0f0f0')
+            self.entry_email.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
+            self.entry_email.bind("<FocusOut>", lambda e: self._on_field_focus_out('email'))
+
+            tk.Label(self.frame, text="Telefon:", font=("Arial", 11)).grid(row=row, column=2, padx=(10, 5), pady=5, sticky="w")
+            self.telefon_var.set(kunde.telefon or "")
+            self.entry_telefon = tk.Entry(self.frame, textvariable=self.telefon_var, font=("Arial", 11),
+                                          state='disabled', relief='flat', bg='#f0f0f0')
+            self.entry_telefon.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
+            self.entry_telefon.bind("<FocusOut>", lambda e: self._on_field_focus_out('telefon'))
+
+            self.btn_kontakt = tk.Button(self.frame, text="Bearbeiten", command=self.toggle_edit_kontakt)
+            self.btn_kontakt.grid(row=row, column=4, padx=5, pady=5)
+            row += 1
+
+            self.lbl_email_error = tk.Label(self.frame, text="", font=("Arial", 9), fg="red")
+            self.lbl_email_error.grid(row=row, column=1, padx=5, pady=(0, 5), sticky="nw")
+
+            self.lbl_telefon_error = tk.Label(self.frame, text="", font=("Arial", 9), fg="red")
+            self.lbl_telefon_error.grid(row=row, column=3, padx=5, pady=(0, 5), sticky="nw")
+            row += 1
+        else:
+            self.email_var.set("")
+            self.telefon_var.set("")
 
         # --- VERSCHOBENE Felder ---
         row = self._create_tandemmaster_field(row)
@@ -382,11 +384,10 @@ class FormFields:
         row += 1  # Wichtig: Zeile für die Frames erhöhen
         self.toggle_video_mode_visibility()  # Rufe auf, um korrekte Sektion anzuzeigen
 
-    def build_manual_form(self, load_nr_val=""):
+    def build_manual_form(self):
         """Baut das Formular für die manuelle Eingabe."""
         row = 0
-        # Load Nr und Kunde ID in einer Zeile
-        row = self._create_load_kunde_id_fields(row, 'manual', load_nr_val)
+        row = self._create_kunde_id_field(row, 'manual')
 
         # Vorname (bearbeitbar)
         tk.Label(self.frame, text="Vorname:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
@@ -536,23 +537,9 @@ class FormFields:
 
     # --- Methoden zum Erstellen gemeinsamer Felder ---
 
-    def _create_load_kunde_id_fields(self, row, mode, load_nr_val="", kunde_id_val=""):
-        """Erstellt Load Nr und Kunde ID in einer Zeile."""
-        # Load Nr
-        tk.Label(self.frame, text="Load Nr:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5, sticky="w")
-
-        def _validate_digits(new_value):
-            return new_value.isdigit() or new_value == ""
-
-        vcmd_loadnr = self.frame.register(_validate_digits)
-
-        self.entry_load = tk.Entry(self.frame, font=("Arial", 11),
-                                   validate='key', validatecommand=(vcmd_loadnr, '%P'))
-        self.entry_load.insert(0, load_nr_val)
-        self.entry_load.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
-
-        # Kunde ID
-        tk.Label(self.frame, text="Kunde ID:", font=("Arial", 11)).grid(row=row, column=2, padx=(10, 5), pady=5,
+    def _create_kunde_id_field(self, row, mode, kunde_id_val=""):
+        """Erstellt das Feld für die Kunde ID."""
+        tk.Label(self.frame, text="Kunde ID:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5,
                                                                         sticky="w")
 
         self.kunde_id_var.set(kunde_id_val)
@@ -563,7 +550,7 @@ class FormFields:
         else:  # 'manual'
             self.entry_kunde_id = tk.Entry(self.frame, textvariable=self.kunde_id_var, font=("Arial", 11))
 
-        self.entry_kunde_id.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
+        self.entry_kunde_id.grid(row=row, column=1, columnspan=4, padx=5, pady=5, sticky="ew")
         return row + 1
 
     def _create_tandemmaster_field(self, row):
@@ -807,13 +794,13 @@ class FormFields:
         mode = self.video_mode_var.get()  # Hol den Modus ZUERST
 
         data = {
-            "load": self.entry_load.get().strip() if self.entry_load else "",
             "tandemmaster": self.entry_tandemmaster.get().strip() if self.entry_tandemmaster else "",
             # NEU: Videospringer nur im Outside-Modus
             "videospringer": self.videospringer_var.get().strip() if mode == "outside" else "",
             "datum": self.entry_datum.get() if self.entry_datum else date.today().strftime('%d.%m.%Y'),
             "ort": self.ort_var.get(),
             "video_mode": mode,
+            "form_mode": self.form_mode,
         }
 
         # Formular-spezifische Daten

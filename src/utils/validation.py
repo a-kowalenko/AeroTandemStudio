@@ -8,12 +8,14 @@ def validate_form_data(form_data, video_paths):
     errors = []
 
     required_fields = [
-        ("load", "Load Nr"),
         ("gast", "Gast"),
         ("tandemmaster", "Tandemmaster"),
         ("datum", "Datum"),
-        ("email", "Email")
     ]
+
+    email_required = form_data.get("form_mode") != "kunde" or bool(form_data.get("email", "").strip())
+    if email_required:
+        required_fields.append(("email", "Email"))
 
     for field_key, field_name in required_fields:
         if not form_data.get(field_key, "").strip():
@@ -31,13 +33,6 @@ def validate_form_data(form_data, video_paths):
         errors.append("Videospringer ist erforderlich bei Outside Video")
 
     return errors
-
-
-def validate_load_number(load):
-    """Validiert die Load-Nummer"""
-    return load.isdigit()
-
-
 def validate_video_files(video_paths):
     """Validiert die Video-Dateien"""
     errors = []

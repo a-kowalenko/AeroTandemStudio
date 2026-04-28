@@ -174,7 +174,7 @@ class VideoProcessor:
             self._update_progress(1, TOTAL_STEPS)
             self._update_status("Generiere Ausgabe-Verzeichnis...")
             base_output_dir, base_filename = self._generate_base_output_dir(
-                form_data['load'], gast, tandemmaster, videospringer,
+                gast, tandemmaster, videospringer,
                 datum, speicherort, outside_video_mode
             )
 
@@ -1284,7 +1284,7 @@ class VideoProcessor:
 
         return ",".join(drawtext_cmds)
 
-    def _generate_base_output_dir(self, load, gast, tandemmaster, videospringer, datum, speicherort, outside_video):
+    def _generate_base_output_dir(self, gast, tandemmaster, videospringer, datum, speicherort, outside_video):
         """Generiert den Basis-Output-Pfad (nur das Verzeichnis)"""
         try:
             datum_obj = date.fromisoformat('-'.join(datum.split('.')[::-1]))
@@ -1296,8 +1296,6 @@ class VideoProcessor:
         base_filename = f"{datum_formatiert}_{gast}_TA_{tandemmaster}"
         if outside_video:
             base_filename += f"_V_{videospringer}"
-
-        base_filename += f"_L{load}"
 
         base_filename_sanitized = sanitize_filename(base_filename)
         output_dir = os.path.join(speicherort, base_filename_sanitized)

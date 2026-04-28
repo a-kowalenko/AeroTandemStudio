@@ -4,7 +4,7 @@ from typing import Optional
 
 @dataclass
 class Kunde:
-    kunde_id: Optional[int] = None
+    kunde_id: Optional[str] = None
     vorname: Optional[str] = None
     nachname: Optional[str] = None
     email: Optional[str] = None

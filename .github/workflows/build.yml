@@ -35,7 +35,24 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "dependency_installer"
-          Invoke-WebRequest -Uri "https://download.videolan.org/pub/videolan/vlc/3.0.21/win64/vlc-3.0.21-win64.exe" -OutFile "dependency_installer/vlc-3.0.21-win64.exe"
+          $vlcOutFile = "dependency_installer/vlc-3.0.21-win64.exe"
+          $vlcUrls = @(
+            "https://get.videolan.org/vlc/3.0.21/win64/vlc-3.0.21-win64.exe",
+            "https://download.videolan.org/pub/videolan/vlc/3.0.21/win64/vlc-3.0.21-win64.exe"
+          )
+          $vlcDownloaded = $false
+          foreach ($vlcUrl in $vlcUrls) {
+            try {
+              Invoke-WebRequest -Uri $vlcUrl -OutFile $vlcOutFile
+              $vlcDownloaded = $true
+              break
+            } catch {
+              Write-Host "Failed to download VLC from $vlcUrl, trying next source..."
+            }
+          }
+          if (-not $vlcDownloaded) {
+            throw "Could not download VLC installer from any configured HTTPS source."
+          }
           Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1-essentials_build.zip" -OutFile "temp_ffmpeg.zip"
           Expand-Archive -Path "temp_ffmpeg.zip" -DestinationPath "temp_ffmpeg" -Force
           $RootDir = Get-ChildItem "temp_ffmpeg" -Directory | Select-Object -First 1

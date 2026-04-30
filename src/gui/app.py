@@ -1203,8 +1203,6 @@ class VideoGeneratorApp:
             booking_id=(booking_id_val or None) if form_mode == "manual" else None,
             vorname=str(form_data["vorname"]),
             nachname=str(form_data["nachname"]),
-            email=str(form_data["email"]),
-            telefon=str(form_data["telefon"]),
             handcam_foto=bool(form_data["handcam_foto"]),
             handcam_video=bool(form_data["handcam_video"]),
             outside_foto=bool(form_data["outside_foto"]),

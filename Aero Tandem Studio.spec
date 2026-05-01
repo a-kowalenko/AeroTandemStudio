@@ -2,6 +2,7 @@
 import os
 import sys
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_dynamic_libs
 
 # --- 📋 Version aus VERSION.txt lesen ---
 # HINWEIS: Version wird von build.py hochgezählt, bevor PyInstaller startet
@@ -11,26 +12,17 @@ print(f"[BUILD] Baue Version: {CURRENT_VERSION}")
 
 # --- 🏗️ PyInstaller Konfiguration ---
 
-# pyzbar DLLs werden von build.py in pyzbar_binaries.txt geschrieben
-import json
-pyzbar_libs = []
-pyzbar_file = Path("pyzbar_binaries.txt")
-if pyzbar_file.exists():
-    try:
-        pyzbar_libs = json.loads(pyzbar_file.read_text(encoding="utf-8"))
-        print(f"[BUILD] Geladen: {len(pyzbar_libs)} pyzbar DLLs aus pyzbar_binaries.txt")
-    except Exception as e:
-        print(f"[BUILD] Warnung: Konnte pyzbar_binaries.txt nicht lesen: {e}")
-else:
-    print("[BUILD] Warnung: pyzbar_binaries.txt nicht gefunden!")
+pyzbar_libs = collect_dynamic_libs("pyzbar")
+print(f"[BUILD] Gesammelte pyzbar dynamische Bibliotheken: {len(pyzbar_libs)}")
 
-if sys.platform != 'win32':
-    pyzbar_libs = []
+runtime_hooks = []
+if sys.platform == "win32":
+    runtime_hooks.append("pyinstaller_runtime_hook_pyzbar.py")
 
 a = Analysis(
     ['run.py'],
     pathex=[],
-    binaries=pyzbar_libs,  # pyzbar DLLs von build.py
+    binaries=pyzbar_libs,
     datas=[
         ('VERSION.txt', '.'),   # Version-Datei mit einbinden
         ('assets', 'assets')    # Assets-Ordner mitnehmen
@@ -38,7 +30,7 @@ a = Analysis(
     hiddenimports=['pyzbar', 'pyzbar.pyzbar', 'vlc', 'PIL._tkinter_finder'],  # pyzbar & vlc explizit importieren
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=runtime_hooks,
     excludes=[],
     noarchive=False,
     optimize=0,

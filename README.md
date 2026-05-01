@@ -426,6 +426,20 @@ python build.py major setup
    - Deinstallations-Unterstützung
    - Ausgabe: `AeroTandemStudio_Installer_vX.Y.Z.exe`
 
+### Windows Release-Checkliste (QR/pyzbar)
+
+Vor dem Verteilen eines Windows-Installers sollten diese Punkte geprüft werden:
+
+1. Build immer über `python build.py setup` erzeugen (nicht manuell abweichend).
+2. Im Build-Output muss `pyzbar` mit dynamischen Bibliotheken gesammelt werden (Hinweis im PyInstaller-Log).
+3. Im Ergebnisordner müssen die pyzbar-DLLs vorhanden sein, typischerweise:
+   - `dist/Aero Tandem Studio vX.Y.Z/_internal/pyzbar/libzbar-64.dll`
+   - `dist/Aero Tandem Studio vX.Y.Z/_internal/pyzbar/libiconv.dll`
+4. Installer auf einem sauberen Windows-System testen (ohne Dev-Python):
+   - App starten
+   - QR-Code-Analyse auslösen
+   - Sicherstellen, dass kein Fehler wie `Failed to load dynlib.dll ... libzbar-64.dll` erscheint
+
 ### Deployment-Anforderungen
 
 - **PyInstaller** 6.0+

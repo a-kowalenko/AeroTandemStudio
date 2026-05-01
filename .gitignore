@@ -20,7 +20,6 @@
 # Build artifacts (automatisch generiert - NICHT committen)
 version_info.txt        # Automatisch von build.py generiert
 version_info.rc         # Nur Referenz, nicht verwendet
-pyzbar_binaries.txt     # Automatisch von build.py generiert
 dist/                   # PyInstaller Output-Verzeichnis
 build/                  # PyInstaller temporäre Dateien
 __pycache__/            # Python Bytecode Cache

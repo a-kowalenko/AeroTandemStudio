@@ -56,37 +56,19 @@ def bump_version(level="build"):
     print(f"   Version: {version} → {new_version}")
     return new_version
 
-def find_pyzbar_dlls():
+def check_pyzbar_installation():
     """
-    Findet pyzbar DLLs im site-packages Verzeichnis.
-    Schreibt die Pfade in pyzbar_binaries.txt für PyInstaller.
+    Prüft, ob pyzbar installiert und grundsätzlich ladbar ist.
+    Die eigentliche DLL-Sammlung übernimmt die .spec direkt via
+    PyInstaller collect_dynamic_libs('pyzbar').
     """
-    if sys.platform != 'win32':
-        return []
-
-    import site
-    import glob
-
-    pyzbar_libs = []
-    for site_dir in site.getsitepackages():
-        pyzbar_path = os.path.join(site_dir, 'pyzbar')
-        if os.path.exists(pyzbar_path):
-            # Alle .dll Dateien im pyzbar Ordner finden
-            dll_files = glob.glob(os.path.join(pyzbar_path, '*.dll'))
-            for dll in dll_files:
-                pyzbar_libs.append((dll, 'pyzbar'))
-            print(f"   ✅ Gefunden: {len(dll_files)} pyzbar DLLs in {pyzbar_path}")
-            break
-
-    if not pyzbar_libs:
-        print("   ⚠️  Warnung: Keine pyzbar DLLs gefunden!")
-
-    # Schreibe in temporäre Datei für .spec
-    binaries_file = Path("pyzbar_binaries.txt")
-    import json
-    binaries_file.write_text(json.dumps(pyzbar_libs), encoding="utf-8")
-
-    return pyzbar_libs
+    try:
+        import pyzbar  # noqa: F401
+        print("   ✅ pyzbar ist installiert (DLL-Sammlung erfolgt über die .spec).")
+        return True
+    except Exception as exc:
+        print(f"   ⚠️  Warnung: pyzbar konnte nicht importiert werden: {exc}")
+        return False
 
 def update_version_info():
     """
@@ -216,9 +198,9 @@ def main():
     # 3. Version Info aktualisieren
     update_version_info()
 
-    # 4. pyzbar DLLs finden
-    print("📋 Suche pyzbar DLLs...")
-    find_pyzbar_dlls()
+    # 4. pyzbar Installation prüfen
+    print("📋 Prüfe pyzbar Installation...")
+    check_pyzbar_installation()
     print()
 
     # 5. PyInstaller Build

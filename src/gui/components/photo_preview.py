@@ -18,6 +18,8 @@ class PhotoPreview:
         self.current_photo_index = 0
         self.photo_images = {}  # Cache für geladene Bilder
         self.thumbnail_images = {}  # Cache für Thumbnails
+        # Vom Import-Worker vorberechnete Thumbnails (Pfad -> PIL.Image), um den Mainthread zu entlasten
+        self._pil_thumbnail_cache = {}
 
         # NEU: Mehrfachauswahl
         self.selected_photos = set()  # Set von ausgewählten Indizes
@@ -271,8 +273,8 @@ class PhotoPreview:
         # self.wm_button.grid(row=0, column=3, sticky="ew", padx=(5, 0))
         # --- ENDE NEU ---
 
-    def set_photos(self, photo_paths):
-        """Setzt die anzuzeigenden Fotos"""
+    def set_photos(self, photo_paths, pil_thumbnail_cache=None):
+        """Setzt die anzuzeigenden Fotos. Optional: vorberechnete PIL-Thumbnails vom Import-Thread."""
         self.photo_paths = photo_paths
         self.current_photo_index = 0 if photo_paths else -1
 
@@ -284,6 +286,7 @@ class PhotoPreview:
         # Cache leeren
         self.photo_images.clear()
         self.thumbnail_images.clear()
+        self._pil_thumbnail_cache = dict(pil_thumbnail_cache) if pil_thumbnail_cache else {}
 
         # UI aktualisieren
         self._update_thumbnails()
@@ -482,7 +485,10 @@ class PhotoPreview:
             return self.thumbnail_images[cache_key]
 
         try:
-            img = Image.open(photo_path)
+            if photo_path in self._pil_thumbnail_cache:
+                img = self._pil_thumbnail_cache[photo_path].copy()
+            else:
+                img = Image.open(photo_path)
 
             # Aktive Thumbnails sind 1.3x größer
             size = int(self.thumbnail_size * 1.3) if is_current else self.thumbnail_size

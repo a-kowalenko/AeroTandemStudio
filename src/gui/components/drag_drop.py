@@ -439,7 +439,9 @@ class DragDropFrame:
         new_photos_added = False
         imported_paths = []
         imported_history_hashes = []
-        
+        added_photo_paths_this_batch = []
+        pil_photo_cache = {}
+
         try:
             settings = self.app.config.get_settings()
             skip_processed = settings.get("sd_skip_processed", False)
@@ -580,6 +582,7 @@ class DragDropFrame:
                     # Pseudo copy for photos since we don't copy them normally
                     if source_path not in self.photo_paths:
                         self.photo_paths.append(source_path)
+                        added_photo_paths_this_batch.append(source_path)
                         new_photos_added = True
                         
                         copied_bytes += file_size
@@ -600,6 +603,38 @@ class DragDropFrame:
                                     imported_at=datetime.now().isoformat()
                                 )
                                 imported_history_hashes.append(identity_hash)
+
+            # Schwere PIL-Arbeit im Worker, damit der Dialog sichtbar bleibt und der Mainthread nicht einfriert
+            if not dialog.cancel_requested.is_set() and added_photo_paths_this_batch:
+                from PIL import Image
+
+                thumb_max = int(60 * 1.3)  # wie PhotoPreview.thumbnail_size * 1.3
+                n_thumb = len(added_photo_paths_this_batch)
+                self.parent.after(0, dialog.speed_var.set, "")
+                for i_thumb, photo_path in enumerate(added_photo_paths_this_batch, start=1):
+                    if dialog.cancel_requested.is_set():
+                        break
+                    fn = os.path.basename(photo_path)
+                    self.parent.after(0, dialog.status_var.set,
+                                       f"Importiere Fotos ({i_thumb}/{n_thumb}): {fn}")
+                    gp = int((i_thumb / n_thumb) * 100) if n_thumb else 100
+
+                    def update_thumb_ui(g=gp):
+                        dialog.file_progress_var.set(g)
+                        dialog.global_progress_var.set(g)
+                        dialog.global_status_var.set(f"Gesamtfortschritt: {g}%")
+
+                    self.parent.after(0, update_thumb_ui)
+                    try:
+                        img = Image.open(photo_path)
+                        try:
+                            img.load()
+                            img.thumbnail((thumb_max, thumb_max), Image.LANCZOS)
+                            pil_photo_cache[photo_path] = img.copy()
+                        finally:
+                            img.close()
+                    except Exception as e:
+                        print(f"Fehler beim Vorberechnen des Thumbnails für {photo_path}: {e}")
 
             if dialog.cancel_requested.is_set():
                 print("Import abgebrochen, führe Rollback durch...")
@@ -624,14 +659,19 @@ class DragDropFrame:
                     conn.commit()
             else:
                 self.video_paths.extend(imported_paths)
-                
-            self.parent.after(0, lambda: self._on_import_finished(new_videos_added, new_photos_added, dialog, dialog.cancel_requested.is_set()))
-            
+
+            cancelled = dialog.cancel_requested.is_set()
+            cache_snapshot = pil_photo_cache if not cancelled else {}
+
+            self.parent.after(0, lambda nva=new_videos_added, npa=new_photos_added, d=dialog,
+                               c=cancelled, cs=cache_snapshot: self._on_import_finished(
+                                   nva, npa, d, c, cs))
+
         except Exception as e:
             print(f"Error during async import: {e}")
             self.parent.after(0, dialog.destroy)
 
-    def _on_import_finished(self, new_videos_added, new_photos_added, dialog, cancelled):
+    def _on_import_finished(self, new_videos_added, new_photos_added, dialog, cancelled, pil_photo_cache=None):
         dialog.destroy()
         
         if cancelled:
@@ -650,7 +690,7 @@ class DragDropFrame:
                 self._update_app_preview()
 
             if new_photos_added:
-                self._update_photo_preview()
+                self._update_photo_preview(pil_photo_cache)
 
             if (new_videos_added or new_photos_added) and self.app and hasattr(self.app, 'form_fields'):
                 self.app.form_fields.auto_check_products(new_videos_added, new_photos_added)
@@ -1083,10 +1123,10 @@ class DragDropFrame:
             if update_preview:
                 self._update_photo_preview()
 
-    def _update_photo_preview(self):
+    def _update_photo_preview(self, pil_photo_cache=None):
         """Aktualisiert die Foto-Vorschau in der App"""
         if self.app and hasattr(self.app, 'photo_preview'):
-            self.app.photo_preview.set_photos(self.photo_paths)
+            self.app.photo_preview.set_photos(self.photo_paths, pil_photo_cache)
 
     def clear_all(self):
         """Entfernt alle Videos und Fotos"""

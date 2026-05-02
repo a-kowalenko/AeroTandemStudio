@@ -476,6 +476,19 @@ class VideoGeneratorApp:
         self.sd_status_indicator.create_widgets()
         # Wird später gepackt wenn Monitoring aktiv ist
 
+        # Zurücksetzen (rechts, links neben Einstellungen)
+        self.reset_session_button = tk.Button(
+            header_frame,
+            text="Zurücksetzen",
+            font=("Arial", 10),
+            command=self.reset_session,
+            bg="#eceff1",
+            fg="#37474f",
+            relief="flat",
+            padx=10,
+        )
+        self.reset_session_button.pack(side="right", padx=(0, 6))
+
         # Settings-Button (rechts)
         self.settings_button = tk.Button(
             header_frame,
@@ -490,6 +503,7 @@ class VideoGeneratorApp:
 
         # Tooltip für Settings-Button
         self.create_tooltip(self.settings_button, "Einstellungen öffnen")
+        self.create_tooltip(self.reset_session_button, "Formular und alle importierten Medien leeren")
 
     def create_tooltip(self, widget, text):
         """Erstellt einen Tooltip für ein Widget"""
@@ -1336,38 +1350,72 @@ class VideoGeneratorApp:
         try:
             print("🗑️ Auto-Clear: Lösche alle importierten Dateien...")
 
-            # Lösche alle Videos
-            if self.drag_drop.video_paths:
-                video_count = len(self.drag_drop.video_paths)
-                self.drag_drop.clear_videos()
-                print(f"   ✓ {video_count} Video(s) gelöscht")
+            if not self.drag_drop:
+                return
 
-            # Lösche alle Fotos
-            if self.drag_drop.photo_paths:
-                photo_count = len(self.drag_drop.photo_paths)
-                self.drag_drop.clear_photos()
-                print(f"   ✓ {photo_count} Foto(s) gelöscht")
-
-            # Setze drop_label zurück
-            if hasattr(self, 'drag_drop') and self.drag_drop:
-                self.drag_drop.drop_label.config(
-                    text="Videos (.mp4) und Fotos (.jpg, .png) hierher ziehen",
-                    fg="black"
-                )
-                print(f"   ✓ Drop-Label zurückgesetzt")
-
-            # Aktualisiere Video Preview
-            if hasattr(self, 'video_preview') and self.video_preview:
-                self.video_preview.clear_preview()
-
-            # Aktualisiere Photo Preview
-            if hasattr(self, 'photo_preview') and self.photo_preview:
-                self.photo_preview.set_photos([])
+            had_videos = bool(self.drag_drop.video_paths)
+            had_photos = bool(self.drag_drop.photo_paths)
+            if had_videos or had_photos:
+                self.drag_drop.clear_all()
+                if had_videos:
+                    print("   ✓ Video(s) gelöscht")
+                if had_photos:
+                    print("   ✓ Foto(s) gelöscht")
+                print("   ✓ Drop-Label zurückgesetzt")
 
             print("✅ Auto-Clear abgeschlossen")
 
         except Exception as e:
             print(f"⚠️ Fehler beim Auto-Clear: {e}")
+
+    def _is_session_reset_blocked(self):
+        """True wenn Zurücksetzen nicht angeboten werden soll (laufende Erstellung / Analyse)."""
+        if getattr(self, "loading_window", None):
+            return True, (
+                "Bitte warten Sie, bis die QR-Analyse abgeschlossen ist,\n"
+                "oder schließen Sie das Lade-Fenster."
+            )
+        btn = self.erstellen_button
+        if btn:
+            txt = btn.cget("text")
+            if txt in ("Abbrechen", "Bitte warten...", "Kodierung läuft..."):
+                return True, "Zurücksetzen ist während der Videoerstellung nicht möglich."
+        return False, ""
+
+    def reset_session(self):
+        """Leert Formular (manueller Modus) und alle importierten Medien nach Bestätigung."""
+        blocked, reason = self._is_session_reset_blocked()
+        if blocked:
+            messagebox.showwarning("Zurücksetzen nicht möglich", reason, parent=self.root)
+            return
+
+        if not messagebox.askyesno(
+            "Alles zurücksetzen?",
+            "Alle Eingaben im Formular und alle importierten Videos und Fotos "
+            "werden verworfen.\n\nFortfahren?",
+            parent=self.root,
+        ):
+            return
+
+        blocked, reason = self._is_session_reset_blocked()
+        if blocked:
+            messagebox.showwarning("Zurücksetzen nicht möglich", reason, parent=self.root)
+            return
+
+        try:
+            if hasattr(self, "video_preview") and self.video_preview:
+                self.video_preview.cancel_creation()
+
+            if self.drag_drop:
+                self.drag_drop.clear_all()
+
+            if hasattr(self, "progress_handler") and self.progress_handler:
+                self.progress_handler.set_status("Status: Bereit.")
+
+            self.update_watermark_column_visibility()
+        except Exception as e:
+            print(f"⚠️ Fehler beim Zurücksetzen: {e}")
+            messagebox.showerror("Zurücksetzen", f"Fehler beim Zurücksetzen:\n{e}", parent=self.root)
 
     def on_files_added(self, has_videos, has_photos):
         """Wird von DragDropFrame aufgerufen, um FormFields zu aktualisieren."""

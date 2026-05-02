@@ -1129,9 +1129,13 @@ class DragDropFrame:
             self.app.photo_preview.set_photos(self.photo_paths, pil_photo_cache)
 
     def clear_all(self):
-        """Entfernt alle Videos und Fotos"""
-        self.clear_videos()
+        """Entfernt alle Videos und Fotos.
+
+        Fotos zuerst, damit beim anschließenden Leeren der Videos das Formular
+        (auto_check_products) nicht kurzzeitig noch „Fotos vorhanden“ sieht.
+        """
         self.clear_photos()
+        self.clear_videos()
         self.drop_label.config(text="Videos (.mp4) und Fotos (.jpg, .png) hierher ziehen", fg="black")
 
     def get_video_paths(self):

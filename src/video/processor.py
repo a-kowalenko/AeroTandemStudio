@@ -5,7 +5,7 @@ import os
 import tempfile
 import subprocess
 from dataclasses import asdict, is_dataclass
-from datetime import date
+from datetime import date, datetime
 import multiprocessing
 import time
 
@@ -482,6 +482,8 @@ class VideoProcessor:
                     self._update_progress(i, TOTAL_STEPS)
                 full_video_output_path = None  # Sicherstellen, dass es None ist
 
+            photo_rename_map = self._build_photo_rename_map(photo_paths) if photo_paths else {}
+
             # --- NEU: FOTO WASSERZEICHEN VERARBEITUNG ---
             watermark_photo_count = 0
             if watermark_photo_indices and photo_paths:
@@ -503,7 +505,12 @@ class VideoProcessor:
                         for photo_path in selected_photo_paths:
                             self._check_for_cancellation()
                             if os.path.exists(photo_path):
-                                self._create_photo_with_watermark(photo_path, preview_dir)
+                                out_name = photo_rename_map.get(
+                                    photo_path, os.path.basename(photo_path)
+                                )
+                                self._create_photo_with_watermark(
+                                    photo_path, preview_dir, out_name
+                                )
                                 watermark_photo_count += 1
 
                         print(f"{watermark_photo_count} Foto(s) mit Wasserzeichen verarbeitet und in {preview_dir} gespeichert.")
@@ -519,7 +526,9 @@ class VideoProcessor:
             copied_count = 0
             if photo_paths:
                 self._update_status("Kopiere Fotos...")
-                copied_count = self._copy_photos_to_output_directory(photo_paths, base_output_dir, kunde)
+                copied_count = self._copy_photos_to_output_directory(
+                    photo_paths, base_output_dir, kunde, photo_rename_map
+                )
             else:
                 self._update_status("Keine Fotos zum Kopieren ausgewählt.")
 
@@ -826,7 +835,53 @@ class VideoProcessor:
             print(f"Fehler bei Intro-Erstellung: {e.stderr if hasattr(e, 'stderr') else str(e)}")
             raise
 
-    def _copy_photos_to_output_directory(self, photo_paths, base_output_dir, kunde):
+    def _get_photo_capture_dt(self, photo_path):
+        """EXIF DateTimeOriginal / DateTime, sonst Datei-mtime (wie Foto-Vorschau)."""
+        try:
+            from PIL import Image
+            with Image.open(photo_path) as img:
+                exif = img.getexif()
+                if exif:
+                    raw = exif.get(36867) or exif.get(306)  # DateTimeOriginal, DateTime
+                    if isinstance(raw, bytes):
+                        try:
+                            raw = raw.decode("utf-8", errors="ignore")
+                        except Exception:
+                            raw = None
+                    if raw and isinstance(raw, str):
+                        s = raw.strip()
+                        if len(s) >= 19:
+                            try:
+                                return datetime.strptime(s[:19], "%Y:%m:%d %H:%M:%S")
+                            except ValueError:
+                                pass
+        except Exception:
+            pass
+        return datetime.fromtimestamp(os.path.getmtime(photo_path))
+
+    def _build_photo_rename_map(self, photo_paths):
+        """
+        Ordnet jedem Quellpfad einen eindeutigen Zielnamen zu:
+        yyyyMMddHHmmss_<Originalname>; bei Kollision ' (1)', ' (2)', ... vor der Endung.
+        """
+        used = set()
+        mapping = {}
+        for src in photo_paths:
+            if not os.path.exists(src):
+                continue
+            prefix = self._get_photo_capture_dt(src).strftime("%Y%m%d%H%M%S")
+            candidate = f"{prefix}_{os.path.basename(src)}"
+            if candidate in used:
+                base, ext = os.path.splitext(candidate)
+                n = 1
+                while f"{base} ({n}){ext}" in used:
+                    n += 1
+                candidate = f"{base} ({n}){ext}"
+            used.add(candidate)
+            mapping[src] = candidate
+        return mapping
+
+    def _copy_photos_to_output_directory(self, photo_paths, base_output_dir, kunde, rename_map=None):
         """
         Kopiert alle Fotos in die entsprechenden Unterverzeichnisse (Handcam_Foto / Outside_Foto)
         basierend auf den im Kunde-Objekt ausgewählten Optionen.
@@ -834,6 +889,8 @@ class VideoProcessor:
         """
         if not photo_paths or not kunde:
             return 0
+        if rename_map is None:
+            rename_map = {}
 
         # Definiere Zielverzeichnisse
         handcam_dir = os.path.join(base_output_dir, "Handcam_Foto")
@@ -851,7 +908,7 @@ class VideoProcessor:
             if not os.path.exists(photo_path):
                 continue
 
-            filename = os.path.basename(photo_path)
+            filename = rename_map.get(photo_path, os.path.basename(photo_path))
             copied_this_file = False
 
             if kunde.handcam_foto:
@@ -890,7 +947,7 @@ class VideoProcessor:
             error_msg += f"Technische Details: {str(e)}"
             raise OSError(error_msg)
 
-    def _create_photo_with_watermark(self, input_photo_path, output_dir):
+    def _create_photo_with_watermark(self, input_photo_path, output_dir, output_filename):
         """
         Verwendet PIL/Pillow, um ein einzelnes Foto auf 720p (Höhe) zu skalieren
         und ein Wasserzeichen (80% Transparenz) darüber zu legen.
@@ -907,7 +964,6 @@ class VideoProcessor:
             print(f"Warnung: Eingabe-Foto nicht gefunden: {input_photo_path}")
             return
 
-        output_filename = os.path.basename(input_photo_path)
         output_path = os.path.join(output_dir, output_filename)
 
         target_height = 720
@@ -962,14 +1018,15 @@ class VideoProcessor:
             print(f"Fehler beim Erstellen des Wasserzeichen-Fotos für {output_filename}:")
             print(f"Fehler: {e}")
             # Fallback: Versuche es mit FFmpeg
-            self._create_photo_with_watermark_ffmpeg(input_photo_path, output_dir)
+            self._create_photo_with_watermark_ffmpeg(
+                input_photo_path, output_dir, output_filename
+            )
 
-    def _create_photo_with_watermark_ffmpeg(self, input_photo_path, output_dir):
+    def _create_photo_with_watermark_ffmpeg(self, input_photo_path, output_dir, output_filename):
         """
         Fallback: Verwendet FFmpeg für Wasserzeichen-Fotos.
         """
         wasserzeichen_path = os.path.join(os.path.dirname(self.hintergrund_path), "preview_stempel.png")
-        output_filename = os.path.basename(input_photo_path)
         output_path = os.path.join(output_dir, output_filename)
         target_height = 720
         alpha_level = 1

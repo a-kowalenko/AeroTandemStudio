@@ -12,6 +12,47 @@ import shutil
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.media_history import MediaHistoryStore
 
+# Mit handle_drop / Pipeline abgestimmt (v. a. .mp4 für Videos)
+_DND_VIDEO_EXT = ".mp4"
+_DND_PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp")
+
+_DROP_ZONE_HELP_TEXT = (
+    "Videos (.mp4) und Fotos (.jpg, .png) oder Ordner (eine Ebene) hierher ziehen"
+)
+
+
+def _dnd_classify_file(path: str):
+    """Liefert 'video', 'photo' oder None für einen Dateipfad."""
+    pl = path.lower()
+    if pl.endswith(_DND_VIDEO_EXT):
+        return "video"
+    if pl.endswith(_DND_PHOTO_EXTS):
+        return "photo"
+    return None
+
+
+def _collect_media_from_directory(dir_path: str):
+    """
+    Sammelt unterstützte Medien direkt im Ordner (keine Unterordner).
+    Nicht-Medien-Dateien werden übersprungen.
+    """
+    videos, photos = [], []
+    try:
+        with os.scandir(dir_path) as it:
+            entries = sorted(it, key=lambda e: e.name.lower())
+    except OSError:
+        return videos, photos
+    for entry in entries:
+        if not entry.is_file(follow_symlinks=False):
+            continue
+        kind = _dnd_classify_file(entry.path)
+        if kind == "video":
+            videos.append(entry.path)
+        elif kind == "photo":
+            photos.append(entry.path)
+    return videos, photos
+
+
 class ImportProgressDialog(tk.Toplevel):
     def __init__(self, parent, title="Dateien werden importiert..."):
         super().__init__(parent)
@@ -97,7 +138,7 @@ class DragDropFrame:
 
         # Haupt-Label (links)
         self.drop_label = tk.Label(top_frame,
-                                   text="Videos (.mp4) und Fotos (.jpg, .png) hierher ziehen",
+                                   text=_DROP_ZONE_HELP_TEXT,
                                    font=("Arial", 10))
         self.drop_label.pack(side=tk.LEFT)
 
@@ -268,14 +309,18 @@ class DragDropFrame:
 
         for filepath in filepaths:
             if os.path.isfile(filepath):
-                filename_lower = filepath.lower()
-                if filename_lower.endswith('.mp4'):
+                kind = _dnd_classify_file(filepath)
+                if kind == "video":
                     valid_videos.append(filepath)
-                elif filename_lower.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp')):
+                elif kind == "photo":
                     valid_photos.append(filepath)
                 else:
                     messagebox.showwarning("Ungültige Datei",
                                            f"'{os.path.basename(filepath)}' ist keine unterstützte Video- oder Foto-Datei")
+            elif os.path.isdir(filepath):
+                v, p = _collect_media_from_directory(filepath)
+                valid_videos.extend(v)
+                valid_photos.extend(p)
 
         if valid_videos or valid_photos:
             # Prüfe Video-Formate wenn mehrere Videos hinzugefügt werden
@@ -1136,7 +1181,7 @@ class DragDropFrame:
         """
         self.clear_photos()
         self.clear_videos()
-        self.drop_label.config(text="Videos (.mp4) und Fotos (.jpg, .png) hierher ziehen", fg="black")
+        self.drop_label.config(text=_DROP_ZONE_HELP_TEXT, fg="black")
 
     def get_video_paths(self):
         """Gibt die Liste der Video-Pfade zurück"""

@@ -29,6 +29,8 @@ class ConfigManager:
                     # Füge neuen Key für Skip Processed hinzu wenn nicht vorhanden
                     if "sd_skip_processed" not in settings:
                         settings["sd_skip_processed"] = False
+                    if "sd_pc_name" not in settings:
+                        settings["sd_pc_name"] = ""
                     return settings
             except (json.JSONDecodeError, FileNotFoundError):
                 return self.get_default_settings()
@@ -49,6 +51,7 @@ class ConfigManager:
             # SD-Karten Backup Einstellungen
             "sd_backup_folder": "",
             "sd_auto_backup": False,
+            "sd_pc_name": "",
             "sd_clear_after_backup": False,
             "sd_auto_import": False,
             "sd_skip_processed": False,  # Nur neue Dateien sichern/importieren

@@ -3,6 +3,8 @@ SD-Karten Monitor
 Überwacht USB/SD-Karten Anschlüsse und führt automatische Backups durch.
 """
 import os
+import re
+import secrets
 import time
 import threading
 import shutil
@@ -482,9 +484,13 @@ class SDCardMonitor:
         backup_path = None
         copied_source_files = []  # NEU: Tracke erfolgreich kopierte Quelldateien
         try:
-            # Erstelle Zeitstempel-basierten Ordnernamen
+            settings = self.config.get_settings()
+            raw_pc_name = (settings.get("sd_pc_name") or "").strip()
+            safe_pc_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", raw_pc_name)[:32]
+            pc_part = f"[{safe_pc_name}]" if safe_pc_name else ""
+            short_hash = secrets.token_hex(2)
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-            backup_path = os.path.join(backup_folder, f"SD_Backup_{timestamp}")
+            backup_path = os.path.join(backup_folder, f"SD_Backup_{timestamp}{pc_part}_{short_hash}")
 
             print(f"Starte Backup von {drive} nach {backup_path}...")
 
@@ -533,7 +539,6 @@ class SDCardMonitor:
                 return None, error_msg, []
 
             # Optional: Duplikate überspringen
-            settings = self.config.get_settings()
             skip_processed = settings.get("sd_skip_processed", False)
             filtered_files = []
             skipped_count = 0

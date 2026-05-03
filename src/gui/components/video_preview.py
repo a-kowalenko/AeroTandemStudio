@@ -1878,8 +1878,13 @@ class VideoPreview:
                 print(f"FFmpeg Output:\n{last_lines}")
             return None
 
-    def _check_video_formats(self, video_paths):
-        """Prüft ob Videos kompatible Formate haben - mit UI-Feedback und Spinner"""
+    def _check_video_formats(self, video_paths, show_ui=True):
+        """Prüft ob Videos kompatible Formate haben (Video + Audio, Profil).
+
+        Args:
+            video_paths: Pfade zu den zu prüfenden Dateien
+            show_ui: Wenn False (z. B. Hintergrund nach Schnitt), kein Spinner/Status pro Clip
+        """
         if len(video_paths) <= 1:
             return {"compatible": True, "details": "Nur ein Video - kompatibel"}
 
@@ -1902,14 +1907,14 @@ class VideoPreview:
                 format_check_spinner.canvas.destroy()
                 format_check_spinner = None
 
-        # Zeige Spinner im Haupt-Thread
-        self.parent.after(0, show_spinner)
+        if show_ui:
+            self.parent.after(0, show_spinner)
 
         try:
             for i, video_path in enumerate(video_paths):
-                # UI-Update: Zeige Fortschritt mit Spinner
-                progress_text = f"Prüfe Format {i + 1}/{total}..."
-                self.parent.after(0, lambda t=progress_text: self.status_label.config(text=t, fg="blue"))
+                if show_ui:
+                    progress_text = f"Prüfe Format {i + 1}/{total}..."
+                    self.parent.after(0, lambda t=progress_text: self.status_label.config(text=t, fg="blue"))
 
                 try:
                     self._check_for_cancellation()  # Prüfe vor jedem blockierenden Aufruf
@@ -1920,11 +1925,22 @@ class VideoPreview:
                     if result.returncode == 0:
                         info = json.loads(result.stdout)
                         video_stream = next((s for s in info.get('streams', []) if s.get('codec_type') == 'video'), None)
+                        audio_stream = next((s for s in info.get('streams', []) if s.get('codec_type') == 'audio'), None)
                         if video_stream:
-                            formats.append({'codec_name': video_stream.get('codec_name', 'unknown'),
-                                            'width': video_stream.get('width', 0), 'height': video_stream.get('height', 0),
-                                            'r_frame_rate': video_stream.get('r_frame_rate', '0/0'),
-                                            'pix_fmt': video_stream.get('pix_fmt', 'unknown')})
+                            prof = video_stream.get('profile')
+                            if isinstance(prof, str):
+                                prof = prof.lower().replace(' ', '')
+                            formats.append({
+                                'codec_name': video_stream.get('codec_name', 'unknown'),
+                                'width': video_stream.get('width', 0),
+                                'height': video_stream.get('height', 0),
+                                'r_frame_rate': video_stream.get('r_frame_rate', '0/0'),
+                                'pix_fmt': video_stream.get('pix_fmt', 'unknown'),
+                                'profile': prof,
+                                'audio_codec': audio_stream.get('codec_name') if audio_stream else None,
+                                'sample_rate': str(audio_stream.get('sample_rate')) if audio_stream else None,
+                                'channels': audio_stream.get('channels') if audio_stream else None,
+                            })
                         else:
                             formats.append({'error': 'No video stream'})
                     else:
@@ -1934,19 +1950,24 @@ class VideoPreview:
                     formats.append({'error': str(e)})
 
         finally:
-            # Verstecke Spinner nach Format-Check
-            self.parent.after(0, hide_spinner)
+            if show_ui:
+                self.parent.after(0, hide_spinner)
 
         first_format = next((f for f in formats if 'error' not in f), None)
-        if not first_format: return {"compatible": False, "details": "No valid video streams found."}
+        if not first_format:
+            return {"compatible": False, "details": "No valid video streams found."}
         is_compatible = True
         diffs = []
+        compare_keys = [
+            'codec_name', 'width', 'height', 'r_frame_rate', 'pix_fmt',
+            'profile', 'audio_codec', 'sample_rate', 'channels',
+        ]
         for i, fmt in enumerate(formats):
             if 'error' in fmt:
                 is_compatible = False
                 diffs.append(f"Video {i + 1}: {fmt['error']}")
                 continue
-            for key in ['codec_name', 'width', 'height', 'r_frame_rate', 'pix_fmt']:
+            for key in compare_keys:
                 if fmt.get(key) != first_format.get(key):
                     is_compatible = False
                     diffs.append(f"V{i + 1} {key}")
@@ -2133,15 +2154,34 @@ class VideoPreview:
         self.processing_thread.start()
 
     def _regenerate_task(self, copy_paths):
-        """Thread-Funktion, die nur das Kombinieren der (bereits vorhandenen) Kopien durchführt."""
+        """Nach Schnitt: Formate prüfen — bei Mismatch alle Clips standardisieren, dann kombinieren."""
 
         self.parent.after(0, lambda: self.status_label.config(text="Aktualisiere Vorschau nach Schnitt...", fg="blue"))
-        # self.parent.after(0,  # ENTFERNT
-        #                   lambda: self.action_button.config(text="⏹ Erstellung abbrechen", command=self.cancel_creation,
-        #                                                     state="normal"))
 
         try:
-            new_combined_path = self._create_fast_combined_video(copy_paths)
+            temp_copy_paths = list(copy_paths)
+            standardized_this_run = False
+            format_info = {"compatible": True, "details": ""}
+
+            if len(temp_copy_paths) > 1:
+                self.parent.after(0, lambda: self.status_label.config(
+                    text="Prüfe Clip-Kompatibilität nach Schnitt...", fg="blue"))
+                format_info = self._check_video_formats(temp_copy_paths, show_ui=False)
+                if not format_info.get("compatible", False):
+                    print(f"⚠️ Nach Schnitt: {format_info.get('details', '')}")
+                    print("→ Standardisiere alle Clips für sicheres concat (wie erste Vorschau).")
+                    standardized_this_run = True
+                    self.videos_were_reencoded = True
+                    self.parent.after(
+                        0, lambda fi=format_info: self._update_encoding_info(fi, "h264"))
+                    temp_copy_paths = self._prepare_video_copies(
+                        self.last_video_paths, needs_reencoding=True)
+
+            if self.cancellation_event.is_set():
+                self.parent.after(0, self._update_ui_cancelled)
+                return
+
+            new_combined_path = self._create_fast_combined_video(temp_copy_paths)
 
             if self.cancellation_event.is_set():
                 self.parent.after(0, self._update_ui_cancelled)
@@ -2149,7 +2189,10 @@ class VideoPreview:
 
             if new_combined_path and os.path.exists(new_combined_path):
                 self.combined_video_path = new_combined_path
-                self.parent.after(0, self._update_ui_success_after_cut, copy_paths)
+                self.parent.after(
+                    0,
+                    lambda tcp=temp_copy_paths, std=standardized_this_run: self._update_ui_success_after_cut(
+                        tcp, standardized_this_run=std))
             else:
                 if not self.cancellation_event.is_set():
                     self.parent.after(0, self._update_ui_error, "Vorschau-Aktualisierung fehlgeschlagen")
@@ -2157,6 +2200,8 @@ class VideoPreview:
         except Exception as e:
             if not self.cancellation_event.is_set():
                 print(f"Fehler in _regenerate_task: {e}")
+                import traceback
+                traceback.print_exc()
                 self.parent.after(0, self._update_ui_error, f"Fehler: {str(e)}")
             else:
                 self.parent.after(0, self._update_ui_cancelled)
@@ -2164,16 +2209,16 @@ class VideoPreview:
             if self.parent.winfo_exists():
                 self.parent.after(0, self._finalize_processing)
 
-    def _update_ui_success_after_cut(self, copy_paths):
+    def _update_ui_success_after_cut(self, copy_paths, standardized_this_run=False):
         """Aktualisiert die UI nach einer erfolgreichen *Regenerierung* (Schnitt)."""
-        if self.progress_handler: self.parent.after(0, self.progress_handler.reset)
+        if self.progress_handler:
+            self.parent.after(0, self.progress_handler.reset)
 
         # Metadaten von den (möglicherweise geschnittenen) Kopien berechnen (aus Cache)
         total_duration_s = 0
         total_bytes = 0
 
-        for original_path in self.last_video_paths: # self.last_video_paths wurde aktualisiert
-            # BUGFIX: Verwende file_identity als Cache-Key, nicht den Pfad direkt
+        for original_path in self.last_video_paths:  # self.last_video_paths wurde aktualisiert
             file_identity = self._get_file_identity(original_path)
             if file_identity:
                 metadata = self.metadata_cache.get(file_identity)
@@ -2192,9 +2237,31 @@ class VideoPreview:
         self.size_label.config(text=total_size)
         self.clips_label.config(text=str(len(self.last_video_paths)))
 
-        self.status_label.config(text="Vorschau nach Schnitt aktualisiert", fg="green")
+        codec = "h264"
+        if self.combined_video_path and os.path.exists(self.combined_video_path):
+            detected_codec = self._get_video_codec(self.combined_video_path)
+            if detected_codec != "unknown":
+                codec = detected_codec
+        elif copy_paths and len(copy_paths) > 0:
+            detected_codec = self._get_video_codec(copy_paths[0])
+            if detected_codec != "unknown":
+                codec = detected_codec
+        encoder_name = self._get_current_encoder_name(codec)
+
+        if standardized_this_run or self.videos_were_reencoded:
+            self.encoding_label.config(
+                text=f"Standardisiert | {encoder_name}", fg="orange")
+            self.status_label.config(
+                text="Vorschau nach Schnitt aktualisiert (standardisiert)", fg="green")
+        else:
+            self.encoding_label.config(
+                text=f"Direkt kombiniert (Codec: {codec.upper()})", fg="green")
+            self.status_label.config(text="Vorschau nach Schnitt aktualisiert", fg="green")
         # self.play_button.config(state="normal")  # ENTFERNT
         # self.action_button.config(state="disabled")  # ENTFERNT
+
+        if self.app and hasattr(self.app, 'drag_drop'):
+            self.app.drag_drop.set_cut_button_enabled(True)
 
         # NEU: Video-Player vollständig aktualisieren mit neuen Clip-Dauern
         clip_durations = self._get_clip_durations_seconds(copy_paths)
@@ -2244,6 +2311,7 @@ class VideoPreview:
         self.video_paths = self.last_video_paths
         self.clip_durations = clip_durations
         self._update_thumbnails()
+        self._update_button_states()
         print(f"Thumbnails aktualisiert: {len(self.video_paths)} Clips")
 
     def _restore_player_position(self, time_ms, was_playing):

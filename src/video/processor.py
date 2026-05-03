@@ -120,6 +120,71 @@ class VideoProcessor:
         except (ValueError, ZeroDivisionError, TypeError):
             return 30
 
+    def _final_delivery_h264_encode_args(self):
+        """
+        Video-Re-Encode zu einem einheitlichen H.264-Stream (yuv420p, avc1).
+        Erforderlich, weil Stream-Copy von Intro + Hauptvideo im MP4 zu gemischter
+        avcC / inkompatiblen SPS-PPS führt (VLC spielt mit, Browser/WMP nicht).
+        """
+        p = self._get_encoding_params('h264')
+        enc = p.get('encoder') or 'libx264'
+        args = ['-c:v', enc]
+        if enc == 'libx264':
+            args.extend(['-preset', 'fast', '-crf', '20'])
+            if getattr(self, 'parallel_processing_enabled', True):
+                args.extend(['-threads', '0'])
+            else:
+                args.extend(['-threads', '1'])
+        elif enc.endswith('_nvenc'):
+            args.extend(['-preset', 'p4', '-rc', 'vbr', '-cq', '21'])
+        elif enc.endswith('_qsv'):
+            args.extend(['-global_quality', '23', '-look_ahead', '0'])
+        elif enc.endswith('_amf'):
+            args.extend(['-quality', 'balanced', '-rc', 'cqp', '-qp_i', '21', '-qp_p', '21'])
+        elif enc.endswith('_videotoolbox'):
+            args.extend(['-q:v', '60'])
+        elif enc.endswith('_vaapi'):
+            args.extend(['-qp', '21'])
+        else:
+            args = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '20']
+            if getattr(self, 'parallel_processing_enabled', True):
+                args.extend(['-threads', '0'])
+            else:
+                args.extend(['-threads', '1'])
+        args.extend(['-pix_fmt', 'yuv420p', '-tag:v', 'avc1'])
+        return args
+
+    def _build_final_intro_body_mux_command(
+        self,
+        full_video_output_path,
+        video_params,
+        use_concat_demuxer,
+        concat_list_path,
+        temp_intro_ts_path,
+        temp_combined_ts_path,
+    ):
+        """
+        Baut FFmpeg für Intro + kombiniertes Hauptvideo: immer Video neu encodieren,
+        Audio per copy (TS-Eingang: aac_adtstoasc für MP4-Mux).
+        """
+        cmd = ['ffmpeg', '-y', '-fflags', '+genpts']
+        if use_concat_demuxer:
+            cmd.extend(['-f', 'concat', '-safe', '0', '-i', concat_list_path])
+        else:
+            concat_input = f'concat:{temp_intro_ts_path}|{temp_combined_ts_path}'
+            cmd.extend(['-i', concat_input])
+
+        cmd.extend(['-map', '0:v:0'])
+        if video_params.get('has_audio', True):
+            cmd.extend(['-map', '0:a:0'])
+
+        cmd.extend(self._final_delivery_h264_encode_args())
+
+        # AAC für zuverlässigen MP4-Mux (Kamera: AAC/PCM/etc.; kein riskanter Stream-Copy über Segmentgrenzen)
+        cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
+        cmd.extend(['-movflags', '+faststart', full_video_output_path])
+        return cmd
+
     def create_video_with_intro_only(self, payload):
         """Erstellt ein Verzeichnis, verarbeitet optional Videos und kopiert Fotos."""
         thread = threading.Thread(
@@ -366,37 +431,16 @@ class VideoProcessor:
                         base_output_dir, base_filename
                     )
 
-                    # Task 1: Normale Version zusammenfügen
+                    # Task 1: Normale Version zusammenfügen (Video immer neu encodieren → einheitliche Browser-MP4)
                     def create_normal_version_task(task_id=None):
-                        if use_concat_demuxer:
-                            # VP9/AV1: Verwende concat demuxer
-                            command = [
-                                "ffmpeg", "-y",
-                                "-f", "concat",
-                                "-safe", "0",
-                                "-i", concat_list_path,
-                                "-c", "copy",
-                                "-movflags", "+faststart"
-                            ]
-                        else:
-                            # H.264/HEVC: Verwende MPEG-TS concat protocol
-                            concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
-                            command = [
-                                "ffmpeg", "-y",
-                                "-fflags", "+genpts",
-                                "-i", concat_input,
-                                "-c", "copy",
-                                "-bsf:a", "aac_adtstoasc",
-                                "-movflags", "+faststart"
-                            ]
-                            # HEVC-spezifische Stabilisierung und Tagging
-                            if video_params.get('vcodec') == 'hevc':
-                                command.extend(["-bsf:v", "hevc_metadata=aud=insert,extract_extradata", "-tag:v", "hvc1"])
-                            elif video_params.get('vcodec') == 'h264':
-                                command.extend(["-bsf:v", "h264_metadata=aud=insert,extract_extradata", "-tag:v", "avc1"])
-
-                        command.append(full_video_output_path)
-
+                        command = self._build_final_intro_body_mux_command(
+                            full_video_output_path,
+                            video_params,
+                            use_concat_demuxer,
+                            concat_list_path,
+                            temp_intro_ts_path,
+                            temp_combined_ts_path,
+                        )
                         subprocess.run(
                             command,
                             capture_output=True, text=True, check=True,
@@ -432,37 +476,16 @@ class VideoProcessor:
                     if full_video_output_path:
                         self._check_for_cancellation()
                         self._update_progress(9, TOTAL_STEPS)
-                        self._update_status("Füge Videos final zusammen...")
+                        self._update_status("Füge Videos final zusammen (Neuencodierung für Browser-Kompatibilität)...")
 
-                        if use_concat_demuxer:
-                            # VP9/AV1: Verwende concat demuxer
-                            command = [
-                                "ffmpeg", "-y",
-                                "-f", "concat",
-                                "-safe", "0",
-                                "-i", concat_list_path,
-                                "-c", "copy",
-                                "-movflags", "+faststart"
-                            ]
-                        else:
-                            # H.264/HEVC: Verwende MPEG-TS concat protocol
-                            concat_input = f"concat:{temp_intro_ts_path}|{temp_combined_ts_path}"
-                            command = [
-                                "ffmpeg", "-y",
-                                "-fflags", "+genpts",
-                                "-i", concat_input,
-                                "-c", "copy",
-                                "-bsf:a", "aac_adtstoasc",
-                                "-movflags", "+faststart"
-                            ]
-                            # HEVC-spezifische Stabilisierung und Tagging
-                            if video_params.get('vcodec') == 'hevc':
-                                command.extend(["-bsf:v", "hevc_metadata=aud=insert,extract_extradata", "-tag:v", "hvc1"])
-                            elif video_params.get('vcodec') == 'h264':
-                                command.extend(["-bsf:v", "h264_metadata=aud=insert,extract_extradata", "-tag:v", "avc1"])
-
-                        command.append(full_video_output_path)
-
+                        command = self._build_final_intro_body_mux_command(
+                            full_video_output_path,
+                            video_params,
+                            use_concat_demuxer,
+                            concat_list_path,
+                            temp_intro_ts_path,
+                            temp_combined_ts_path,
+                        )
                         subprocess.run(
                             command,
                             capture_output=True, text=True, check=True,

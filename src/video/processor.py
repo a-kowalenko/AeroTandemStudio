@@ -104,6 +104,22 @@ class VideoProcessor:
 
         return params
 
+    @staticmethod
+    def _parse_r_frame_rate(r_frame_rate):
+        """Wandelt ffprobe r_frame_rate (z. B. 30000/1001 oder 25) in eine ganzzahlige FPS für GOP -g."""
+        if r_frame_rate is None:
+            return 30
+        try:
+            if isinstance(r_frame_rate, (int, float)):
+                return max(1, int(round(float(r_frame_rate))))
+            s = str(r_frame_rate).strip()
+            if '/' in s:
+                num, den = s.split('/', 1)
+                return max(1, int(round(float(num) / float(den))))
+            return max(1, int(round(float(s))))
+        except (ValueError, ZeroDivisionError, TypeError):
+            return 30
+
     def create_video_with_intro_only(self, payload):
         """Erstellt ein Verzeichnis, verarbeitet optional Videos und kopiert Fotos."""
         thread = threading.Thread(
@@ -376,6 +392,8 @@ class VideoProcessor:
                             # HEVC-spezifische Stabilisierung und Tagging
                             if video_params.get('vcodec') == 'hevc':
                                 command.extend(["-bsf:v", "hevc_metadata=aud=insert,extract_extradata", "-tag:v", "hvc1"])
+                            elif video_params.get('vcodec') == 'h264':
+                                command.extend(["-bsf:v", "h264_metadata=aud=insert,extract_extradata", "-tag:v", "avc1"])
 
                         command.append(full_video_output_path)
 
@@ -440,6 +458,8 @@ class VideoProcessor:
                             # HEVC-spezifische Stabilisierung und Tagging
                             if video_params.get('vcodec') == 'hevc':
                                 command.extend(["-bsf:v", "hevc_metadata=aud=insert,extract_extradata", "-tag:v", "hvc1"])
+                            elif video_params.get('vcodec') == 'h264':
+                                command.extend(["-bsf:v", "h264_metadata=aud=insert,extract_extradata", "-tag:v", "avc1"])
 
                         command.append(full_video_output_path)
 
@@ -730,6 +750,12 @@ class VideoProcessor:
         NEU: Behält Aspect-Ratio des Hintergrunds bei und fügt schwarze Balken hinzu statt zu strecken.
         """
         self._check_for_cancellation()
+        print(
+            "Intro-Quellreferenz (combined preview): "
+            f"profile={v_params.get('profile')} level={v_params.get('level')} "
+            f"pix_fmt={v_params.get('pix_fmt')} has_b_frames={v_params.get('has_b_frames')} "
+            f"fps={v_params.get('fps')} vcodec={v_params.get('vcodec')}"
+        )
         print(f"Erstelle Intro mit erweiterten Parametern: {v_params}")
 
         # Aspect-Ratio-Preservation: scale + pad für schwarze Balken
@@ -739,10 +765,9 @@ class VideoProcessor:
             f"{drawtext_filter}"
         )
 
-        # Hole Encoding-Parameter (mit oder ohne Hardware-Beschleunigung)
         vcodec = v_params.get('vcodec', 'h264')
-        # Verwende den tatsächlichen Codec aus den Video-Parametern
         encoding_params = self._get_encoding_params(vcodec)
+        encoder_name = encoding_params.get('encoder') or 'libx264'
 
         command = ["ffmpeg", "-y"]
 
@@ -759,7 +784,6 @@ class VideoProcessor:
         # Encoding-Parameter (Hardware oder Software)
         command.extend(encoding_params['output_params'])
 
-
         # Zusätzliche Parameter für Kompatibilität
         command.extend([
             "-pix_fmt", v_params['pix_fmt'],
@@ -774,26 +798,47 @@ class VideoProcessor:
 
         # Preset und CRF nur bei Software-Encoding (codec-spezifisch)
         if not self.hw_accel_enabled:
-            encoder = encoding_params.get('encoder', 'libx264')
-
-            if encoder == 'libx264':
+            if encoder_name == 'libx264':
                 command.extend(["-preset", "fast", "-crf", "18"])
-            elif encoder == 'libx265':
+            elif encoder_name == 'libx265':
                 command.extend(["-preset", "fast", "-crf", "20"])
-            elif encoder == 'libvpx-vp9':
-                # VP9 hat keine preset-Option
+            elif encoder_name == 'libvpx-vp9':
                 command.extend([
-                    "-deadline", "good",  # good quality (besser als realtime)
-                    "-cpu-used", "2",  # Geschwindigkeit (0=langsam, 5=schnell)
-                    "-crf", "23",  # Qualität für Intro (besser als Preview)
-                    "-b:v", "0"  # CRF Mode
+                    "-deadline", "good",
+                    "-cpu-used", "2",
+                    "-crf", "23",
+                    "-b:v", "0"
                 ])
-            elif encoder in ['libaom-av1', 'libsvtav1']:
+            elif encoder_name in ('libaom-av1', 'libsvtav1'):
                 command.extend([
-                    "-cpu-used", "6",  # Geschwindigkeit
+                    "-cpu-used", "6",
                     "-crf", "28",
                     "-b:v", "0"
                 ])
+        else:
+            # HW: stabile Qualität + GOP (Annäherung an typische Kamera-Streams für Stream-Copy-Concat)
+            if encoder_name.endswith('_nvenc'):
+                command.extend([
+                    "-rc", "constqp", "-qp", "18", "-preset", "p4", "-no-scenecut", "1"
+                ])
+            elif encoder_name.endswith('_qsv'):
+                command.extend([
+                    "-global_quality", "18", "-look_ahead", "0", "-forced_idr", "1"
+                ])
+            elif encoder_name.endswith('_amf'):
+                command.extend([
+                    "-quality", "balanced", "-rc", "cqp", "-qp_i", "18", "-qp_p", "18"
+                ])
+            elif encoder_name.endswith('_videotoolbox'):
+                command.extend(["-q:v", "50"])
+            elif encoder_name.endswith('_vaapi'):
+                command.extend(["-qp", "18"])
+
+        # CFR + 1s-GOP bei H.264/HEVC (Intro ↔ Hauptvideo)
+        fps_int = self._parse_r_frame_rate(v_params.get('fps'))
+        if vcodec in ('h264', 'hevc', 'h265'):
+            command.extend(["-g", str(fps_int), "-bf", "0"])
+        command.extend(["-vsync", "cfr"])
 
         # Color Space Parameter
         if v_params.get('color_range'):
@@ -805,13 +850,17 @@ class VideoProcessor:
         if v_params.get('color_trc'):
             command.extend(["-color_trc", v_params['color_trc']])
 
-        # Profile und Level (nur für h264/hevc)
-        # WICHTIG: Bei Hardware-Encoding (nvenc) KEIN Level setzen, da nvenc nicht alle Levels unterstützt
-        # Der Encoder wählt automatisch ein passendes Level
-        if v_params.get('profile') and v_params['vcodec'] in ['h264', 'hevc', 'h265'] and not self.hw_accel_enabled:
+        # Profile auch bei HW setzen (reduziert SPS/PPS-Drift gegenüber nur-Intro-avcC in Browsern)
+        if v_params.get('profile') and vcodec in ('h264', 'hevc', 'h265'):
             profile_str = str(v_params['profile']).lower().replace(" ", "")
+            if profile_str == 'constrainedbaseline':
+                profile_str = 'baseline'
+            if vcodec in ('hevc', 'h265') and profile_str not in ('main', 'main10'):
+                profile_str = 'main'
             command.extend(["-profile:v", profile_str])
-        if v_params.get('level') and v_params['vcodec'] in ['h264', 'hevc', 'h265'] and not self.hw_accel_enabled:
+
+        # Level nur bei Software-Encoding (HW: Encoder wählt passendes Level)
+        if v_params.get('level') and vcodec in ('h264', 'hevc', 'h265') and not self.hw_accel_enabled:
             try:
                 level_str = str(float(v_params['level']) / 10.0)
                 command.extend(["-level:v", level_str])
@@ -1120,6 +1169,7 @@ class VideoProcessor:
             "color_trc": video_stream.get("color_transfer"),
             "profile": video_stream.get("profile"),
             "level": video_stream.get("level"),
+            "has_b_frames": video_stream.get("has_b_frames"),
         }
 
     def _get_best_available_font(self):

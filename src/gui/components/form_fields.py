@@ -268,6 +268,13 @@ class FormFields:
         row += 1  # Wichtig: Zeile für die Frames erhöhen
         self.toggle_video_mode_visibility()  # Rufe auf, um korrekte Sektion anzuzeigen
 
+        # Medien in der Liste können Produkte erfordern, die im QR nicht gebucht waren (z. B. Video dazu).
+        if hasattr(self.app, "drag_drop") and self.app.drag_drop:
+            self.auto_check_products(
+                self.app.drag_drop.has_videos(),
+                self.app.drag_drop.has_photos(),
+            )
+
     def build_manual_form(self):
         """Baut das Formular für die manuelle Eingabe."""
         row = 0
@@ -703,8 +710,8 @@ class FormFields:
 
         Funktioniert in beiden Modi (manual und kunde).
         - Bereits aktivierte Optionen werden nicht überschrieben
-        - Neu aktivierte Optionen werden als "nicht bezahlt" markiert
-        - Bezahlt-Status von bereits aktiven Optionen bleibt erhalten
+        - Neu durch diese Methode aktivierte Optionen werden als "nicht bezahlt" markiert
+        - Bereits angehakte Produkte (z. B. vom QR) werden nicht verändert
         """
         mode = self.video_mode_var.get()
 
@@ -713,32 +720,23 @@ class FormFields:
             # Aber nur wenn noch nicht aktiv
             if has_videos and not self.handcam_video_var.get():
                 self.handcam_video_var.set(True)
-                # Neu aktivierte Option als "nicht bezahlt" markieren
-                # (Bezahlt-Status bleibt True wenn bereits gesetzt, z.B. vom QR-Code)
-                if not self.handcam_video_bezahlt_var.get():
-                    self.handcam_video_bezahlt_var.set(False)
+                self.handcam_video_bezahlt_var.set(False)
 
             # Foto-Option aktivieren wenn Fotos importiert wurden
             if has_photos and not self.handcam_foto_var.get():
                 self.handcam_foto_var.set(True)
-                # Neu aktivierte Option als "nicht bezahlt" markieren
-                if not self.handcam_foto_bezahlt_var.get():
-                    self.handcam_foto_bezahlt_var.set(False)
+                self.handcam_foto_bezahlt_var.set(False)
 
         elif mode == "outside":
             # Video-Option aktivieren wenn Videos importiert wurden
             if has_videos and not self.outside_video_var.get():
                 self.outside_video_var.set(True)
-                # Neu aktivierte Option als "nicht bezahlt" markieren
-                if not self.outside_video_bezahlt_var.get():
-                    self.outside_video_bezahlt_var.set(False)
+                self.outside_video_bezahlt_var.set(False)
 
             # Foto-Option aktivieren wenn Fotos importiert wurden
             if has_photos and not self.outside_foto_var.get():
                 self.outside_foto_var.set(True)
-                # Neu aktivierte Option als "nicht bezahlt" markieren
-                if not self.outside_foto_bezahlt_var.get():
-                    self.outside_foto_bezahlt_var.set(False)
+                self.outside_foto_bezahlt_var.set(False)
 
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)

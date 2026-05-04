@@ -1089,7 +1089,8 @@ class DragDropFrame:
         for i, photo_path in enumerate(self.photo_paths, 1):
             filename = os.path.basename(photo_path)
             size = self._get_file_size_fallback(photo_path)  # Fotos verwenden immer Fallback
-            date, timestamp = format_photo_table_datetime(photo_path)
+            imp_ep = self.get_source_import_epoch(photo_path)
+            date, timestamp = format_photo_table_datetime(photo_path, imp_ep)
 
             # NEU: Wasserzeichen-Status bestimmen
             watermark_value = "☑" if (i - 1) in self.watermark_photo_indices else "☐"
@@ -1204,7 +1205,7 @@ class DragDropFrame:
         return float("inf")
 
     def _photo_row_sort_epoch(self, path: str) -> float:
-        return get_photo_display_epoch(path)
+        return get_photo_display_epoch(path, self.get_source_import_epoch(path))
 
     def _video_sort_key(self, path, col, values):
         bn = os.path.basename(path)
@@ -1441,6 +1442,7 @@ class DragDropFrame:
         if selection:
             index = self.photo_tree.index(selection[0])
             removed = self.photo_paths.pop(index)
+            self._delete_photo_working_copy_if_owned(removed)
             self._unregister_imported_photo(removed)
             self._import_source_ts_by_dest.pop(os.path.normpath(removed), None)
 
@@ -1505,6 +1507,7 @@ class DragDropFrame:
     def clear_photos(self):
         """Entfernt alle Fotos"""
         for p in list(self.photo_paths):
+            self._delete_photo_working_copy_if_owned(p)
             self._unregister_imported_photo(p)
             self._import_source_ts_by_dest.pop(os.path.normpath(p), None)
         self.photo_paths.clear()
@@ -1516,6 +1519,7 @@ class DragDropFrame:
         """Entfernt ein bestimmtes Foto aus der Liste"""
         if photo_path in self.photo_paths:
             self.photo_paths.remove(photo_path)
+            self._delete_photo_working_copy_if_owned(photo_path)
             self._unregister_imported_photo(photo_path)
             self._import_source_ts_by_dest.pop(os.path.normpath(photo_path), None)
             self._update_photo_table()
@@ -1553,6 +1557,26 @@ class DragDropFrame:
     def has_photos(self):
         """Prüft ob Fotos vorhanden sind"""
         return len(self.photo_paths) > 0
+
+    def _delete_photo_working_copy_if_owned(self, photo_path: str) -> None:
+        """Löscht die Foto-Kopie im Arbeitsordner (temp_dir), falls der Pfad dorthin gehört."""
+        if not photo_path or not self.app or not hasattr(self.app, "video_preview"):
+            return
+        td = self.app.video_preview.temp_dir
+        if not td:
+            return
+        try:
+            rp = os.path.realpath(photo_path)
+            rt = os.path.realpath(td)
+            if os.path.commonpath([rp, rt]) != rt:
+                return
+        except (ValueError, OSError):
+            return
+        try:
+            if os.path.isfile(rp):
+                os.remove(rp)
+        except OSError as e:
+            print(f"⚠️ Konnte Foto-Arbeitskopie nicht löschen ({photo_path}): {e}")
 
     def _register_imported_photo(self, dest_path: str, source_path: str) -> None:
         """Merkt Quellpfad zur Kopie (Deduplizierung)."""

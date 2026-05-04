@@ -1034,8 +1034,11 @@ class PhotoPreview:
             size_mb = size_bytes / (1024 * 1024)
             self.info_labels["size"].config(text=f"{size_mb:.2f} MB")
 
-            # Erstellungszeitpunkt (Dateisystem; konsistent mit Tabelle links)
-            fd, ft = format_photo_table_datetime(photo_path)
+            # Erstellungszeitpunkt (wie Videos / resolve_video_display_epoch; konsistent mit Tabelle links)
+            imp_ep = None
+            if self.app and hasattr(self.app, "drag_drop"):
+                imp_ep = self.app.drag_drop.get_source_import_epoch(photo_path)
+            fd, ft = format_photo_table_datetime(photo_path, imp_ep)
             self.info_labels["date"].config(text=f"{fd} - {ft}")
 
         except Exception as e:

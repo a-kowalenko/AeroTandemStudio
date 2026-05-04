@@ -157,13 +157,16 @@ def resolve_video_display_epoch(
     return float(ts) if ts is not None else 0.0
 
 
-def get_photo_display_epoch(photo_path: str) -> float:
-    """Prio 1: EXIF (DateTimeOriginal / DateTime), sonst Dateisystem-Erstellungszeit."""
-    ts = get_pil_exif_epoch(photo_path)
-    if ts is not None:
-        return float(ts)
-    ts = get_creation_timestamp(photo_path)
-    return float(ts) if ts is not None else 0.0
+def get_photo_display_epoch(
+    photo_path: str,
+    source_import_epoch: Optional[float] = None,
+) -> float:
+    """
+    Gleiche Priorität wie Videos (resolve_video_display_epoch):
+    eingebettete Zeiten (EXIF, ffprobe), dann Import-Snapshot der Quelle,
+    dann Dateisystem der Kopie.
+    """
+    return resolve_video_display_epoch(photo_path, source_import_epoch, None)
 
 
 def format_epoch_date(epoch: float) -> str:
@@ -174,6 +177,9 @@ def format_epoch_time(epoch: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(epoch))
 
 
-def format_photo_table_datetime(photo_path: str) -> Tuple[str, str]:
-    e = get_photo_display_epoch(photo_path)
+def format_photo_table_datetime(
+    photo_path: str,
+    source_import_epoch: Optional[float] = None,
+) -> Tuple[str, str]:
+    e = get_photo_display_epoch(photo_path, source_import_epoch)
     return format_epoch_date(e), format_epoch_time(e)

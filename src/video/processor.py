@@ -222,6 +222,7 @@ class VideoProcessor:
         combined_video_path = payload["combined_video_path"]  # Kann None sein
         video_clip_paths = payload.get("video_clip_paths", [])  # NEU: Einzelne Clips
         photo_paths = payload.get("photo_paths", [])
+        self._photo_import_epochs = payload.get("photo_import_epochs") or {}
         kunde = payload.get("kunde")
         settings = payload.get("settings")
         # NEU: Flag für Wasserzeichen-Version
@@ -938,8 +939,11 @@ class VideoProcessor:
             raise
 
     def _get_photo_capture_dt(self, photo_path):
-        """EXIF vor Dateisystem-Zeit — konsistent mit Tabellen-/media_datetime-Logik."""
-        return datetime.fromtimestamp(get_photo_display_epoch(photo_path))
+        """Gleiche Zeitbasis wie Video/Foto-Tabelle (EXIF, ffprobe, Import-Snapshot, Dateisystem)."""
+        snap = None
+        if getattr(self, "_photo_import_epochs", None):
+            snap = self._photo_import_epochs.get(os.path.normpath(photo_path))
+        return datetime.fromtimestamp(get_photo_display_epoch(photo_path, snap))
 
     def _build_photo_rename_map(self, photo_paths):
         """

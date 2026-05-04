@@ -1416,6 +1416,10 @@ class VideoGeneratorApp:
             "video_clip_paths": self.drag_drop.get_video_paths() if has_video else [],  # NEU: Einzelne Clips
             "kunde": kunde,
             "photo_paths": photo_paths,
+            "photo_import_epochs": {
+                os.path.normpath(p): self.drag_drop.get_source_import_epoch(p)
+                for p in photo_paths
+            },
             "settings": self.config.get_settings(),
             "create_watermark_version": video_gewaehlt_aber_nicht_bezahlt,
             "watermark_clip_index": self.drag_drop.get_watermark_clip_index(),  # NEU: Index des ausgewählten Clips

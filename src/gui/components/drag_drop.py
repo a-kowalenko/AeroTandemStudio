@@ -11,6 +11,12 @@ import shutil
 
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.media_history import MediaHistoryStore
+from src.utils.natural_sort import natural_sort_key, sort_paths_by_basename
+from src.utils.file_times import (
+    format_creation_date,
+    format_creation_time,
+    get_creation_timestamp,
+)
 
 # Mit handle_drop / Pipeline abgestimmt (v. a. .mp4 für Videos)
 _DND_VIDEO_EXT = ".mp4"
@@ -39,7 +45,7 @@ def _collect_media_from_directory(dir_path: str):
     videos, photos = [], []
     try:
         with os.scandir(dir_path) as it:
-            entries = sorted(it, key=lambda e: e.name.lower())
+            entries = sorted(it, key=lambda e: natural_sort_key(e.name))
     except OSError:
         return videos, photos
     for entry in entries:
@@ -119,6 +125,11 @@ class DragDropFrame:
         self.watermark_photo_indices = []  # NEU: Liste für Foto-Mehrfachauswahl
         self.show_watermark_column = False  # NEU: Steuert Sichtbarkeit der Wasserzeichen-Spalte
         self.is_encoding = False  # NEU: Steuert Sichtbarkeit der Progress-Spalte vs. Datum/Uhrzeit
+        # Tabellen-Sortierung (Standard: Dateiname aufsteigend)
+        self._video_sort_column = "Dateiname"
+        self._video_sort_desc = False
+        self._photo_sort_column = "Dateiname"
+        self._photo_sort_desc = False
         self.create_widgets()
 
     def create_widgets(self):
@@ -188,15 +199,17 @@ class DragDropFrame:
         )
 
         # Spalten konfigurieren für Videos
-        self.video_tree.heading("Nr", text="#")
-        self.video_tree.heading("Dateiname", text="Dateiname")
-        self.video_tree.heading("Format", text="Format")
-        self.video_tree.heading("Dauer", text="Dauer")
-        self.video_tree.heading("Größe", text="Größe")
-        self.video_tree.heading("Datum", text="Datum")
-        self.video_tree.heading("Uhrzeit", text="Uhrzeit")
-        self.video_tree.heading("Progress", text="Fortschritt")
-        self.video_tree.heading("WM", text="💧")
+        self._video_heading_base = {
+            "Nr": "#", "Dateiname": "Dateiname", "Format": "Format", "Dauer": "Dauer",
+            "Größe": "Größe", "Datum": "Datum", "Uhrzeit": "Uhrzeit", "Progress": "Fortschritt", "WM": "💧",
+        }
+        for col in ("Nr", "Dateiname", "Format", "Dauer", "Größe", "Datum", "Uhrzeit", "Progress"):
+            self.video_tree.heading(
+                col,
+                text=self._video_heading_base[col],
+                command=lambda c=col: self._on_video_heading_click(c),
+            )
+        self.video_tree.heading("WM", text=self._video_heading_base["WM"])
 
         self.video_tree.column("Nr", width=10, anchor="center")
         self.video_tree.column("Dateiname", width=180)
@@ -246,6 +259,8 @@ class DragDropFrame:
         tk.Button(video_button_frame, text="✕ Entfernen", command=self.remove_selected_video).pack(side=tk.LEFT, padx=2)
         tk.Button(video_button_frame, text="🗑 Alle Videos löschen", command=self.clear_videos).pack(side=tk.LEFT, padx=2)
 
+        self._refresh_video_heading_arrows()
+
     def create_photo_tab(self):
         """Erstellt den Foto-Tab mit Tabelle"""
         # Foto-Tabelle
@@ -266,12 +281,17 @@ class DragDropFrame:
         )
 
         # Spalten konfigurieren für Fotos
-        self.photo_tree.heading("Nr", text="#")
-        self.photo_tree.heading("Dateiname", text="Dateiname")
-        self.photo_tree.heading("Größe", text="Größe")
-        self.photo_tree.heading("Datum", text="Datum")
-        self.photo_tree.heading("Uhrzeit", text="Uhrzeit")
-        self.photo_tree.heading("WM", text="💧")
+        self._photo_heading_base = {
+            "Nr": "#", "Dateiname": "Dateiname", "Größe": "Größe", "Datum": "Datum",
+            "Uhrzeit": "Uhrzeit", "WM": "💧",
+        }
+        for col in ("Nr", "Dateiname", "Größe", "Datum", "Uhrzeit"):
+            self.photo_tree.heading(
+                col,
+                text=self._photo_heading_base[col],
+                command=lambda c=col: self._on_photo_heading_click(c),
+            )
+        self.photo_tree.heading("WM", text=self._photo_heading_base["WM"])
 
         self.photo_tree.column("Nr", width=10, anchor="center")
         self.photo_tree.column("Dateiname", width=250)
@@ -303,6 +323,8 @@ class DragDropFrame:
         tk.Button(photo_button_frame, text="✕ Entfernen", command=self.remove_selected_photo).pack(side=tk.LEFT, padx=2)
         tk.Button(photo_button_frame, text="🗑 Alle Fotos löschen", command=self.clear_photos).pack(side=tk.LEFT, padx=2)
 
+        self._refresh_photo_heading_arrows()
+
     def setup_drag_drop(self):
         self.drop_label.drop_target_register(DND_FILES)
         self.drop_label.dnd_bind('<<Drop>>', self.handle_drop)
@@ -331,6 +353,8 @@ class DragDropFrame:
                 valid_photos.extend(p)
 
         if valid_videos or valid_photos:
+            valid_videos = sort_paths_by_basename(valid_videos)
+            valid_photos = sort_paths_by_basename(valid_photos)
             # Prüfe Video-Formate wenn mehrere Videos hinzugefügt werden
             needs_reencoding_info = None
             if len(valid_videos) > 0 and len(self.video_paths) + len(valid_videos) > 1:
@@ -492,10 +516,13 @@ class DragDropFrame:
         new_photos_added = False
         imported_paths = []
         imported_history_hashes = []
-        added_photo_paths_this_batch = []
+        photo_batch_paths = []
         pil_photo_cache = {}
 
         try:
+            new_videos = sort_paths_by_basename(list(new_videos)) if new_videos else []
+            new_photos = sort_paths_by_basename(list(new_photos)) if new_photos else []
+
             settings = self.app.config.get_settings()
             skip_processed = settings.get("sd_skip_processed", False)
             skip_processed_manual = settings.get("sd_skip_processed_manual", False)
@@ -633,9 +660,8 @@ class DragDropFrame:
 
                 elif ftype == 'photo':
                     # Pseudo copy for photos since we don't copy them normally
-                    if source_path not in self.photo_paths:
-                        self.photo_paths.append(source_path)
-                        added_photo_paths_this_batch.append(source_path)
+                    if source_path not in self.photo_paths and source_path not in photo_batch_paths:
+                        photo_batch_paths.append(source_path)
                         new_photos_added = True
                         
                         copied_bytes += file_size
@@ -656,6 +682,30 @@ class DragDropFrame:
                                     imported_at=datetime.now().isoformat()
                                 )
                                 imported_history_hashes.append(identity_hash)
+
+            added_photo_paths_this_batch = []
+            if dialog.cancel_requested.is_set():
+                print("Import abgebrochen, führe Rollback durch...")
+                self.parent.after(0, dialog.status_var.set, "Rollback...")
+                for p in imported_paths:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+
+                history_store = MediaHistoryStore.instance()
+                conn = history_store.get_connection()
+                if conn:
+                    cursor = conn.cursor()
+                    for h in imported_history_hashes:
+                        cursor.execute("DELETE FROM media_history WHERE id_hash = ?", (h,))
+                    conn.commit()
+            else:
+                imported_paths = sort_paths_by_basename(imported_paths)
+                photo_batch_paths = sort_paths_by_basename(photo_batch_paths)
+                self.video_paths.extend(imported_paths)
+                self.photo_paths.extend(photo_batch_paths)
+                added_photo_paths_this_batch = photo_batch_paths
 
             # Schwere PIL-Arbeit im Worker, damit der Dialog sichtbar bleibt und der Mainthread nicht einfriert
             if not dialog.cancel_requested.is_set() and added_photo_paths_this_batch:
@@ -688,30 +738,6 @@ class DragDropFrame:
                             img.close()
                     except Exception as e:
                         print(f"Fehler beim Vorberechnen des Thumbnails für {photo_path}: {e}")
-
-            if dialog.cancel_requested.is_set():
-                print("Import abgebrochen, führe Rollback durch...")
-                self.parent.after(0, dialog.status_var.set, "Rollback...")
-                for p in imported_paths:
-                    try:
-                        os.remove(p)
-                    except:
-                        pass
-                
-                # Rollback photos
-                # We need to find the photos we added and remove them
-                # (handled simply by not updating video_paths for videos, but for photos we appended to self.photo_paths)
-                
-                # Rollback history
-                history_store = MediaHistoryStore.instance()
-                conn = history_store.get_connection()
-                if conn:
-                    cursor = conn.cursor()
-                    for h in imported_history_hashes:
-                        cursor.execute("DELETE FROM media_history WHERE id_hash = ?", (h,))
-                    conn.commit()
-            else:
-                self.video_paths.extend(imported_paths)
 
             cancelled = dialog.cancel_requested.is_set()
             cache_snapshot = pil_photo_cache if not cancelled else {}
@@ -966,20 +992,12 @@ class DragDropFrame:
             return "Unbekannt"
 
     def _get_file_date_fallback(self, video_path):
-        """Ermittelt das Erstellungsdatum der Datei"""
-        try:
-            modification_time = os.path.getmtime(video_path)
-            return time.strftime("%d.%m.%Y", time.localtime(modification_time))
-        except:
-            return "Unbekannt"
+        """Erstellungsdatum (Dateisystem; siehe file_times)."""
+        return format_creation_date(video_path)
 
     def _get_file_time_fallback(self, video_path):
-        """Ermittelt die Erstellungsuhrzeit der Datei"""
-        try:
-            modification_time = os.path.getmtime(video_path)
-            return time.strftime("%H:%M:%S", time.localtime(modification_time))
-        except:
-            return "Unbekannt"
+        """Erstellungsuhrzeit (Dateisystem; siehe file_times)."""
+        return format_creation_time(video_path)
 
     def _get_video_format_fallback(self, video_path):
         """Ermittelt das Video-Format (Auflösung und FPS) mit ffprobe"""
@@ -1018,6 +1036,184 @@ class DragDropFrame:
             return "---"
 
     # --- ENDE Fallback-Methoden ---
+
+    # --- Tabellen-Sortierung (Spaltenköpfe) ---
+    def _parse_duration_sort_value(self, s):
+        if not s or str(s).strip() in ("--:--", "?:??"):
+            return float("inf")
+        s = str(s).strip()
+        if ":" in s:
+            parts = s.split(":")
+            try:
+                if len(parts) == 2:
+                    return int(parts[0]) * 60 + int(parts[1])
+            except ValueError:
+                pass
+        return float("inf")
+
+    def _parse_size_sort_value(self, s):
+        if not s or str(s).strip() in ("Unbekannt", "--"):
+            return float("inf")
+        s = str(s).strip().upper().replace(",", ".")
+        try:
+            if "MB" in s:
+                num = float(s.split("MB")[0].strip())
+                return num * 1024 * 1024
+            if "KB" in s:
+                num = float(s.split("KB")[0].strip())
+                return num * 1024
+        except ValueError:
+            pass
+        return float("inf")
+
+    def _creation_timestamp_sort_value(self, path):
+        ts = get_creation_timestamp(path)
+        return ts if ts is not None else 0.0
+
+    def _video_sort_key(self, path, col, values):
+        bn = os.path.basename(path)
+        v = values if values else ()
+        if col == "Dateiname":
+            return (0, natural_sort_key(bn))
+        if col == "Format":
+            fmt = v[2] if len(v) > 2 else ""
+            return (0, natural_sort_key(str(fmt)))
+        if col == "Dauer":
+            ds = v[3] if len(v) > 3 else ""
+            return (0, self._parse_duration_sort_value(ds))
+        if col == "Größe":
+            return (0, self._parse_size_sort_value(v[4] if len(v) > 4 else ""))
+        if col in ("Datum", "Uhrzeit"):
+            return (0, self._creation_timestamp_sort_value(path))
+        if col == "Progress":
+            pr = v[7] if len(v) > 7 else ""
+            return (0, natural_sort_key(str(pr)))
+        return (1, natural_sort_key(bn))
+
+    def _photo_sort_key(self, path, col, values):
+        bn = os.path.basename(path)
+        v = values if values else ()
+        if col == "Dateiname":
+            return (0, natural_sort_key(bn))
+        if col == "Größe":
+            return (0, self._parse_size_sort_value(v[2] if len(v) > 2 else ""))
+        if col in ("Datum", "Uhrzeit"):
+            return (0, self._creation_timestamp_sort_value(path))
+        return (1, natural_sort_key(bn))
+
+    def _refresh_video_heading_arrows(self):
+        arrow_u = " \u25b2"
+        arrow_d = " \u25bc"
+        sort_cols = ("Nr", "Dateiname", "Format", "Dauer", "Größe", "Datum", "Uhrzeit", "Progress")
+        for col in sort_cols:
+            base = self._video_heading_base[col]
+            text = base + (arrow_d if self._video_sort_desc else arrow_u) if col == self._video_sort_column else base
+            self.video_tree.heading(
+                col,
+                text=text,
+                command=lambda c=col: self._on_video_heading_click(c),
+            )
+        self.video_tree.heading("WM", text=self._video_heading_base["WM"])
+
+    def _refresh_photo_heading_arrows(self):
+        arrow_u = " \u25b2"
+        arrow_d = " \u25bc"
+        sort_cols = ("Nr", "Dateiname", "Größe", "Datum", "Uhrzeit")
+        for col in sort_cols:
+            base = self._photo_heading_base[col]
+            text = base + (arrow_d if self._photo_sort_desc else arrow_u) if col == self._photo_sort_column else base
+            self.photo_tree.heading(
+                col,
+                text=text,
+                command=lambda c=col: self._on_photo_heading_click(c),
+            )
+        self.photo_tree.heading("WM", text=self._photo_heading_base["WM"])
+
+    def _on_video_heading_click(self, col):
+        if col not in ("Nr", "Dateiname", "Format", "Dauer", "Größe", "Datum", "Uhrzeit", "Progress"):
+            return
+        if self._video_sort_column == col:
+            self._video_sort_desc = not self._video_sort_desc
+        else:
+            self._video_sort_column = col
+            self._video_sort_desc = False
+        self._apply_video_sort()
+        self._refresh_video_heading_arrows()
+
+    def _on_photo_heading_click(self, col):
+        if col not in ("Nr", "Dateiname", "Größe", "Datum", "Uhrzeit"):
+            return
+        if self._photo_sort_column == col:
+            self._photo_sort_desc = not self._photo_sort_desc
+        else:
+            self._photo_sort_column = col
+            self._photo_sort_desc = False
+        self._apply_photo_sort()
+        self._refresh_photo_heading_arrows()
+
+    def _apply_video_sort(self):
+        col = self._video_sort_column
+        desc = self._video_sort_desc
+        if not self.video_paths:
+            return
+        wm_path = None
+        if self.watermark_clip_index is not None and 0 <= self.watermark_clip_index < len(self.video_paths):
+            wm_path = self.video_paths[self.watermark_clip_index]
+
+        if col == "Nr":
+            if desc:
+                self.video_paths.reverse()
+        else:
+            children = self.video_tree.get_children()
+            if len(children) == len(self.video_paths):
+                vals_list = [self.video_tree.item(ch, "values") for ch in children]
+            else:
+                vals_list = [() for _ in self.video_paths]
+            rows = list(zip(self.video_paths, vals_list))
+            rows.sort(
+                key=lambda r: self._video_sort_key(r[0], col, r[1]),
+                reverse=desc,
+            )
+            self.video_paths = [r[0] for r in rows]
+
+        if wm_path is not None:
+            try:
+                self.watermark_clip_index = self.video_paths.index(wm_path)
+            except ValueError:
+                self.watermark_clip_index = None
+
+        self._update_video_table()
+        self._update_app_preview()
+
+    def _apply_photo_sort(self):
+        col = self._photo_sort_column
+        desc = self._photo_sort_desc
+        if not self.photo_paths:
+            return
+        marked = {self.photo_paths[i] for i in self.watermark_photo_indices}
+
+        if col == "Nr":
+            if desc:
+                self.photo_paths.reverse()
+        else:
+            children = self.photo_tree.get_children()
+            if len(children) == len(self.photo_paths):
+                vals_list = [self.photo_tree.item(ch, "values") for ch in children]
+            else:
+                vals_list = [() for _ in self.photo_paths]
+            rows = list(zip(self.photo_paths, vals_list))
+            rows.sort(
+                key=lambda r: self._photo_sort_key(r[0], col, r[1]),
+                reverse=desc,
+            )
+            self.photo_paths = [r[0] for r in rows]
+
+        self.watermark_photo_indices = [
+            i for i, p in enumerate(self.photo_paths) if p in marked
+        ]
+
+        self._update_photo_table()
+        self._update_photo_preview()
 
     # --- NEUE METHODEN (von app.py aufgerufen) ---
     def refresh_table(self):

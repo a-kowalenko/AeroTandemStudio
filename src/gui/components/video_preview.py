@@ -15,6 +15,7 @@ from PIL import Image, ImageTk
 from .progress_indicator import ProgressHandler
 from .circular_spinner import CircularSpinner
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
+from src.utils.file_times import format_creation_date, format_creation_time
 from src.utils.hardware_acceleration import HardwareAccelerationDetector
 from src.video.parallel_processor import ParallelVideoProcessor
 from typing import List, Dict, Callable  # NEU
@@ -950,7 +951,8 @@ class VideoPreview:
             if needs_reencoding and len(videos_to_process) > 0:
                 self.parent.after(0, self.app.drag_drop.show_normal_mode)
 
-        self.parent.after(0, self.progress_handler.reset)
+        # Kein reset hier: Die Leiste bleibt sichtbar für die anschließende FFmpeg-Concat-Phase
+        # (_create_fast_combined_video). Zurücksetzen in _update_ui_success / Fehler / Abbruch.
         return temp_copy_paths
 
     def _copy_without_thumbnails(self, input_path, output_path):
@@ -1823,6 +1825,100 @@ class VideoPreview:
             self.pending_restart_callback = None
             callback()
 
+    def _stop_combine_indeterminate_if_any(self):
+        if not getattr(self, "_combine_indeterminate_active", False):
+            return
+        if self.progress_handler:
+            try:
+                self.progress_handler.progress_bar.stop()
+            except tk.TclError:
+                pass
+            try:
+                self.progress_handler.progress_bar.config(mode="determinate", maximum=100)
+            except tk.TclError:
+                pass
+        self._combine_indeterminate_active = False
+
+    def _reset_progress_handler_safe(self):
+        """Blendet Fortschritt aus (inkl. undefinierter Kombinieren-Lauf)."""
+        self._stop_combine_indeterminate_if_any()
+        if self.progress_handler:
+            self.progress_handler.reset()
+
+    def _format_duration_compact(self, seconds):
+        seconds = max(0.0, float(seconds))
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        if h > 0:
+            return f"{h:d}:{m:02d}:{s:02d}"
+        return f"{m:d}:{s:02d}"
+
+    def _begin_combine_progress_ui(self, copy_paths):
+        """Hauptthread: Fortschrittsbalken für FFmpeg-Concat anzeigen."""
+        if not self.progress_handler:
+            self.progress_handler = ProgressHandler(self.progress_frame)
+        self._stop_combine_indeterminate_if_any()
+        self.progress_handler.pack_progress_bar_right()
+        try:
+            durations = self._get_clip_durations_seconds(copy_paths)
+            total = float(sum(durations))
+        except Exception:
+            total = 0.0
+        self._combine_total_sec = max(total, 0.0)
+        self._combine_use_indeterminate = self._combine_total_sec < 0.05
+        bar = self.progress_handler.progress_bar
+        if self._combine_use_indeterminate:
+            try:
+                bar.config(mode="indeterminate", maximum=100)
+                bar.start(12)
+            except tk.TclError:
+                pass
+            self._combine_indeterminate_active = True
+            self.progress_handler.eta_label.config(text="Kombiniere…")
+            self.progress_handler.encoding_details_label.config(text="FFmpeg concat…")
+        else:
+            self._combine_indeterminate_active = False
+            try:
+                bar.stop()
+            except tk.TclError:
+                pass
+            bar.config(mode="determinate", maximum=100)
+            bar["value"] = 0
+            self.progress_handler.eta_label.config(text="0%")
+            self.progress_handler.encoding_details_label.config(
+                text=f"Kombiniere {len(copy_paths)} Clip(s)…"
+            )
+        self.parent.update_idletasks()
+
+    def _apply_combine_progress_ui(self, pct, cur_sec, total_sec):
+        """Hauptthread: Fortschritt während Concat aktualisieren."""
+        if not self.progress_handler:
+            return
+        if getattr(self, "_combine_use_indeterminate", False):
+            return
+        try:
+            self.progress_handler.progress_bar["value"] = pct
+            self.progress_handler.eta_label.config(text=f"{int(min(100, pct))}%")
+            ct = self._format_duration_compact(cur_sec)
+            tt = self._format_duration_compact(total_sec)
+            self.progress_handler.encoding_details_label.config(text=f"Kombiniere… {ct} / {tt}")
+            self.parent.update_idletasks()
+        except tk.TclError:
+            pass
+
+    def _parse_ffmpeg_progress_seconds(self, line):
+        if not line:
+            return None
+        m = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
+        if m:
+            h, mi, s = m.groups()
+            return int(h) * 3600 + int(mi) * 60 + float(s)
+        m2 = re.search(r"out_time_ms=(\d+)", line)
+        if m2:
+            return int(m2.group(1)) / 1_000_000.0
+        return None
+
     def _create_fast_combined_video(self, video_paths):
         """Kombiniert Videos schnell ohne Re-Encoding (jetzt für die Kopien verwendet)"""
         concat_list_path = os.path.join(tempfile.gettempdir(), "preview_concat_list.txt")
@@ -1846,6 +1942,20 @@ class VideoPreview:
 
         print(f"Kombiniere {len(video_paths)} Videos mit FFmpeg concat...")
 
+        ui_ready = threading.Event()
+
+        def _kick_combine_ui():
+            try:
+                self._begin_combine_progress_ui(video_paths)
+            finally:
+                ui_ready.set()
+
+        self.parent.after(0, _kick_combine_ui)
+        ui_ready.wait(timeout=15.0)
+
+        total_sec = float(getattr(self, "_combine_total_sec", 0.0) or 0.0)
+        cur_best = 0.0
+
         self.ffmpeg_process = subprocess.Popen([
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path,
             "-c", "copy", "-movflags", "+faststart", output_path
@@ -1853,41 +1963,48 @@ class VideoPreview:
             universal_newlines=True, encoding='utf-8', errors='replace',
             creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
-        # WICHTIG: Lese stderr um Pipe-Buffer-Overflow zu verhindern (verhindert Hängen!)
+        # WICHTIG: stderr lesen (Pipe-Buffer) und time=/out_time_ms für Fortschritt auswerten
         stderr_lines = []
 
         while self.ffmpeg_process.poll() is None:
             if self.cancellation_event.is_set():
                 print("Abbruch-Signal empfangen. Terminiere FFmpeg (concat)...")
                 self.ffmpeg_process.terminate()
-                self.ffmpeg_process.wait()
+                try:
+                    self.ffmpeg_process.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    self.ffmpeg_process.kill()
+                    self.ffmpeg_process.wait()
                 self.ffmpeg_process = None
+                self.parent.after(0, self._stop_combine_indeterminate_if_any)
                 try:
                     os.remove(concat_list_path)
                 except OSError:
                     pass
                 return None
 
-            # Lese stderr um Buffer nicht volllaufen zu lassen
             try:
                 line = self.ffmpeg_process.stderr.readline()
                 if line:
                     stderr_lines.append(line)
-                    # Zeige Fortschritt (optional)
-                    if 'time=' in line.lower():
-                        # Extrahiere Zeit für Fortschrittsanzeige
-                        pass
-            except:
+                    if total_sec > 0 and not getattr(self, "_combine_use_indeterminate", False):
+                        tsec = self._parse_ffmpeg_progress_seconds(line)
+                        if tsec is not None and tsec >= cur_best:
+                            cur_best = tsec
+                            pct = min(99.5, (cur_best / total_sec) * 100.0)
+                            p, c, tt = pct, cur_best, total_sec
+                            self.parent.after(
+                                0, lambda p=p, c=c, tt=tt: self._apply_combine_progress_ui(p, c, tt))
+            except Exception:
                 pass
 
-            time.sleep(0.05)  # Kürzeres Intervall für bessere Responsiveness
+            time.sleep(0.04)
 
-        # Hole restlichen stderr-Output
         try:
             remaining_stderr = self.ffmpeg_process.stderr.read()
             if remaining_stderr:
                 stderr_lines.append(remaining_stderr)
-        except:
+        except Exception:
             pass
 
         returncode = self.ffmpeg_process.returncode
@@ -1900,8 +2017,13 @@ class VideoPreview:
 
         if returncode == 0:
             print(f"✅ Kombiniertes Video erstellt: {output_path}")
+            if total_sec > 0 and not getattr(self, "_combine_use_indeterminate", False):
+                self.parent.after(
+                    0, lambda tt=total_sec: self._apply_combine_progress_ui(100.0, tt, tt))
+            self.parent.after(0, self._stop_combine_indeterminate_if_any)
             return output_path
         else:
+            self.parent.after(0, self._stop_combine_indeterminate_if_any)
             if not self.cancellation_event.is_set():
                 # Zeige FFmpeg-Fehler
                 stderr_text = ''.join(stderr_lines)
@@ -2043,7 +2165,7 @@ class VideoPreview:
         """
         Aktualisiert UI nach erfolgreicher Vorschau-Erstellung.
         """
-        if self.progress_handler: self.parent.after(0, self.progress_handler.reset)
+        self.parent.after(0, self._reset_progress_handler_safe)
 
         # Metadaten von den *Kopien* berechnen (jetzt aus dem Cache)
         total_duration_s = 0
@@ -2114,7 +2236,7 @@ class VideoPreview:
 
     def _update_ui_error(self, error_msg):
         """Aktualisiert UI bei Fehler"""
-        if self.progress_handler: self.parent.after(0, self.progress_handler.reset)
+        self.parent.after(0, self._reset_progress_handler_safe)
         self.status_label.config(text=error_msg, fg="red")
         self.clear_preview_info()
         # self.play_button.config(state="disabled")  # ENTFERNT
@@ -2243,8 +2365,7 @@ class VideoPreview:
 
     def _update_ui_success_after_cut(self, copy_paths, standardized_this_run=False):
         """Aktualisiert die UI nach einer erfolgreichen *Regenerierung* (Schnitt)."""
-        if self.progress_handler:
-            self.parent.after(0, self.progress_handler.reset)
+        self.parent.after(0, self._reset_progress_handler_safe)
 
         # Metadaten von den (möglicherweise geschnittenen) Kopien berechnen (aus Cache)
         total_duration_s = 0
@@ -2420,7 +2541,7 @@ class VideoPreview:
 
     def _update_ui_cancelled(self, event=None):
         """Updates UI after creation was cancelled."""
-        if self.progress_handler: self.parent.after(0, self.progress_handler.reset)
+        self.parent.after(0, self._reset_progress_handler_safe)
         self.status_label.config(text="Vorschau-Erstellung abgebrochen", fg="orange")
         self.clear_preview_info()
         # self.play_button.config(state="disabled")  # ENTFERNT
@@ -2670,20 +2791,12 @@ class VideoPreview:
             return "Unbekannt"
 
     def _get_file_date(self, video_path):
-        """Ermittelt das Erstellungsdatum der Datei"""
-        try:
-            modification_time = os.path.getmtime(video_path)
-            return time.strftime("%d.%m.%Y", time.localtime(modification_time))
-        except:
-            return "Unbekannt"
+        """Erstellungsdatum (Dateisystem; siehe file_times)."""
+        return format_creation_date(video_path)
 
     def _get_file_time(self, video_path):
-        """Ermittelt die Erstellungsuhrzeit der Datei"""
-        try:
-            modification_time = os.path.getmtime(video_path)
-            return time.strftime("%H:%M:%S", time.localtime(modification_time))
-        except:
-            return "Unbekannt"
+        """Erstellungsuhrzeit (Dateisystem; siehe file_times)."""
+        return format_creation_time(video_path)
 
     def _get_video_format(self, video_path):
         """Ermittelt das Video-Format (Auflösung und FPS)"""

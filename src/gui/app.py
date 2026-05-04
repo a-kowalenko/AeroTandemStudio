@@ -30,6 +30,7 @@ from ..utils.config import ConfigManager
 from ..utils.validation import validate_form_data
 from ..utils.sd_card_monitor import SDCardMonitor
 from ..utils.media_history import MediaHistoryStore
+from ..utils.natural_sort import sort_paths_by_basename
 from ..installer.ffmpeg_installer import ensure_ffmpeg_installed
 from ..utils.file_utils import test_server_connection
 from ..installer.updater import initialize_updater
@@ -2579,6 +2580,8 @@ class VideoGeneratorApp:
 
             # Importiere gefilterte Dateien
             if video_files or photo_files:
+                video_files = sort_paths_by_basename(video_files)
+                photo_files = sort_paths_by_basename(photo_files)
                 # Füge Dateien zum Drag&Drop hinzu
                 if self.drag_drop:
                     self.drag_drop.add_files(video_files, photo_files)

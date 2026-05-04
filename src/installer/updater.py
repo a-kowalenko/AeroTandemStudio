@@ -1,6 +1,7 @@
 ﻿import json
 import sys
 import os
+import time
 import subprocess
 import tempfile
 import threading
@@ -539,8 +540,13 @@ def download_and_install_thread(installer_url, progress_queue, cancel_event):
 
             total_size = int(r.headers.get('content-length', 0))
             downloaded_size = 0
+            last_emit = 0.0
+            last_percent_emitted = -1
 
-            # Download mit Fortschritts-Updates
+            if total_size > 0:
+                progress_queue.put((0, total_size))
+
+            # Download mit gedrosselten Fortschritts-Updates (weniger UI-Sprünge)
             with open(installer_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=512 * 1024):  # 512KB chunks
                     if cancel_event.is_set():
@@ -548,7 +554,20 @@ def download_and_install_thread(installer_url, progress_queue, cancel_event):
 
                     f.write(chunk)
                     downloaded_size += len(chunk)
-                    progress_queue.put((downloaded_size, total_size))
+                    now = time.monotonic()
+                    if total_size > 0:
+                        pct = min(100, int((downloaded_size / total_size) * 100))
+                        if pct != last_percent_emitted or now - last_emit >= 0.09:
+                            progress_queue.put((downloaded_size, total_size))
+                            last_percent_emitted = pct
+                            last_emit = now
+                    else:
+                        if now - last_emit >= 0.12:
+                            progress_queue.put((downloaded_size, total_size))
+                            last_emit = now
+
+            if total_size > 0 and downloaded_size > 0:
+                progress_queue.put((downloaded_size, total_size))
 
         # Nochmal auf Abbruch prüfen nach Download
         if cancel_event.is_set():
@@ -655,29 +674,39 @@ class AskUpdateDialog(tk.Toplevel):
         super().__init__(parent)
         self.transient(parent)
         self.grab_set()
-        self.title("Update verfügbar!")
+        self.title("Update verfügbar")
 
         self.result = None
         self.version_to_ignore = version
 
         # Setze Mindestgröße für Dialog
-        self.minsize(500, 400)
+        self.minsize(520, 420)
+        self.configure(padx=4, pady=4)
+
+        title_label = tk.Label(
+            self,
+            text="Neues Update verfügbar",
+            justify=tk.LEFT,
+            anchor="w",
+            font=("Arial", 12, "bold"),
+        )
+        title_label.pack(padx=22, pady=(18, 6), anchor="w")
 
         # Versions-Info Text (oben)
         info_text = (
-            f"Eine neue Version ({version}) ist verfügbar.\n"
-            f"Ihre installierte Version: {app_version}"
+            f"Version {version} kann installiert werden.\n"
+            f"Aktuell installiert: {app_version}"
         )
         info_label = tk.Label(self, text=info_text, justify=tk.LEFT, anchor="w", font=("Arial", 10))
-        info_label.pack(padx=15, pady=(15, 10), anchor="w")
+        info_label.pack(padx=22, pady=(0, 12), anchor="w")
 
         # Änderungen Label
-        changes_label = tk.Label(self, text="Änderungen:", justify=tk.LEFT, anchor="w", font=("Arial", 10, "bold"))
-        changes_label.pack(padx=15, pady=(10, 5), anchor="w")
+        changes_label = tk.Label(self, text="Änderungen", justify=tk.LEFT, anchor="w", font=("Arial", 10, "bold"))
+        changes_label.pack(padx=22, pady=(4, 6), anchor="w")
 
         # Scrollbares Textfeld für Release Notes
         text_frame = tk.Frame(self)
-        text_frame.pack(padx=15, pady=(0, 10), fill=tk.BOTH, expand=True)
+        text_frame.pack(padx=22, pady=(0, 12), fill=tk.BOTH, expand=True)
 
         # Scrollbar
         scrollbar = tk.Scrollbar(text_frame)
@@ -690,8 +719,10 @@ class AskUpdateDialog(tk.Toplevel):
             yscrollcommand=scrollbar.set,
             height=10,
             width=60,
-            relief=tk.SUNKEN,
-            borderwidth=2,
+            relief=tk.FLAT,
+            borderwidth=1,
+            highlightthickness=1,
+            highlightbackground="#d0d0d0",
             font=("Arial", 9),
             state=tk.NORMAL
         )
@@ -714,11 +745,11 @@ class AskUpdateDialog(tk.Toplevel):
             variable=self.ignore_var,
             font=("Arial", 9)
         )
-        checkbox.pack(padx=15, pady=(5, 10), anchor="w")
+        checkbox.pack(padx=22, pady=(4, 14), anchor="w")
 
         # Buttons (unten)
         btn_frame = tk.Frame(self)
-        btn_frame.pack(pady=(0, 15), padx=15, fill=tk.X)
+        btn_frame.pack(pady=(0, 18), padx=22, fill=tk.X)
 
         # Später Button (links)
         later_btn = tk.Button(
@@ -766,40 +797,107 @@ class AskUpdateDialog(tk.Toplevel):
 class UpdateProgressDialog(tk.Toplevel):
     """Zeigt Download-Fortschritt und ermöglicht Abbruch"""
 
+    _POLL_MS = 50
+
     def __init__(self, parent, installer_url):
         super().__init__(parent)
         self.transient(parent)
         self.grab_set()
-        self.title("Update wird heruntergeladen...")
+        self.title("Update herunterladen")
+        self.minsize(440, 200)
+        self.configure(bg="#f5f5f5")
 
         self.installer_url = installer_url
         self.progress_queue = queue.Queue()
         self.cancel_event = threading.Event()
 
+        self._target_percent = 0.0
+        self._display_percent = 0.0
+        self._known_total = False
+
         self.protocol("WM_DELETE_WINDOW", self.on_cancel)
 
-        # GUI-Elemente
-        self.status_label = tk.Label(self, text="Lade Update herunter...")
-        self.status_label.pack(padx=20, pady=10)
+        style = ttk.Style(self)
+        style.configure(
+            "Update.Horizontal.TProgressbar",
+            troughcolor="#e8e8e8",
+            background="#4CAF50",
+            thickness=10,
+        )
 
-        # Starte mit unbestimmter Progressbar
-        self.progress_bar = ttk.Progressbar(self, orient=tk.HORIZONTAL,
-                                            length=300, mode='indeterminate')
-        self.progress_bar.pack(padx=20, pady=(0, 20))
-        self.progress_bar.start()
+        outer = tk.Frame(self, bg="#f5f5f5", padx=24, pady=20)
+        outer.pack(fill=tk.BOTH, expand=True)
 
-        self.cancel_button = tk.Button(self, text="Abbrechen", command=self.on_cancel)
-        self.cancel_button.pack(pady=(0, 10))
+        self.title_label = tk.Label(
+            outer,
+            text="Update wird geladen",
+            font=("Arial", 12, "bold"),
+            bg="#f5f5f5",
+            fg="#212121",
+            anchor="w",
+        )
+        self.title_label.pack(fill=tk.X, pady=(0, 6))
+
+        self.status_label = tk.Label(
+            outer,
+            text="Verbindung zum Server…",
+            font=("Arial", 10),
+            bg="#f5f5f5",
+            fg="#616161",
+            anchor="w",
+            justify=tk.LEFT,
+        )
+        self.status_label.pack(fill=tk.X, pady=(0, 14))
+
+        self.progress_bar = ttk.Progressbar(
+            outer,
+            orient=tk.HORIZONTAL,
+            length=380,
+            mode="determinate",
+            maximum=100,
+            value=0,
+            style="Update.Horizontal.TProgressbar",
+        )
+        self.progress_bar.pack(fill=tk.X, pady=(0, 18))
+
+        self.cancel_button = tk.Button(
+            outer,
+            text="Abbrechen",
+            command=self.on_cancel,
+            font=("Arial", 10),
+            width=14,
+        )
+        self.cancel_button.pack()
 
         _center_dialog(self)
         self.start_download()
         self.check_queue()
 
+    def _set_indeterminate(self, active):
+        if active:
+            if self.progress_bar["mode"] != "indeterminate":
+                self.progress_bar["mode"] = "indeterminate"
+                self.progress_bar.start()
+        else:
+            if self.progress_bar["mode"] == "indeterminate":
+                self.progress_bar.stop()
+                self.progress_bar["mode"] = "determinate"
+
+    def _apply_smooth_progress(self):
+        """Bewegt den angezeigten Wert weich Richtung Ziel (reduziert Ruckeln)."""
+        t = self._target_percent
+        d = self._display_percent
+        if abs(t - d) < 0.35:
+            self._display_percent = t
+        else:
+            self._display_percent = d + (t - d) * 0.45
+        self.progress_bar["value"] = self._display_percent
+
     def on_cancel(self):
         """Bestätigt und behandelt Abbruch durch Benutzer"""
         if messagebox.askyesno("Abbrechen?", "Möchten Sie das Update wirklich abbrechen?"):
             self.cancel_event.set()
-            self.status_label.config(text="Breche ab...")
+            self.status_label.config(text="Breche ab…")
             self.cancel_button.config(state="disabled")
 
     def start_download(self):
@@ -812,10 +910,9 @@ class UpdateProgressDialog(tk.Toplevel):
         self.download_thread.start()
 
     def check_queue(self):
-        """Verarbeitet Nachrichten vom Download-Thread (alle 100ms)"""
+        """Verarbeitet Nachrichten vom Download-Thread."""
         msg = None
         try:
-            # Hole letzte Nachricht aus Queue (leere Queue)
             while True:
                 msg = self.progress_queue.get_nowait()
         except queue.Empty:
@@ -823,54 +920,63 @@ class UpdateProgressDialog(tk.Toplevel):
 
         if msg:
             if isinstance(msg, tuple):
-                # Fortschrittsupdate
                 downloaded, total = msg
                 if total > 0:
-                    # Wechsle zu bestimmter Progressbar beim ersten Mal
-                    if self.progress_bar['mode'] == 'indeterminate':
-                        self.progress_bar.stop()
-                        self.progress_bar['mode'] = 'determinate'
-
-                    progress_percent = int((downloaded / total) * 100)
-                    self.progress_bar['value'] = progress_percent
-
-                    # Zeige MB und Prozent
+                    self._known_total = True
+                    self._set_indeterminate(False)
+                    self.title_label.config(text="Download läuft")
+                    progress_fraction = min(1.0, downloaded / total)
+                    self._target_percent = progress_fraction * 100.0
+                    progress_percent = int(progress_fraction * 100)
                     downloaded_mb = downloaded / (1024 * 1024)
                     total_mb = total / (1024 * 1024)
                     self.status_label.config(
-                        text=f"Lade herunter... {progress_percent}% ({downloaded_mb:.1f} / {total_mb:.1f} MB)")
+                        text=f"{progress_percent}% · {downloaded_mb:.1f} von {total_mb:.1f} MB",
+                        fg="#424242",
+                    )
                 else:
-                    # Keine Gesamtgröße bekannt, zeige nur MB
+                    self._set_indeterminate(True)
+                    self.title_label.config(text="Download läuft")
                     downloaded_mb = downloaded / (1024 * 1024)
-                    self.status_label.config(text=f"Lade herunter... ({downloaded_mb:.1f} MB)")
+                    self.status_label.config(
+                        text=f"Größe unbekannt · bisher {downloaded_mb:.1f} MB",
+                        fg="#424242",
+                    )
 
             elif msg == "DOWNLOAD_COMPLETE":
-                self.status_label.config(text="Download abgeschlossen. Starte Installation...")
-                self.cancel_button.pack_forget()  # Verstecke Abbruch-Button
-                self.progress_bar.stop()
-                self.progress_bar['mode'] = 'indeterminate'  # Warte-Animation
-                self.progress_bar.start()
+                self._set_indeterminate(False)
+                self._target_percent = 100.0
+                self._display_percent = 100.0
+                self.progress_bar["value"] = 100.0
+                self.title_label.config(text="Download fertig")
+                self.status_label.config(
+                    text="Installation wird vorbereitet…",
+                    fg="#424242",
+                )
+                self.cancel_button.pack_forget()
 
             elif msg == "EXIT_APP":
-                self.status_label.config(text="Update wird ausgeführt. App wird neu gestartet.")
-                self.master.after(500, self.master.destroy)  # Beende Haupt-App
-                return  # Beende Queue-Checking
+                self.status_label.config(text="Update startet. Die Anwendung wird neu gestartet.")
+                self.master.after(500, self.master.destroy)
+                return
 
             elif msg == "CANCELLED":
+                self._set_indeterminate(False)
                 self.status_label.config(text="Update abgebrochen.")
-                self.progress_bar.stop()
                 self.after(1000, self.destroy)
                 return
 
             elif isinstance(msg, str) and msg.startswith("Fehler:"):
-                self.progress_bar.stop()
+                self._set_indeterminate(False)
                 self.cancel_button.pack_forget()
                 messagebox.showerror("Update-Fehler", msg)
                 self.destroy()
                 return
 
-        # Nächsten Check planen
-        self.after(100, self.check_queue)
+        if self._known_total:
+            self._apply_smooth_progress()
+
+        self.after(self._POLL_MS, self.check_queue)
 
 
 def initialize_updater(root_gui, app_version, show_no_update_message=False, force_check=False):

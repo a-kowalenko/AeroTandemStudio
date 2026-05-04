@@ -9,7 +9,7 @@ Unicode true
 !define APP_PUBLISHER "Andreas Kowalenko"
 !define APP_WEBSITE "kowalenko.io"
 !define VLC_SETUP_EXE "dependency_installer\vlc-3.0.21-win64.exe"
-!define FFMPEG_SETUP_ZIP "ffmpeg-8.0-essentials_build.zip"
+!define FFMPEG_SETUP_ZIP "ffmpeg-windows-essentials.zip"
 !define FFMPEG_SETUP_ZIP_PATH "dependency_installer\${FFMPEG_SETUP_ZIP}"
 
 ; Name des Installers selbst

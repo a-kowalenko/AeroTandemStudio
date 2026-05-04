@@ -53,12 +53,68 @@ jobs:
           if (-not $vlcDownloaded) {
             throw "Could not download VLC installer from any configured HTTPS source."
           }
-          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1-essentials_build.zip" -OutFile "temp_ffmpeg.zip"
-          Expand-Archive -Path "temp_ffmpeg.zip" -DestinationPath "temp_ffmpeg" -Force
+          function Test-FFmpegArchive {
+            param(
+              [Parameter(Mandatory = $true)][string]$ZipPath
+            )
+
+            if (-not (Test-Path $ZipPath)) { return $false }
+            $zipItem = Get-Item $ZipPath -ErrorAction SilentlyContinue
+            if (-not $zipItem -or $zipItem.Length -le 0) { return $false }
+
+            $extractPath = "temp_ffmpeg_validate"
+            if (Test-Path $extractPath) { Remove-Item -Path $extractPath -Recurse -Force }
+
+            try {
+              Expand-Archive -Path $ZipPath -DestinationPath $extractPath -Force
+              $ffmpegExe = Get-ChildItem -Path $extractPath -Recurse -File -Filter "ffmpeg.exe" | Select-Object -First 1
+              return [bool]$ffmpegExe
+            } catch {
+              return $false
+            } finally {
+              if (Test-Path $extractPath) {
+                Remove-Item -Path $extractPath -Recurse -Force
+              }
+            }
+          }
+
+          $ffmpegUrls = @(
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+          )
+          $tempFfmpegZip = "temp_ffmpeg.zip"
+          $ffmpegDownloaded = $false
+          $failedFfmpegSources = @()
+
+          foreach ($ffmpegUrl in $ffmpegUrls) {
+            try {
+              if (Test-Path $tempFfmpegZip) { Remove-Item -Path $tempFfmpegZip -Force }
+              Invoke-WebRequest -Uri $ffmpegUrl -OutFile $tempFfmpegZip
+              if (Test-FFmpegArchive -ZipPath $tempFfmpegZip) {
+                Write-Host "FFmpeg downloaded and validated from $ffmpegUrl"
+                $ffmpegDownloaded = $true
+                break
+              }
+              $failedFfmpegSources += "$ffmpegUrl (invalid archive or ffmpeg.exe missing)"
+              Write-Host "Downloaded FFmpeg archive from $ffmpegUrl but validation failed, trying next source..."
+            } catch {
+              $failedFfmpegSources += "$ffmpegUrl ($($_.Exception.Message))"
+              Write-Host "Failed to download FFmpeg from $ffmpegUrl, trying next source..."
+            }
+          }
+
+          if (-not $ffmpegDownloaded) {
+            throw "Could not download a valid FFmpeg archive from any configured source. Tried: $($failedFfmpegSources -join '; ')"
+          }
+
+          Expand-Archive -Path $tempFfmpegZip -DestinationPath "temp_ffmpeg" -Force
           $RootDir = Get-ChildItem "temp_ffmpeg" -Directory | Select-Object -First 1
-          Compress-Archive -Path "$($RootDir.FullName)\*" -DestinationPath "dependency_installer\ffmpeg-8.0-essentials_build.zip" -Force
+          if (-not $RootDir) {
+            throw "FFmpeg archive extracted but no root directory was found."
+          }
+          Compress-Archive -Path "$($RootDir.FullName)\*" -DestinationPath "dependency_installer\ffmpeg-windows-essentials.zip" -Force
           Remove-Item -Path "temp_ffmpeg" -Recurse -Force
-          Remove-Item -Path "temp_ffmpeg.zip" -Force
+          Remove-Item -Path $tempFfmpegZip -Force
 
       - name: Build Windows Installer
         env:

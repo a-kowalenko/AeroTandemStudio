@@ -317,7 +317,7 @@ class VideoGeneratorApp:
         # Upload Frame erstellen (aus original setup_gui kopiert)
         self.upload_frame = tk.Frame(self.right_frame)
         progress_row = tk.Frame(self.upload_frame)
-        progress_row.pack(fill="x", side="top")
+        progress_row.pack(fill="x", side="top", pady=(2, 6))
 
         self.progress_handler = ProgressHandler(self.root, progress_row)
 
@@ -496,7 +496,7 @@ class VideoGeneratorApp:
 
         # Obere Zeile: Progress Handler ganz rechts
         progress_row = tk.Frame(self.upload_frame)
-        progress_row.pack(fill="x", side="top")
+        progress_row.pack(fill="x", side="top", pady=(2, 6))
 
         # Progress Handler (wird hier initialisiert, aber später gepackt)
         self.progress_handler = ProgressHandler(self.root, progress_row)
@@ -1434,11 +1434,20 @@ class VideoGeneratorApp:
         self.root.after(0, self.progress_handler.update_progress, step, total_steps)
 
     def _update_encoding_progress(self, task_name="Encoding", progress=None, fps=0.0, eta=None,
-                                  current_time=0.0, total_time=None, task_id=None):
+                                  current_time=0.0, total_time=None, task_id=None, encoding_lane=0):
         """Callback für Live-Encoding-Fortschritt"""
-        # Update ProgressHandler
-        self.root.after(0, self.progress_handler.update_encoding_progress,
-                       task_name, progress, fps, eta, current_time, total_time, task_id)
+        self.root.after(
+            0,
+            self.progress_handler.update_encoding_progress,
+            task_name,
+            progress,
+            fps,
+            eta,
+            current_time,
+            total_time,
+            task_id,
+            encoding_lane,
+        )
 
         # Update Drag&Drop Tabelle wenn task_id vorhanden (= Video-Index)
         if task_id is not None and progress is not None:
@@ -1449,8 +1458,13 @@ class VideoGeneratorApp:
             # Update Progress für das Video
             self.root.after(0, self.drag_drop.update_video_progress, task_id, progress, fps, eta)
 
-        # Update Video-Preview
-        if hasattr(self, 'video_preview') and self.video_preview and progress is not None:
+        # Video-Vorschau: nur Leiste 0 spiegeln (paralleler Wasserzeichen-Job nutzt Leiste 1)
+        if (
+            encoding_lane == 0
+            and hasattr(self, "video_preview")
+            and self.video_preview
+            and progress is not None
+        ):
             self.root.after(0, self.video_preview.update_encoding_progress, progress, fps, eta)
 
     def _handle_status_update(self, status_type, message):

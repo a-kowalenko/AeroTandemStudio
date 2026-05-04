@@ -1608,6 +1608,9 @@ class VideoPreview:
                     needs_reencoding = False
                     self.parent.after(0, lambda: self.encoding_label.config(
                         text="Verwende existierende Kopien"))
+                    self.parent.after(0, lambda n=len(cached_copy_paths): self.status_label.config(
+                        text=f"Alle {n} Clip(s) aus Cache – überspringe Vorbereitung",
+                        fg="blue"))
                 else:
                     # Mindestens eine Kopie fehlt
                     print("⚠️ Einige Kopien fehlen, erstelle Videos neu...")
@@ -1629,6 +1632,9 @@ class VideoPreview:
                         new_videos.append(p)
 
                 print(f"📊 Neue Videos: {len(new_videos)}, Gecachte: {len(cached_videos)}")
+                self.parent.after(0, lambda nv=len(new_videos), cv=len(cached_videos): self.status_label.config(
+                    text=f"Vorbereitung: {nv} neu, {cv} aus Cache…",
+                    fg="blue"))
 
                 if len(new_videos) > 0 and len(cached_videos) > 0:
                     # FALL 2a: Mix aus neuen und gecachten Videos
@@ -1642,6 +1648,9 @@ class VideoPreview:
                         # Wir kodieren nur die neuen Videos, gecachte bleiben
                         needs_reencoding = True
 
+                        self.parent.after(0, lambda n=len(new_videos): self.status_label.config(
+                            text=f"Kodiere {n} neue Clip(s), Cache bleibt erhalten…",
+                            fg="orange"))
                         # Kodiere nur neue Videos (mit speziellem Flag um Cache-Clear zu vermeiden)
                         new_encoded_paths = self._prepare_video_copies(new_videos, needs_reencoding=True, preserve_cache=True)
 
@@ -1658,6 +1667,9 @@ class VideoPreview:
                         # Gecachte Videos wurden nur kopiert (Stream-Copy)
                         # → Prüfe ob neue Videos kompatibel sind
                         print(f"Prüfe ob neue(s) Video(s) kompatibel mit gecachten...")
+                        self.parent.after(0, lambda: self.status_label.config(
+                            text="Prüfe Kompatibilität neuer mit gecachten Clips…",
+                            fg="blue"))
 
                         # Prüfe Format: ein gecachtes + alle neuen
                         test_videos = [cached_videos[0]] + new_videos
@@ -1667,6 +1679,9 @@ class VideoPreview:
                             # Neue Videos sind kompatibel → Stream-Copy
                             print("✅ Neue Videos kompatibel → Stream-Copy")
                             needs_reencoding = False
+                            self.parent.after(0, lambda: self.status_label.config(
+                                text="Neue Clips kompatibel – kopiere in Arbeitsordner…",
+                                fg="blue"))
                             new_copied_paths = self._prepare_video_copies(new_videos, needs_reencoding=False)
 
                             # Baue temp_copy_paths mit file-identity-basiertem Cache
@@ -1697,12 +1712,18 @@ class VideoPreview:
                                 self.metadata_cache.clear()
 
                             self.parent.after(0, lambda: self._update_encoding_info(format_info, target_codec))
+                            self.parent.after(0, lambda: self.status_label.config(
+                                text="Standardisiere alle Clips (Re-Encoding)…",
+                                fg="orange"))
                             temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding=True)
                             self.videos_were_reencoded = True  # Markiere als neu kodiert
 
                 elif len(new_videos) == len(video_paths):
                     # FALL 2b: Alle Videos sind neu (erste Beladung)
                     print(f"Prüfe Format von {len(video_paths)} neuen Videos...")
+                    self.parent.after(0, lambda n=len(video_paths): self.status_label.config(
+                        text=f"Analysiere Formate von {n} Clip(s)…",
+                        fg="blue"))
                     format_info = self._check_video_formats(video_paths)
 
                     # NEU: Prüfe Codec-Auswahl
@@ -1711,11 +1732,17 @@ class VideoPreview:
                         print(f"→ Codec '{selected_codec}' ausgewählt → ALLE Videos werden neu kodiert")
                         needs_reencoding = True
                         self.videos_were_reencoded = True
+                        self.parent.after(0, lambda c=selected_codec: self.status_label.config(
+                            text=f"Codec „{c}“ erzwungen – bereite alle Clips vor…",
+                            fg="orange"))
                     elif format_info["compatible"]:
                         # Alle gleich → Stream-Copy
                         print("✅ Alle Videos kompatibel → Stream-Copy")
                         needs_reencoding = False
                         self.videos_were_reencoded = False
+                        self.parent.after(0, lambda: self.status_label.config(
+                            text="Alle Formate gleich – Stream-Copy in Arbeitsordner…",
+                            fg="blue"))
                     else:
                         # Unterschiede → ALLE neu kodieren
                         print(f"⚠️ Format-Unterschiede: {format_info['details']}")
@@ -1725,6 +1752,9 @@ class VideoPreview:
                         # Wenn kein spezifischer Codec gewählt, wird standardisiert (h264)
                         if not target_codec:
                             target_codec = "h264"
+                        self.parent.after(0, lambda: self.status_label.config(
+                            text="Formate uneinheitlich – standardisiere alle Clips…",
+                            fg="orange"))
 
                     self.parent.after(0, lambda: self._update_encoding_info(format_info, target_codec))
                     temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding=needs_reencoding)
@@ -1743,9 +1773,11 @@ class VideoPreview:
                 self.parent.after(0, self._update_ui_cancelled)
                 return
 
-            print(f"Starte Kombinierung von {len(temp_copy_paths)} Videos...")
-            self.parent.after(0, lambda: self.status_label.config(
-                text="Kombiniere Videos (schnell)...", fg="blue"))
+            n_clips = len(temp_copy_paths)
+            print(f"Starte Kombinierung von {n_clips} Videos...")
+            self.parent.after(0, lambda n=n_clips: self.status_label.config(
+                text=f"Kombiniere {n} Clip(s) ohne Neuencode (FFmpeg concat)…",
+                fg="blue"))
 
             self.combined_video_path = self._create_fast_combined_video(temp_copy_paths)
 
@@ -2478,7 +2510,7 @@ class VideoPreview:
         """Gibt den Pfad des kombinierten Videos zurück"""
         return self.combined_video_path
 
-    def update_encoding_progress(self, progress, fps=None, eta=None):
+    def update_encoding_progress(self, progress, fps=None, eta=None, **_kwargs):
         """
         Aktualisiert die Encoding-Fortschrittsanzeige in der Video-Preview.
 

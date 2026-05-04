@@ -266,6 +266,7 @@ class VideoProcessor:
                 self._update_progress(2, TOTAL_STEPS)
                 self._update_status("Ermittle detaillierte Videoinformationen...")
                 video_params = self._get_video_info(combined_video_path)
+                final_mux_duration = self._estimate_final_mux_duration_sec(dauer, combined_video_path)
 
                 # Schritt 3: Textinhalte vorbereiten
                 self._check_for_cancellation()
@@ -326,6 +327,7 @@ class VideoProcessor:
                         ]
                         subprocess.run(cmd, capture_output=True, text=True, check=True,
                                       creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                        self._update_status("Stille Audiospur für Hauptvideo erstellt (concat demuxer).")
                     else:
                         temp_combined_path = combined_video_path
 
@@ -333,14 +335,16 @@ class VideoProcessor:
                     concat_list_path = os.path.join(tempfile.gettempdir(), "final_concat_list.txt")
                     temp_files.append(concat_list_path)
 
+                    self._update_status("Schreibe concat-Liste (Intro + Hauptvideo)...")
                     with open(concat_list_path, 'w', encoding='utf-8') as f:
                         # Escape Pfade für FFmpeg
                         intro_escaped = os.path.abspath(temp_intro_path).replace('\\', '/')
                         combined_escaped = os.path.abspath(temp_combined_path).replace('\\', '/')
                         f.write(f"file '{intro_escaped}'\n")
                         f.write(f"file '{combined_escaped}'\n")
+                    self._update_status("Concat-Liste erstellt.")
                 else:
-                    self._update_status("Normalisiere Videos für robustes Zusammenfügen (MPEG-TS)...")
+                    self._update_status("Intro: Umwandlung nach MPEG-TS (Vorbereitung Zusammenführung)...")
                     # Für H.264/HEVC: Verwende MPEG-TS (wie bisher)
                     bsf_map = {
                         'h264': 'h264_mp4toannexb',
@@ -359,6 +363,7 @@ class VideoProcessor:
 
                     subprocess.run(intro_cmd, capture_output=True, text=True, check=True,
                                   creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                    self._update_status("Intro nach MPEG-TS fertig. Hauptfilm: Umwandlung nach MPEG-TS...")
 
                     # Hauptvideo nach .ts konvertieren
                     self._check_for_cancellation()
@@ -385,6 +390,7 @@ class VideoProcessor:
 
                     subprocess.run(combined_cmd, capture_output=True, text=True, check=True,
                                   creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                    self._update_status("Hauptfilm nach MPEG-TS fertig.")
 
                 self._update_progress(6, TOTAL_STEPS)
 
@@ -402,6 +408,10 @@ class VideoProcessor:
                     else:
                         longest_clip_path = self._find_longest_clip(video_clip_paths)
                         print(f"Verwende längsten Clip für Wasserzeichen: {longest_clip_path}")
+                    if longest_clip_path:
+                        self._update_status(
+                            f"Wasserzeichen-Quellclip: {os.path.basename(str(longest_clip_path))}"
+                        )
                 else:
                     self._update_progress(7, TOTAL_STEPS)
 
@@ -441,10 +451,12 @@ class VideoProcessor:
                             temp_intro_ts_path,
                             temp_combined_ts_path,
                         )
-                        subprocess.run(
+                        self._run_ffmpeg_with_progress(
                             command,
-                            capture_output=True, text=True, check=True,
-                            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+                            final_mux_duration,
+                            "Finaler Schnitt (Intro + Video, parallel)",
+                            task_id=None,
+                            encoding_lane=0,
                         )
 
                     # Task 2: Wasserzeichen-Version erstellen
@@ -453,7 +465,8 @@ class VideoProcessor:
                             longest_clip_path,
                             watermark_video_output_path,
                             video_params,
-                            task_id=task_id
+                            task_id=task_id,
+                            encoding_lane=1,
                         )
 
                     # Beide Tasks parallel ausführen
@@ -486,10 +499,12 @@ class VideoProcessor:
                             temp_intro_ts_path,
                             temp_combined_ts_path,
                         )
-                        subprocess.run(
+                        self._run_ffmpeg_with_progress(
                             command,
-                            capture_output=True, text=True, check=True,
-                            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+                            final_mux_duration,
+                            "Finaler Schnitt (Intro + Video)",
+                            task_id=None,
+                            encoding_lane=0,
                         )
                     else:
                         self._update_progress(9, TOTAL_STEPS)
@@ -543,11 +558,16 @@ class VideoProcessor:
                     # 2. Preview-Verzeichnis erstellen (Ziel: base_output_dir/Preview_Foto)
                     try:
                         preview_dir = self._generate_watermark_photo_directory(base_output_dir)
+                        total_wm_photos = len(selected_photo_paths)
 
                         # 3. Jedes ausgewählte Foto verarbeiten
-                        for photo_path in selected_photo_paths:
+                        for wm_i, photo_path in enumerate(selected_photo_paths):
                             self._check_for_cancellation()
                             if os.path.exists(photo_path):
+                                self._update_status(
+                                    f"Foto-Wasserzeichen {wm_i + 1}/{total_wm_photos}: "
+                                    f"{os.path.basename(photo_path)}"
+                                )
                                 out_name = photo_rename_map.get(
                                     photo_path, os.path.basename(photo_path)
                                 )
@@ -568,10 +588,12 @@ class VideoProcessor:
             self._update_progress(step_photo, TOTAL_STEPS)
             copied_count = 0
             if photo_paths:
-                self._update_status("Kopiere Fotos...")
+                self._update_status("Kopiere Fotos (Start)...")
                 copied_count = self._copy_photos_to_output_directory(
                     photo_paths, base_output_dir, kunde, photo_rename_map
                 )
+                if copied_count:
+                    self._update_status(f"Fotos kopiert: {copied_count} Datei(en).")
             else:
                 self._update_status("Keine Fotos zum Kopieren ausgewählt.")
 
@@ -579,6 +601,7 @@ class VideoProcessor:
             self._check_for_cancellation()
 
             # Speichere MARKER Datei im Ausgabeordner (VOR dem Server-Upload!)
+            self._update_status("Schreibe Abschluss-Datei (_fertig.txt)...")
             marker_path = os.path.join(base_output_dir, "_fertig.txt")
             with open(marker_path, 'w') as marker_file:
                 try:
@@ -626,6 +649,10 @@ class VideoProcessor:
                 # Wir laden das gesamte Basis-Verzeichnis hoch (inkl. _fertig.txt)
                 success, message, server_path = self._upload_to_server(base_output_dir)
                 server_uploaded = success
+                if success:
+                    self._update_status(f"Server-Upload abgeschlossen ({message})")
+                else:
+                    self._update_status(f"Server-Upload fehlgeschlagen ({message})")
 
             # --- ABSCHLUSS (letzter Schritt) ---
             final_step = 13 if create_watermark_version else 12
@@ -694,7 +721,8 @@ class VideoProcessor:
 
         return full_output_path
 
-    def _create_video_with_watermark(self, input_video_path, output_path, video_params, task_id=None):
+    def _create_video_with_watermark(self, input_video_path, output_path, video_params, task_id=None,
+                                     encoding_lane=0):
         """
         Erstellt eine Video-Version mit Wasserzeichen über dem gesamten Video.
         NEU: Nutzt Hardware-Encoding wenn verfügbar, aber Software-Decoding für Filter-Kompatibilität.
@@ -761,10 +789,11 @@ class VideoProcessor:
         # Task Name basierend auf task_id
         task_name = f"Wasserzeichen-Video (Task {task_id})" if task_id else "Wasserzeichen-Video"
 
-        # WICHTIG: task_id wird NICHT an _run_ffmpeg_with_progress übergeben,
-        # da das Wasserzeichen-Video nicht in der drag_drop Tabelle ist
-        # und der Progress-Balken daher nirgendwo angezeigt werden sollte
-        self._run_ffmpeg_with_progress(command, total_duration, task_name, task_id=None)
+        # task_id nicht an FFmpeg-Progress: kein Eintrag in drag_drop für diese Vorschau.
+        # encoding_lane: 1 = zweite Zeile in der Haupt-UI bei parallelem Final-Job
+        self._run_ffmpeg_with_progress(
+            command, total_duration, task_name, task_id=None, encoding_lane=encoding_lane
+        )
 
     def _create_intro_with_silent_audio(self, output_path, dauer, v_params, drawtext_filter):
         """
@@ -900,7 +929,7 @@ class VideoProcessor:
 
         # Verwende neue Methode mit Live-Fortschritt
         try:
-            self._run_ffmpeg_with_progress(command, duration_float, "Intro-Erstellung")
+            self._run_ffmpeg_with_progress(command, duration_float, "Intro-Erstellung", encoding_lane=0)
         except subprocess.CalledProcessError as e:
             if self.cancel_event.is_set():
                 raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
@@ -975,10 +1004,18 @@ class VideoProcessor:
             os.makedirs(outside_dir, exist_ok=True)
 
         copied_files_count = 0
-        for photo_path in photo_paths:
+        total = len(photo_paths)
+        step = max(1, total // 12) if total > 12 else 1
+
+        for idx, photo_path in enumerate(photo_paths):
             self._check_for_cancellation()
             if not os.path.exists(photo_path):
                 continue
+
+            if idx % step == 0 or idx == total - 1:
+                self._update_status(
+                    f"Kopiere Fotos ({idx + 1}/{total}): {os.path.basename(photo_path)}"
+                )
 
             filename = rename_map.get(photo_path, os.path.basename(photo_path))
             copied_this_file = False
@@ -1569,6 +1606,24 @@ class VideoProcessor:
         if self.status_callback:
             self.status_callback("update", message)
 
+    def _estimate_final_mux_duration_sec(self, intro_dauer_str, combined_video_path):
+        """
+        Schätzt die Gesamtdauer Intro + kombiniertes Hauptvideo für FFmpeg-Fortschritt
+        beim finalen Neuencode (Intro + Body in einem Durchgang).
+        """
+        try:
+            intro_sec = float(intro_dauer_str)
+        except (TypeError, ValueError, AttributeError):
+            intro_sec = 8.0
+        body_sec = 0.0
+        if combined_video_path and os.path.exists(combined_video_path):
+            try:
+                body_sec = float(self._get_video_duration(combined_video_path))
+            except Exception:
+                body_sec = 0.0
+        total = intro_sec + body_sec
+        return total if total > 0.1 else None
+
     def _cleanup_temp_files(self, temp_files):
         for temp_file in temp_files:
             try:
@@ -1639,7 +1694,8 @@ class VideoProcessor:
     def reset_cancel_event(self):
         self.cancel_event.clear()
 
-    def _run_ffmpeg_with_progress(self, command, total_duration=None, task_name="Encoding", task_id=None):
+    def _run_ffmpeg_with_progress(self, command, total_duration=None, task_name="Encoding", task_id=None,
+                                  encoding_lane=0):
         """
         Führt FFmpeg-Befehl aus und liest den Fortschritt live aus.
 
@@ -1647,7 +1703,8 @@ class VideoProcessor:
             command: FFmpeg-Befehl als Liste
             total_duration: Gesamtdauer des Videos in Sekunden (für Fortschrittsberechnung)
             task_name: Name der Aufgabe für Status-Updates
-            task_id: Optional ID für parallele Tasks
+            task_id: Optional ID für parallele Tasks (z. B. Drag-Drop-Zeilen)
+            encoding_lane: 0/1 zweite Fortschrittszeile in der Haupt-UI (paralleler Final-Job)
 
         Returns:
             True bei Erfolg, wirft Exception bei Fehler
@@ -1749,7 +1806,8 @@ class VideoProcessor:
                                     eta=eta_str,
                                     current_time=current_time_sec,
                                     total_time=total_duration,
-                                    task_id=task_id
+                                    task_id=task_id,
+                                    encoding_lane=encoding_lane,
                                 )
                     else:
                         # Kein total_duration - zeige nur Zeit und FPS
@@ -1761,7 +1819,8 @@ class VideoProcessor:
                                 eta=None,
                                 current_time=current_time_sec,
                                 total_time=None,
-                                task_id=task_id
+                                task_id=task_id,
+                                encoding_lane=encoding_lane,
                             )
 
             # Warte auf Prozessende mit Timeout
@@ -1796,7 +1855,8 @@ class VideoProcessor:
                     eta="0:00",
                     current_time=total_duration,
                     total_time=total_duration,
-                    task_id=task_id
+                    task_id=task_id,
+                    encoding_lane=encoding_lane,
                 )
 
             return True

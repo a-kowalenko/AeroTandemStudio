@@ -3,7 +3,7 @@ from tkinter import ttk
 from PIL import Image, ImageTk
 import os
 
-from src.utils.file_times import format_creation_date, format_creation_time
+from src.utils.media_datetime import format_photo_table_datetime
 
 
 class PhotoPreview:
@@ -1035,9 +1035,8 @@ class PhotoPreview:
             self.info_labels["size"].config(text=f"{size_mb:.2f} MB")
 
             # Erstellungszeitpunkt (Dateisystem; konsistent mit Tabelle links)
-            self.info_labels["date"].config(
-                text=f"{format_creation_date(photo_path)} - {format_creation_time(photo_path)}"
-            )
+            fd, ft = format_photo_table_datetime(photo_path)
+            self.info_labels["date"].config(text=f"{fd} - {ft}")
 
         except Exception as e:
             print(f"Fehler beim Abrufen der Foto-Informationen: {e}")

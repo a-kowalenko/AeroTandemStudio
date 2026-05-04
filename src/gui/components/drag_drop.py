@@ -8,6 +8,7 @@ import subprocess
 import time
 import threading
 import shutil
+from typing import Optional
 
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.media_history import MediaHistoryStore
@@ -16,6 +17,13 @@ from src.utils.file_times import (
     format_creation_date,
     format_creation_time,
     get_creation_timestamp,
+)
+from src.utils.media_datetime import (
+    format_epoch_date,
+    format_epoch_time,
+    format_photo_table_datetime,
+    get_photo_display_epoch,
+    resolve_video_display_epoch,
 )
 
 # Mit handle_drop / Pipeline abgestimmt (v. a. .mp4 für Videos)
@@ -125,6 +133,8 @@ class DragDropFrame:
         self.watermark_photo_indices = []  # NEU: Liste für Foto-Mehrfachauswahl
         self.show_watermark_column = False  # NEU: Steuert Sichtbarkeit der Wasserzeichen-Spalte
         self.is_encoding = False  # NEU: Steuert Sichtbarkeit der Progress-Spalte vs. Datum/Uhrzeit
+        # Unix-Zeit der Quelldatei beim Import-Kopieren (Key: normpath der Kopie im temp_dir)
+        self._import_source_ts_by_dest: dict[str, float] = {}
         # Tabellen-Sortierung (Standard: Dateiname aufsteigend)
         self._video_sort_column = "Dateiname"
         self._video_sort_desc = False
@@ -637,6 +647,9 @@ class DragDropFrame:
                             
                     if not is_duplicate:
                         imported_paths.append(imported_path)
+                        ts_src = get_creation_timestamp(source_path)
+                        if ts_src is not None:
+                            self._import_source_ts_by_dest[os.path.normpath(imported_path)] = float(ts_src)
                         new_videos_added = True
                         if skip_processed and skip_processed_manual:
                             from datetime import datetime
@@ -692,6 +705,7 @@ class DragDropFrame:
                         os.remove(p)
                     except OSError:
                         pass
+                    self._import_source_ts_by_dest.pop(os.path.normpath(p), None)
 
                 history_store = MediaHistoryStore.instance()
                 conn = history_store.get_connection()
@@ -838,6 +852,10 @@ class DragDropFrame:
             # Kopiere Datei
             shutil.copy2(source_path, dest_path)
 
+            ts_src = get_creation_timestamp(source_path)
+            if ts_src is not None:
+                self._import_source_ts_by_dest[os.path.normpath(dest_path)] = float(ts_src)
+
             return dest_path
 
         except Exception as e:
@@ -886,6 +904,21 @@ class DragDropFrame:
         elif not qr_check_status:
             print("QR-Code-Prüfung wurde deaktiviert")
 
+    def get_source_import_epoch(self, copy_path: str) -> Optional[float]:
+        """Unix-Zeit der Quelldatei beim Kopieren ins Working-Verzeichnis (falls erfasst)."""
+        return self._import_source_ts_by_dest.get(os.path.normpath(copy_path))
+
+    def _video_row_sort_epoch(self, copy_path: str) -> float:
+        """Gleiche Zeitbasis wie Spalten Datum/Uhrzeit (Cache > Import-Map > ffprobe > Dateisystem)."""
+        if self.app and hasattr(self.app, "video_preview"):
+            md = self.app.video_preview.get_cached_metadata(copy_path)
+            if md:
+                ep = md.get("display_timestamp_epoch")
+                if ep is not None:
+                    return float(ep)
+        snap = self.get_source_import_epoch(copy_path)
+        return resolve_video_display_epoch(copy_path, snap, None)
+
     def _update_video_table(self):
         """
         Aktualisiert die Video-Tabelle.
@@ -920,21 +953,25 @@ class DragDropFrame:
                     filename = f"[LÄDT...] {filename}"
 
                 else:
-                    # Fall 3: Vorschau ist NICHT aktiv (z.B. beim ersten Hinzufügen).
-                    # Hier ist es OK, die langsamen Fallback-Methoden zu nutzen,
-                    # die ffprobe synchron aufrufen.
+                    # Fall 3: Vorschau ist NICHT aktiv — Import-Map / ffprobe / Kopie
                     duration = self._get_video_duration_fallback(original_path)
                     size = self._get_file_size_fallback(original_path)
-                    date = self._get_file_date_fallback(original_path)
-                    timestamp = self._get_file_time_fallback(original_path)
+                    te = self._video_row_sort_epoch(original_path)
+                    date = format_epoch_date(te)
+                    timestamp = format_epoch_time(te)
                     format_str = self._get_video_format_fallback(original_path)
 
             else:
                 # Fallback, falls self.app nicht existiert (sollte nicht passieren)
                 duration = self._get_video_duration_fallback(original_path)
                 size = self._get_file_size_fallback(original_path)
-                date = self._get_file_date_fallback(original_path)
-                timestamp = self._get_file_time_fallback(original_path)
+                te = resolve_video_display_epoch(
+                    original_path,
+                    self.get_source_import_epoch(original_path),
+                    None,
+                )
+                date = format_epoch_date(te)
+                timestamp = format_epoch_time(te)
                 format_str = self._get_video_format_fallback(original_path)
 
             # NEU: Wasserzeichen-Spalte
@@ -951,8 +988,7 @@ class DragDropFrame:
         for i, photo_path in enumerate(self.photo_paths, 1):
             filename = os.path.basename(photo_path)
             size = self._get_file_size_fallback(photo_path)  # Fotos verwenden immer Fallback
-            date = self._get_file_date_fallback(photo_path)
-            timestamp = self._get_file_time_fallback(photo_path)
+            date, timestamp = format_photo_table_datetime(photo_path)
 
             # NEU: Wasserzeichen-Status bestimmen
             watermark_value = "☑" if (i - 1) in self.watermark_photo_indices else "☐"
@@ -1066,9 +1102,8 @@ class DragDropFrame:
             pass
         return float("inf")
 
-    def _creation_timestamp_sort_value(self, path):
-        ts = get_creation_timestamp(path)
-        return ts if ts is not None else 0.0
+    def _photo_row_sort_epoch(self, path: str) -> float:
+        return get_photo_display_epoch(path)
 
     def _video_sort_key(self, path, col, values):
         bn = os.path.basename(path)
@@ -1084,7 +1119,7 @@ class DragDropFrame:
         if col == "Größe":
             return (0, self._parse_size_sort_value(v[4] if len(v) > 4 else ""))
         if col in ("Datum", "Uhrzeit"):
-            return (0, self._creation_timestamp_sort_value(path))
+            return (0, self._video_row_sort_epoch(path))
         if col == "Progress":
             pr = v[7] if len(v) > 7 else ""
             return (0, natural_sort_key(str(pr)))
@@ -1098,7 +1133,7 @@ class DragDropFrame:
         if col == "Größe":
             return (0, self._parse_size_sort_value(v[2] if len(v) > 2 else ""))
         if col in ("Datum", "Uhrzeit"):
-            return (0, self._creation_timestamp_sort_value(path))
+            return (0, self._photo_row_sort_epoch(path))
         return (1, natural_sort_key(bn))
 
     def _refresh_video_heading_arrows(self):
@@ -1328,6 +1363,7 @@ class DragDropFrame:
         if video_path in self.video_paths:
             index = self.video_paths.index(video_path)
             self.video_paths.pop(index)
+            self._import_source_ts_by_dest.pop(os.path.normpath(video_path), None)
 
             # Cache leeren
             if self.app and hasattr(self.app, 'video_preview'):
@@ -1347,6 +1383,7 @@ class DragDropFrame:
     def clear_videos(self):
         """Entfernt alle Videos"""
         self.video_paths.clear()
+        self._import_source_ts_by_dest.clear()
 
         if self.app and hasattr(self.app, "clear_pending_video_cuts"):
             self.app.clear_pending_video_cuts()

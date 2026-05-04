@@ -11,6 +11,7 @@ import time
 
 from .logger import CancellableProgressBarLogger, CancellationError
 from ..utils.file_utils import sanitize_filename
+from src.utils.media_datetime import get_photo_display_epoch
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.constants import HINTERGRUND_PATH
 from src.utils.constants import (
@@ -937,28 +938,8 @@ class VideoProcessor:
             raise
 
     def _get_photo_capture_dt(self, photo_path):
-        """EXIF DateTimeOriginal / DateTime, sonst Datei-mtime (wie Foto-Vorschau)."""
-        try:
-            from PIL import Image
-            with Image.open(photo_path) as img:
-                exif = img.getexif()
-                if exif:
-                    raw = exif.get(36867) or exif.get(306)  # DateTimeOriginal, DateTime
-                    if isinstance(raw, bytes):
-                        try:
-                            raw = raw.decode("utf-8", errors="ignore")
-                        except Exception:
-                            raw = None
-                    if raw and isinstance(raw, str):
-                        s = raw.strip()
-                        if len(s) >= 19:
-                            try:
-                                return datetime.strptime(s[:19], "%Y:%m:%d %H:%M:%S")
-                            except ValueError:
-                                pass
-        except Exception:
-            pass
-        return datetime.fromtimestamp(os.path.getmtime(photo_path))
+        """EXIF vor Dateisystem-Zeit — konsistent mit Tabellen-/media_datetime-Logik."""
+        return datetime.fromtimestamp(get_photo_display_epoch(photo_path))
 
     def _build_photo_rename_map(self, photo_paths):
         """

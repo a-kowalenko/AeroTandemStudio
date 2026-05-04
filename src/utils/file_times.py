@@ -1,6 +1,9 @@
 """
 Dateizeiten für die Anzeige (Erstellung vs. Änderung).
 
+Videokopien im Arbeitsordner: Tabellenzeit kommt aus media_datetime /
+DragDrop._import_source_ts_by_dest (Snapshot vom Import).
+
 Windows: os.path.getctime = Erstellungszeit.
 macOS/BSD: st_birthtime.
 Linux: oft keine echte Erstellungszeit → Fallback auf Änderungszeit (mtime).

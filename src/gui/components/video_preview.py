@@ -16,6 +16,11 @@ from .progress_indicator import ProgressHandler
 from .circular_spinner import CircularSpinner
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.file_times import format_creation_date, format_creation_time
+from src.utils.media_datetime import (
+    format_epoch_date,
+    format_epoch_time,
+    resolve_video_display_epoch,
+)
 from src.utils.hardware_acceleration import HardwareAccelerationDetector
 from src.video.parallel_processor import ParallelVideoProcessor
 from typing import List, Dict, Callable  # NEU
@@ -2676,9 +2681,16 @@ class VideoPreview:
             # Hole Größe
             size_bytes = os.path.getsize(copy_path)
             size_str = self._format_size_bytes(size_bytes)
-            # Hole Datum/Zeit
-            date_str = self._get_file_date(copy_path)
-            time_str = self._get_file_time(copy_path)
+            # Datum/Zeit: Import-Snapshot / Original / ffprobe / Kopie (siehe media_datetime)
+            snap = None
+            if self.app and hasattr(self.app, "drag_drop"):
+                snap = self.app.drag_drop.get_source_import_epoch(copy_path)
+            alt_orig = None
+            if original_path and os.path.normpath(original_path) != os.path.normpath(copy_path):
+                alt_orig = original_path
+            epoch = resolve_video_display_epoch(copy_path, snap, alt_orig)
+            date_str = format_epoch_date(epoch)
+            time_str = format_epoch_time(epoch)
             # Hole Format (Auflösung und FPS)
             format_str = self._get_video_format(copy_path)
             # NEU: Hole auch width und height separat
@@ -2691,6 +2703,7 @@ class VideoPreview:
                 "size_bytes": size_bytes,
                 "date": date_str,
                 "timestamp": time_str,
+                "display_timestamp_epoch": epoch,
                 "format": format_str,
                 "width": width,
                 "height": height
@@ -2704,6 +2717,7 @@ class VideoPreview:
             print(f"Fehler beim Cachen der Metadaten für {original_path}: {e}")
             self.metadata_cache[file_identity] = {
                 "duration": "FEHLER", "size": "FEHLER", "date": "FEHLER", "timestamp": "FEHLER", "format": "FEHLER",
+                "display_timestamp_epoch": 0.0,
                 "width": 0, "height": 0
             }
 

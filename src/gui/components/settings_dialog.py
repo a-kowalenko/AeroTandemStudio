@@ -22,7 +22,7 @@ class SettingsDialog:
         """Zeigt den Einstellungs-Dialog"""
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("Einstellungen")
-        self.dialog.geometry("750x680")  # Höhe erhöht
+        self.dialog.geometry("750x720")  # Höhe für Formular-Zurücksetzen-Optionen
         self.dialog.resizable(False, False)
         self.dialog.transient(self.parent)
 
@@ -52,6 +52,9 @@ class SettingsDialog:
         self.parallel_processing_var = tk.BooleanVar()
         # Variable für Codec-Auswahl
         self.codec_var = tk.StringVar(value="auto")
+        # Session-Zurücksetzen: Tandemmaster / Videospringer optional beibehalten
+        self.keep_tandemmaster_on_session_reset_var = tk.BooleanVar()
+        self.keep_videospringer_on_session_reset_var = tk.BooleanVar()
 
         self.create_widgets()
         self.load_settings()
@@ -75,7 +78,7 @@ class SettingsDialog:
         parent_height = self.parent.winfo_height()
 
         # Dialog-Dimensionen (fest definiert)
-        w, h = 750, 680
+        w, h = 750, 720
 
         x = parent_x + (parent_width - w) // 2
         y = parent_y + (parent_height - h) // 2
@@ -211,6 +214,22 @@ class SettingsDialog:
         for widget in [dauer_frame, self.dauer_display, dauer_arrow]:
             widget.bind("<Enter>", on_enter)
             widget.bind("<Leave>", on_leave)
+
+        # --- Sektion: Formular beim Zurücksetzen ---
+        reset_form_frame = ttk.LabelFrame(self.tab_allgemein, text="Formular beim Zurücksetzen", padding=(10, 10))
+        reset_form_frame.pack(fill="x", pady=(0, 15))
+        tk.Checkbutton(
+            reset_form_frame,
+            text="Tandemmaster beim Zurücksetzen beibehalten",
+            variable=self.keep_tandemmaster_on_session_reset_var,
+            font=("Arial", 10),
+        ).pack(anchor="w", padx=5, pady=2)
+        tk.Checkbutton(
+            reset_form_frame,
+            text="Videospringer beim Zurücksetzen beibehalten",
+            variable=self.keep_videospringer_on_session_reset_var,
+            font=("Arial", 10),
+        ).pack(anchor="w", padx=5, pady=2)
 
         # --- Sektion 2: SD-Karten Backup ---
         backup_frame = ttk.LabelFrame(self.tab_allgemein, text="SD-Karten Backup", padding=(10, 10))
@@ -1143,6 +1162,12 @@ class SettingsDialog:
         # Codec-Auswahl
         self.codec_var.set(settings.get("video_codec", "auto"))
 
+        # Formular beim Session-Zurücksetzen
+        self.keep_tandemmaster_on_session_reset_var.set(
+            settings.get("keep_tandemmaster_on_session_reset", False))
+        self.keep_videospringer_on_session_reset_var.set(
+            settings.get("keep_videospringer_on_session_reset", False))
+
         # Trigger checkbox visibility based on auto_backup setting
         self.on_auto_backup_toggle()
 
@@ -1193,6 +1218,9 @@ class SettingsDialog:
         # Codec-Auswahl
         video_codec = self.codec_var.get()
 
+        keep_tandemmaster_on_session_reset = self.keep_tandemmaster_on_session_reset_var.get()
+        keep_videospringer_on_session_reset = self.keep_videospringer_on_session_reset_var.get()
+
         if not server_url:
             messagebox.showwarning("Fehler", "Bitte geben Sie eine Server-Adresse ein.", parent=self.dialog)
             return
@@ -1238,6 +1266,10 @@ class SettingsDialog:
 
             # Codec-Auswahl
             current_settings["video_codec"] = video_codec
+
+            # Formular beim Session-Zurücksetzen
+            current_settings["keep_tandemmaster_on_session_reset"] = keep_tandemmaster_on_session_reset
+            current_settings["keep_videospringer_on_session_reset"] = keep_videospringer_on_session_reset
 
             # Speichern
             self.config.save_settings(current_settings)

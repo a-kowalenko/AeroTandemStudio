@@ -45,6 +45,8 @@ class ConfigManager:
             "outside_video": False,
             "tandemmaster": "",
             "videospringer": "",
+            "keep_tandemmaster_on_session_reset": False,
+            "keep_videospringer_on_session_reset": False,
             "upload_to_server": False,
             "server_url": "smb://169.254.169.254/aktuell",  # Neue Standard-URL
             "qr_check_enabled": False,  # QR-Code Prüfung standardmäßig aus

@@ -33,6 +33,17 @@ from ..installer.updater import initialize_updater
 from ..utils.constants import APP_VERSION
 
 
+def _truthy_session_keep_flag(value) -> bool:
+    """Konfigurationswert für „beim Zurücksetzen beibehalten“ zuverlässig als bool auswerten."""
+    if value is True or value == 1:
+        return True
+    if value is False or value is None or value == 0:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on", "ja")
+    return False
+
+
 class VideoGeneratorApp:
 
     def __init__(self, root=None, splash_callback=None):
@@ -1500,12 +1511,44 @@ class VideoGeneratorApp:
             messagebox.showwarning("Zurücksetzen nicht möglich", reason, parent=self.root)
             return
 
+        # Vor clear_all: Keep-Flags und aktuelle TM/VS sichern — clear_all löst
+        # update_video_preview([]) → update_form_layout → build_manual_form aus,
+        # das die Felder sonst aus der Config neu lädt und „Beibehalten“ zunichtemacht.
+        keep_tm = False
+        keep_vs = False
+        tm_snapshot = ""
+        vs_snapshot = ""
+        if self.form_fields:
+            snap_settings = self.config.get_settings()
+            keep_tm = _truthy_session_keep_flag(
+                snap_settings.get("keep_tandemmaster_on_session_reset", False))
+            keep_vs = _truthy_session_keep_flag(
+                snap_settings.get("keep_videospringer_on_session_reset", False))
+            tm_snapshot = self.form_fields.tandemmaster_var.get()
+            vs_snapshot = self.form_fields.videospringer_var.get()
+
         try:
             if hasattr(self, "video_preview") and self.video_preview:
                 self.video_preview.cancel_creation()
 
             if self.drag_drop:
                 self.drag_drop.clear_all()
+
+            if self.form_fields:
+                settings = self.config.get_settings()
+                if keep_tm:
+                    self.form_fields.tandemmaster_var.set(tm_snapshot)
+                    settings["tandemmaster"] = tm_snapshot
+                else:
+                    self.form_fields.tandemmaster_var.set("")
+                    settings["tandemmaster"] = ""
+                if keep_vs:
+                    self.form_fields.videospringer_var.set(vs_snapshot)
+                    settings["videospringer"] = vs_snapshot
+                else:
+                    self.form_fields.videospringer_var.set("")
+                    settings["videospringer"] = ""
+                self.config.save_settings(settings)
 
             if hasattr(self, "progress_handler") and self.progress_handler:
                 self.progress_handler.set_status("Status: Bereit.")

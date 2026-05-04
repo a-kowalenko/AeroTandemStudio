@@ -14,6 +14,7 @@
 
 
 # Big data assets
+/dependency_installer/
 /dependency_installer/vlc/
 /dependency_installer/ffmpeg/
 

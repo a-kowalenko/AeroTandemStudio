@@ -34,6 +34,10 @@ _DROP_ZONE_HELP_TEXT = (
     "Videos (.mp4) und Fotos (.jpg, .png) oder Ordner (eine Ebene) hierher ziehen"
 )
 
+def _norm_import_path(path: str) -> str:
+    """Einheitliche Normalisierung für Import-Quell-Pfade (Deduplizierung)."""
+    return os.path.normcase(os.path.normpath(path))
+
 
 def _dnd_classify_file(path: str):
     """Liefert 'video', 'photo' oder None für einen Dateipfad."""
@@ -135,6 +139,9 @@ class DragDropFrame:
         self.is_encoding = False  # NEU: Steuert Sichtbarkeit der Progress-Spalte vs. Datum/Uhrzeit
         # Unix-Zeit der Quelldatei beim Import-Kopieren (Key: normpath der Kopie im temp_dir)
         self._import_source_ts_by_dest: dict[str, float] = {}
+        # Fotos: bekannte Quellpfade (Kopie im Arbeitsordner) — verhindert doppelten Import derselben Quelle
+        self._photo_source_by_dest: dict[str, str] = {}
+        self._active_imported_photo_sources: set[str] = set()
         # Tabellen-Sortierung (Standard: Dateiname aufsteigend)
         self._video_sort_column = "Dateiname"
         self._video_sort_desc = False
@@ -539,13 +546,15 @@ class DragDropFrame:
 
             total_bytes = 0
             files_to_process = []
-            
-            # Prepare videos
-            if new_videos and self.app and hasattr(self.app, 'video_preview'):
+
+            # Gemeinsamer Arbeitsordner (temp_dir) für Video- und Foto-Kopien
+            if (new_videos or new_photos) and self.app and hasattr(self.app, 'video_preview'):
                 if not self.app.video_preview.temp_dir:
                     self.parent.after(0, self.app.video_preview._create_temp_directory)
                     time.sleep(0.5)
 
+            # Prepare videos
+            if new_videos:
                 for path in new_videos:
                     if skip_processed and skip_processed_manual:
                         history_store = MediaHistoryStore.instance()
@@ -672,15 +681,88 @@ class DragDropFrame:
                             pass
 
                 elif ftype == 'photo':
-                    # Pseudo copy for photos since we don't copy them normally
-                    if source_path not in self.photo_paths and source_path not in photo_batch_paths:
-                        photo_batch_paths.append(source_path)
-                        new_photos_added = True
-                        
-                        copied_bytes += file_size
-                        global_prog = (copied_bytes / total_bytes) * 100 if total_bytes > 0 else 100
-                        self.parent.after(0, lambda gp=global_prog: dialog.global_progress_var.set(gp))
+                    if not self.app or not hasattr(self.app, 'video_preview'):
+                        continue
+                    temp_dir = self.app.video_preview.temp_dir
+                    if not temp_dir:
+                        print("  ⚠️ Working-Folder nicht verfügbar — Foto übersprungen")
+                        continue
 
+                    src_key = _norm_import_path(source_path)
+                    if src_key in self._active_imported_photo_sources:
+                        continue
+
+                    photos_dir = os.path.join(temp_dir, "photos")
+                    try:
+                        os.makedirs(photos_dir, exist_ok=True)
+                    except OSError as e:
+                        print(f"  ⚠️ Konnte Foto-Arbeitsordner nicht anlegen: {e}")
+                        continue
+
+                    safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+                    dest_path = os.path.join(photos_dir, safe_filename)
+                    if os.path.exists(dest_path):
+                        base_name, ext = os.path.splitext(safe_filename)
+                        counter = 1
+                        while os.path.exists(dest_path):
+                            dest_path = os.path.join(photos_dir, f"{base_name}_{counter}{ext}")
+                            counter += 1
+
+                    chunk_size = 1024 * 1024 * 5  # 5 MB — gleiche Logik wie Videos
+                    file_copied_bytes = 0
+                    start_time = time.time()
+
+                    with open(source_path, 'rb') as src, open(dest_path, 'wb') as dst:
+                        while True:
+                            if dialog.cancel_requested.is_set():
+                                break
+                            chunk = src.read(chunk_size)
+                            if not chunk:
+                                break
+                            dst.write(chunk)
+
+                            file_copied_bytes += len(chunk)
+                            copied_bytes += len(chunk)
+
+                            elapsed = time.time() - start_time
+                            speed = (file_copied_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+
+                            file_prog = (file_copied_bytes / file_size) * 100 if file_size > 0 else 100
+                            global_prog = (copied_bytes / total_bytes) * 100 if total_bytes > 0 else 100
+
+                            def update_ui(fp=file_prog, gp=global_prog, spd=speed):
+                                dialog.file_progress_var.set(fp)
+                                dialog.global_progress_var.set(gp)
+                                dialog.global_status_var.set(f"Gesamtfortschritt: {int(gp)}%")
+                                dialog.speed_var.set(f"{spd:.1f} MB/s")
+
+                            self.parent.after(0, update_ui)
+
+                    if dialog.cancel_requested.is_set():
+                        try:
+                            os.remove(dest_path)
+                        except OSError:
+                            pass
+                        break
+
+                    imported_p = dest_path
+                    is_duplicate = False
+                    for existing_path in self.photo_paths + photo_batch_paths:
+                        try:
+                            if (os.path.getsize(existing_path) == file_size
+                                    and os.path.basename(existing_path) == os.path.basename(imported_p)):
+                                is_duplicate = True
+                                break
+                        except OSError:
+                            pass
+
+                    if not is_duplicate:
+                        photo_batch_paths.append(imported_p)
+                        self._register_imported_photo(imported_p, source_path)
+                        new_photos_added = True
+                        ts_src = get_creation_timestamp(source_path)
+                        if ts_src is not None:
+                            self._import_source_ts_by_dest[os.path.normpath(imported_p)] = float(ts_src)
                         if skip_processed and skip_processed_manual:
                             from datetime import datetime
                             history_store = MediaHistoryStore.instance()
@@ -695,6 +777,11 @@ class DragDropFrame:
                                     imported_at=datetime.now().isoformat()
                                 )
                                 imported_history_hashes.append(identity_hash)
+                    else:
+                        try:
+                            os.remove(imported_p)
+                        except OSError:
+                            pass
 
             added_photo_paths_this_batch = []
             if dialog.cancel_requested.is_set():
@@ -705,6 +792,15 @@ class DragDropFrame:
                         os.remove(p)
                     except OSError:
                         pass
+                    self._import_source_ts_by_dest.pop(os.path.normpath(p), None)
+
+                for p in photo_batch_paths:
+                    try:
+                        if os.path.isfile(p):
+                            os.remove(p)
+                    except OSError:
+                        pass
+                    self._unregister_imported_photo(p)
                     self._import_source_ts_by_dest.pop(os.path.normpath(p), None)
 
                 history_store = MediaHistoryStore.instance()
@@ -752,6 +848,11 @@ class DragDropFrame:
                             img.close()
                     except Exception as e:
                         print(f"Fehler beim Vorberechnen des Thumbnails für {photo_path}: {e}")
+
+            if dialog.cancel_requested.is_set() and added_photo_paths_this_batch:
+                self._rollback_imported_photo_batch(added_photo_paths_this_batch)
+                added_photo_paths_this_batch = []
+                new_photos_added = False
 
             cancelled = dialog.cancel_requested.is_set()
             cache_snapshot = pil_photo_cache if not cancelled else {}
@@ -1339,7 +1440,9 @@ class DragDropFrame:
         selection = self.photo_tree.selection()
         if selection:
             index = self.photo_tree.index(selection[0])
-            self.photo_paths.pop(index)
+            removed = self.photo_paths.pop(index)
+            self._unregister_imported_photo(removed)
+            self._import_source_ts_by_dest.pop(os.path.normpath(removed), None)
 
             # NEU: Wasserzeichen-Indizes aktualisieren
             # Wenn der gelöschte Index markiert war, entferne ihn
@@ -1401,6 +1504,9 @@ class DragDropFrame:
 
     def clear_photos(self):
         """Entfernt alle Fotos"""
+        for p in list(self.photo_paths):
+            self._unregister_imported_photo(p)
+            self._import_source_ts_by_dest.pop(os.path.normpath(p), None)
         self.photo_paths.clear()
         self.clear_photo_watermark_selection()  # NEU
         self._update_photo_table()
@@ -1410,6 +1516,8 @@ class DragDropFrame:
         """Entfernt ein bestimmtes Foto aus der Liste"""
         if photo_path in self.photo_paths:
             self.photo_paths.remove(photo_path)
+            self._unregister_imported_photo(photo_path)
+            self._import_source_ts_by_dest.pop(os.path.normpath(photo_path), None)
             self._update_photo_table()
             # Nur Preview aktualisieren wenn nicht von Preview selbst aufgerufen
             if update_preview:
@@ -1446,6 +1554,57 @@ class DragDropFrame:
         """Prüft ob Fotos vorhanden sind"""
         return len(self.photo_paths) > 0
 
+    def _register_imported_photo(self, dest_path: str, source_path: str) -> None:
+        """Merkt Quellpfad zur Kopie (Deduplizierung)."""
+        dn = os.path.normpath(dest_path)
+        sn = _norm_import_path(source_path)
+        self._photo_source_by_dest[dn] = sn
+        self._active_imported_photo_sources.add(sn)
+
+    def _unregister_imported_photo(self, dest_path: str) -> None:
+        """Entfernt Mapping wenn Foto aus der Liste genommen wird."""
+        dn = os.path.normpath(dest_path)
+        sn = self._photo_source_by_dest.pop(dn, None)
+        if sn is not None:
+            self._active_imported_photo_sources.discard(sn)
+
+    def _rollback_imported_photo_batch(self, batch_paths: list) -> None:
+        """Macht einen Foto-Import-Stapel rückgängig (Abbruch während Thumbnails o. ä.)."""
+        if not batch_paths:
+            return
+        to_remove = {os.path.normpath(p) for p in batch_paths}
+        idxs = sorted(
+            (i for i, p in enumerate(self.photo_paths) if os.path.normpath(p) in to_remove),
+            reverse=True,
+        )
+        for index in idxs:
+            self.photo_paths.pop(index)
+            if index in self.watermark_photo_indices:
+                self.watermark_photo_indices.remove(index)
+            updated_wm = []
+            for i in self.watermark_photo_indices:
+                if i > index:
+                    updated_wm.append(i - 1)
+                else:
+                    updated_wm.append(i)
+            self.watermark_photo_indices = updated_wm
+
+        hs = MediaHistoryStore.instance()
+        conn = hs.get_connection()
+        cursor = conn.cursor() if conn else None
+        for p in batch_paths:
+            ident = hs.compute_identity(p)
+            if ident and cursor:
+                cursor.execute("DELETE FROM media_history WHERE id_hash = ?", (ident[0],))
+            try:
+                if os.path.isfile(p):
+                    os.remove(p)
+            except OSError:
+                pass
+            self._unregister_imported_photo(p)
+            self._import_source_ts_by_dest.pop(os.path.normpath(p), None)
+        if conn:
+            conn.commit()
 
     def reset(self):
         """Setzt die Komponente zurück"""

@@ -23,6 +23,9 @@ class SDStatusIndicator:
         self.backup_active = False
         self.clearing_active = False  # SD-Karte wird geleert
         self.sd_detected = False
+        self.active_drive_str = ""  # z. B. "E:" oder Linux-Mountpfad
+        self.waiting_size_limit_dialog = False
+        self.auto_import_active = False
 
         # Tooltip-Verwaltung
         self.tooltip = None
@@ -78,6 +81,47 @@ class SDStatusIndicator:
         # Tooltip
         self.create_tooltip()
 
+    def build_tooltip_text(self):
+        """Mehrzeiliger Tooltip: Kontext, aktuelle Phase, typischer Ablauf."""
+        lines = ["SD-Karten Überwachung aktiv"]
+        drive = (self.active_drive_str or "").strip()
+        if drive:
+            lines.append(f"Laufwerk / Pfad: {drive}")
+
+        if self.clearing_active:
+            phase = (
+                "Aktuell: SD-Karte wird geleert "
+                "(nur erfolgreich gesicherte Dateien)."
+            )
+        elif self.auto_import_active:
+            phase = "Aktuell: Medien werden in die App importiert."
+        elif self.backup_active and self.waiting_size_limit_dialog:
+            phase = (
+                "Aktuell: Warten auf Ihre Auswahl "
+                "(Dialog „Größen-Limit“ bzw. Dateiauswahl)."
+            )
+        elif self.backup_active:
+            phase = "Aktuell: Medien werden auf den PC gesichert (Backup)."
+        elif self.sd_detected:
+            phase = (
+                "Aktuell: Action-Cam-SD-Karte erkannt "
+                "(DCIM), Backup startet gleich."
+            )
+        else:
+            phase = (
+                "Aktuell: Warten auf Wechseldatenträger mit DCIM-Ordner."
+            )
+        lines.append(phase)
+        lines.append("")
+        lines.append(
+            "Typischer Ablauf: Überwachung → SD erkannt → ggf. Dialog "
+            "bei vielen Dateien"
+        )
+        lines.append(
+            "→ Backup auf PC → optional Karte leeren → optional Auto-Import"
+        )
+        return "\n".join(lines)
+
     def create_tooltip(self):
         """Erstellt Tooltip für Status-Anzeige"""
         def show_tooltip(event):
@@ -87,21 +131,25 @@ class SDStatusIndicator:
             if not self.monitoring_active:
                 return
 
-            tooltip_text = "SD-Karten Überwachung aktiv"
-            if self.backup_active:
-                tooltip_text = "Backup läuft..."
-            elif self.sd_detected:
-                tooltip_text += "\nSD-Karte erkannt"
+            tooltip_text = self.build_tooltip_text()
 
             # Verzögerung vor Anzeige (verhindert flackern)
-            self.tooltip_timer = self.container.after(500, lambda: self._create_tooltip_window(event, tooltip_text))
+            self.tooltip_timer = self.container.after(
+                500, lambda: self._create_tooltip_window(event, tooltip_text)
+            )
 
         def on_leave(event):
             # Tooltip sofort entfernen
             self.hide_tooltip()
 
-        # Binde Events an alle relevanten Widgets
-        widgets = [self.container, self.icon_label, self.status_label]
+        widgets = [
+            self.container,
+            self.icon_label,
+            self.status_label,
+            self.progress_frame,
+            self.progress_bar,
+            self.progress_label,
+        ]
         for widget in widgets:
             if widget:
                 widget.bind("<Enter>", show_tooltip)
@@ -175,8 +223,26 @@ class SDStatusIndicator:
         """Setzt den Backup-Status"""
         self.backup_active = active
         if not active:
+            self.waiting_size_limit_dialog = False
             # Reset Progress wenn Backup beendet
             self.progress_frame.pack_forget()
+        self.update_display()
+
+    def set_active_drive(self, drive):
+        """Merkt sich das aktuelle Laufwerk für Tooltip und Kontext."""
+        if drive is None or drive is False:
+            self.active_drive_str = ""
+        else:
+            self.active_drive_str = str(drive).strip()
+
+    def set_waiting_size_limit(self, waiting):
+        """True solange Nutzer den Größenlimit- bzw. Dateiauswahl-Dialog bearbeitet."""
+        self.waiting_size_limit_dialog = bool(waiting)
+        self.update_display()
+
+    def set_auto_import_active(self, active):
+        """True während des automatischen Imports nach erfolgreichem Backup."""
+        self.auto_import_active = bool(active)
         self.update_display()
 
     def set_clearing_active(self, active):
@@ -212,7 +278,7 @@ class SDStatusIndicator:
             total_mb: Gesamt MB
             speed_mbps: Kopiergeschwindigkeit in MB/s
         """
-        if not self.backup_active:
+        if not self.backup_active or self.auto_import_active:
             return
 
         # Progress Bar aktualisieren
@@ -240,12 +306,23 @@ class SDStatusIndicator:
         if not self.container.winfo_ismapped():
             self.container.pack(side="right", padx=(0, 10))
 
-        # Icon und Text basierend auf Status (Priorität: clearing > backup > detected > normal)
+        # Icon und Text (Priorität: clearing > Auto-Import > Dialog-Warten > Backup > erkannt > Ruhe)
         if self.clearing_active:
             self.icon_label.config(text="🗑️", fg="#f44336")  # Rot für Leerung (Warnung)
             self.status_label.config(text="SD-Karte wird geleert...", fg="#f44336")
             # Stelle sicher dass Progress-Bar im indeterminate mode ist
             self.progress_bar.config(mode='indeterminate')
+        elif self.auto_import_active:
+            self.icon_label.config(text="📂", fg="#7b1fa2")
+            self.status_label.config(text="Auto-Import läuft...", fg="#7b1fa2")
+            self.progress_bar.stop()
+            if self.progress_frame.winfo_ismapped():
+                self.progress_frame.pack_forget()
+        elif self.backup_active and self.waiting_size_limit_dialog:
+            self.icon_label.config(text="⏳", fg="#ff9800")
+            self.status_label.config(text="Bitte Dialog bestätigen…", fg="#ff9800")
+            self.progress_bar.config(mode='determinate')
+            self.progress_bar.stop()
         elif self.backup_active:
             self.icon_label.config(text="📥", fg="#ff9800")  # Orange für Backup
             self.status_label.config(text="Backup läuft...", fg="#ff9800")
@@ -262,6 +339,9 @@ class SDStatusIndicator:
     def hide(self):
         """Versteckt die Anzeige"""
         self.monitoring_active = False
+        self.active_drive_str = ""
+        self.waiting_size_limit_dialog = False
+        self.auto_import_active = False
         self.hide_tooltip()  # Cleanup Tooltip
         self.update_display()
 

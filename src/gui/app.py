@@ -2200,20 +2200,30 @@ class VideoGeneratorApp:
 
             if status_type == 'monitoring_started':
                 self.sd_status_indicator.set_monitoring_active(True)
+                self.sd_status_indicator.set_active_drive(None)
+                self.sd_status_indicator.set_waiting_size_limit(False)
+                self.sd_status_indicator.set_auto_import_active(False)
                 self.progress_handler.set_status("Status: SD-Überwachung aktiv")
 
             elif status_type == 'sd_detected':
                 self.sd_status_indicator.set_sd_detected(True)
+                if data is not None:
+                    self.sd_status_indicator.set_active_drive(data)
                 self.progress_handler.set_status(f"Status: SD-Karte erkannt ({data})")
 
             elif status_type == 'backup_started':
                 self.sd_status_indicator.set_backup_active(True)
                 self.sd_status_indicator.set_sd_detected(False)
+                if data is not None:
+                    self.sd_status_indicator.set_active_drive(data)
+                self.sd_status_indicator.set_waiting_size_limit(False)
                 self.progress_handler.set_status("Status: SD-Karten Backup läuft...")
 
             elif status_type == 'backup_finished':
                 self.sd_status_indicator.set_backup_active(False)
                 self.sd_status_indicator.set_sd_detected(False)
+                self.sd_status_indicator.set_waiting_size_limit(False)
+                self.sd_status_indicator.set_active_drive(None)
 
                 # Prüfe Backup-Typ aus data
                 if data and isinstance(data, dict):
@@ -2239,6 +2249,8 @@ class VideoGeneratorApp:
 
             elif status_type == 'clearing_started':
                 self.sd_status_indicator.set_clearing_active(True)
+                if data is not None:
+                    self.sd_status_indicator.set_active_drive(data)
                 self.sd_status_indicator.show_clearing_progress()
                 self.progress_handler.set_status("Status: SD-Karte wird geleert...")
 
@@ -2251,7 +2263,7 @@ class VideoGeneratorApp:
                 self.progress_handler.set_status("Status: SD-Karte wurde nicht geleert (selektiver Import)")
 
             elif status_type == 'size_limit_exceeded':
-                # NEU: Größen-Limit überschritten - zeige Dialog
+                self.sd_status_indicator.set_waiting_size_limit(True)
                 self._show_size_limit_dialog(data)
 
         # UI-Update im Haupt-Thread
@@ -2316,6 +2328,8 @@ class VideoGeneratorApp:
         button_frame.pack(fill='x')
 
         def on_proceed_all():
+            if self.sd_status_indicator:
+                self.sd_status_indicator.set_waiting_size_limit(False)
             self.sd_card_monitor.set_size_limit_decision("proceed_all")
             dialog.destroy()
 
@@ -2325,6 +2339,8 @@ class VideoGeneratorApp:
             self._show_file_selector_dialog(files_info, total_size_mb)
 
         def on_cancel():
+            if self.sd_status_indicator:
+                self.sd_status_indicator.set_waiting_size_limit(False)
             self.sd_card_monitor.set_size_limit_decision("cancel")
             dialog.destroy()
 
@@ -2376,6 +2392,9 @@ class VideoGeneratorApp:
             traceback.print_exc()
             # Bei Fehler: Alle importieren
             self.sd_card_monitor.set_size_limit_decision("proceed_all")
+        finally:
+            if self.sd_status_indicator:
+                self.sd_status_indicator.set_waiting_size_limit(False)
 
     def on_sd_progress_update(self, current_mb, total_mb, speed_mbps):
         """
@@ -2467,6 +2486,13 @@ class VideoGeneratorApp:
         Args:
             backup_path: Pfad zum Backup-Ordner mit Mediendateien
         """
+        def _notify_import_active(active):
+            ind = self.sd_status_indicator
+            if ind:
+                self.root.after(0, lambda a=active: ind.set_auto_import_active(a))
+
+        _notify_import_active(True)
+
         # QR-Check Status merken und temporär deaktivieren
         qr_check_was_enabled = False
         if self.drag_drop and hasattr(self.drag_drop, 'qr_check_enabled'):
@@ -2623,6 +2649,7 @@ class VideoGeneratorApp:
             )
 
         finally:
+            _notify_import_active(False)
             # QR-Check Status wiederherstellen
             if qr_check_was_enabled and self.drag_drop and hasattr(self.drag_drop, 'qr_check_enabled'):
                 print("QR-Code-Prüfung wieder aktiviert nach Auto-Import")

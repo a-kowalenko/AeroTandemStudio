@@ -984,6 +984,66 @@ class VideoCutterService:
                     try: os.remove(path)
                     except: pass
 
+    def apply_trim_overwrite(
+        self,
+        video_path: str,
+        start_sec: float,
+        end_sec: float,
+        progress_callback: Optional[Callable] = None,
+    ) -> bool:
+        """
+        Trimmt eine Datei und ersetzt sie atomar durch die Ausgabe (wie der Schneide-Dialog).
+        """
+        base, ext = os.path.splitext(video_path)
+        temp_output_path = f"{base}.__temp_cut__{ext}"
+        try:
+            if not self.execute_trim(
+                video_path, start_sec, end_sec, temp_output_path, progress_callback
+            ):
+                return False
+            if os.path.exists(temp_output_path):
+                os.replace(temp_output_path, video_path)
+                return True
+            return False
+        finally:
+            if os.path.exists(temp_output_path):
+                try:
+                    os.remove(temp_output_path)
+                except OSError:
+                    pass
+
+    def apply_split_overwrite(
+        self,
+        video_path: str,
+        split_sec: float,
+        progress_callback: Optional[Callable] = None,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Teilt eine Datei in zwei Teile (_1 / _2) wie der Schneide-Dialog.
+        Gibt (part1_path, part2_path) oder (None, None) bei Fehler zurück.
+        """
+        base, ext = os.path.splitext(video_path)
+        temp_part1_path = f"{base}.__temp_part1__{ext}"
+        part2_path = f"{base}_2{ext}"
+        part1_path = f"{base}_1{ext}"
+
+        try:
+            if not self.execute_split(
+                video_path, split_sec, temp_part1_path, part2_path, progress_callback
+            ):
+                return None, None
+            if os.path.exists(temp_part1_path):
+                os.replace(temp_part1_path, video_path)
+                os.replace(video_path, part1_path)
+                return part1_path, part2_path
+            return None, None
+        finally:
+            if os.path.exists(temp_part1_path):
+                try:
+                    os.remove(temp_part1_path)
+                except OSError:
+                    pass
+
     def cancel(self):
         """Bricht die laufende Operation ab."""
         self._cancel_flag = True

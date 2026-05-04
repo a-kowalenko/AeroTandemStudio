@@ -2411,6 +2411,15 @@ class VideoPreview:
             # self.action_button.config(state="disabled")  # ENTFERNT
             self.cancellation_event.set()
 
+    def halt_preview_for_cut_batch(self):
+        """
+        Vor einer Schnitt-Warteschlange: laufende Vorschau abbrechen und keinen
+        automatischen Neustart über pending_restart_callback auslösen (sonst startet
+        nach _finalize_processing erneut ein Re-Encode parallel zu den Schnitten).
+        """
+        self.pending_restart_callback = None
+        self.cancel_creation()
+
     def retry_creation(self):
         """Retries the preview creation with the last used *original* video paths."""
         if not self.last_video_paths:

@@ -4,7 +4,8 @@ import math
 import threading
 import os
 import queue
-from typing import List
+import time
+from typing import List, Optional, Dict, Any
 from tkinterdnd2 import TkinterDnD
 from datetime import datetime
 
@@ -17,6 +18,8 @@ from .components.circular_spinner import CircularSpinner
 from .components.settings_dialog import SettingsDialog
 from .components.video_player import VideoPlayer
 from .components.video_cutter import VideoCutterDialog  # Importiert
+from .pending_video_cut import PendingVideoCut
+from ..video.cutter_service import VideoCutterService
 from .components.loading_window import LoadingWindow
 from .components.sd_status_indicator import SDStatusIndicator
 from .components.success_dialog import show_success_dialog
@@ -64,6 +67,9 @@ class VideoGeneratorApp:
         self.server_connected = False
         self.video_player = None
         self.video_cutter_dialog = None  # NEU: Referenz auf offenen Dialog
+        self.pending_video_cuts: List[PendingVideoCut] = []
+        self._pending_cuts_batch_running = False
+        self._suppress_preview_regenerate_after_metadata = False
         self.APP_VERSION = APP_VERSION
 
         # Preview Tab-Elemente
@@ -1342,6 +1348,30 @@ class VideoGeneratorApp:
             messagebox.showwarning("Fehlende Eingabe", "\n".join(errors))
             return
 
+        if getattr(self, "_pending_cuts_batch_running", False):
+            messagebox.showwarning(
+                "Warteschlange aktiv",
+                "Die geplanten Videoschnitte werden gerade verarbeitet.\n\n"
+                "Bitte warten Sie, bis die Warteschlange fertig ist, bevor Sie „Erstellen“ starten.",
+                parent=self.root,
+            )
+            return
+
+        if self.pending_video_cuts:
+            n = len(self.pending_video_cuts)
+            if n == 1:
+                qtext = "Es liegt noch 1 geplanter Videoschnitt in der Warteschlange.\n\n"
+            else:
+                qtext = f"Es liegen noch {n} geplante Videoschnitte in der Warteschlange.\n\n"
+            messagebox.showwarning(
+                "Ausstehende Schnitte",
+                qtext
+                + "Bitte wenden Sie zuerst die Warteschlange an (Button „Warteschlange anwenden …“ in der "
+                "Video-Liste), bevor die Kodierung startet.",
+                parent=self.root,
+            )
+            return
+
         # Einstellungen speichern
         settings_data = self.form_fields.get_settings_data()
         settings_data["upload_to_server"] = form_data["upload_to_server"]
@@ -1718,25 +1748,42 @@ class VideoGeneratorApp:
 
     def on_cut_complete(self, original_path: str, index: int, result: dict):
         """
-        Callback vom VideoCutterDialog.
-        NEU: Stößt asynchrone Metadaten-Aktualisierung an.
+        Callback vom VideoCutterDialog (Warteschlange oder direkte Ergebnisse).
         """
         action = result.get("action")
-        paths_to_refresh = []
+
+        if action == "cancel":
+            print(f"App: Schneiden von '{os.path.basename(original_path)}' abgebrochen.")
+            return
+
+        if action == "queue_trim":
+            self._enqueue_pending_trim(original_path, index, result)
+            return
+
+        if action == "queue_split":
+            self._enqueue_pending_split(original_path, index, result)
+            return
+
+        paths_to_refresh = self._sync_apply_cut_or_split_result(original_path, index, result)
+        if paths_to_refresh and self.video_preview:
+            self.video_preview.refresh_metadata_async(
+                paths_to_refresh,
+                on_complete_callback=self._on_metadata_refreshed,
+            )
+
+    def _sync_apply_cut_or_split_result(self, original_path: str, index: int, result: dict) -> List[str]:
+        """Aktualisiert Listen/Vorschau wie nach einem fertigen Schnitt, ohne Metadaten-Thread."""
+        action = result.get("action")
+        paths_to_refresh: List[str] = []
 
         if action == "cut":
             print(f"App: Clip '{os.path.basename(original_path)}' wurde geschnitten (getrimmt).")
-
-            # Registriere das getrimmte Video als seine eigene Kopie
-            # (Das Video wurde in-place ersetzt, hat aber neuen Inhalt)
             if self.video_preview:
                 self.video_preview.register_new_copy(original_path, original_path)
                 print(f"Getrimmtes Video registriert: {os.path.basename(original_path)}")
-
             paths_to_refresh.append(original_path)
 
         elif action == "split":
-            # NEU: VideoCutter gibt jetzt part1_path und part2_path zurück
             part1_path = result.get("part1_path")
             part2_path = result.get("part2_path")
             print(f"App: Clip '{os.path.basename(original_path)}' wurde geteilt.")
@@ -1745,43 +1792,318 @@ class VideoGeneratorApp:
 
             if not part1_path or not part2_path:
                 print("⚠️ Fehler: Split-Pfade nicht verfügbar")
-                return
-
-            # WICHTIG: Verwende die ECHTEN Dateipfade, nicht Placeholders!
-            # Nach dem Split existieren:
-            #   - part1_path (z.B. 000_1_1.MP4)
-            #   - part2_path (z.B. 000_1_2.MP4)
-            # Das Original (000_1.MP4) existiert NICHT mehr!
+                return []
 
             if self.drag_drop:
-                # 1. Ersetze das Original (an index) durch part1_path
                 self.drag_drop.video_paths[index] = part1_path
-                print(f"DragDrop: Ersetze Original an Index {index} durch Teil 1: {os.path.basename(part1_path)}")
-
-                # 2. Füge part2_path direkt danach ein
+                print(
+                    f"DragDrop: Ersetze Original an Index {index} durch Teil 1: {os.path.basename(part1_path)}"
+                )
                 self.drag_drop.insert_video_path_at_index(part2_path, index + 1)
 
-            # 3. Registriere die gesplitteten Videos als Kopien im Vorschau-System
-            # Da die Dateien ihre finalen Namen haben, registrieren wir sie als ihre eigenen Kopien
             if self.video_preview:
                 self.video_preview.register_new_copy(part1_path, part1_path)
                 self.video_preview.register_new_copy(part2_path, part2_path)
 
-            # 4. Für Metadaten-Refresh: Verwende die echten Pfade
-            paths_to_refresh.append(part1_path)
-            paths_to_refresh.append(part2_path)
+            paths_to_refresh.extend([part1_path, part2_path])
 
-        elif action == "cancel":
-            print(f"App: Schneiden von '{os.path.basename(original_path)}' abgebrochen.")
-            # Nichts tun
-            return
+        return paths_to_refresh
 
-        # Starte die asynchrone Aktualisierung der Metadaten für die geänderten Clips
-        if paths_to_refresh and self.video_preview:
-            self.video_preview.refresh_metadata_async(
-                paths_to_refresh,
-                on_complete_callback=self._on_metadata_refreshed
+    def _enqueue_pending_trim(self, original_path: str, index: int, result: dict):
+        had_same = any(p.source_path == original_path for p in self.pending_video_cuts)
+        self.pending_video_cuts = [p for p in self.pending_video_cuts if p.source_path != original_path]
+        self.pending_video_cuts.append(
+            PendingVideoCut(
+                source_path=original_path,
+                list_index=index,
+                kind="trim",
+                start_ms=result["start_ms"],
+                end_ms=result["end_ms"],
             )
+        )
+        if had_same:
+            print("Hinweis: Ausstehender Schnitt für dieselbe Datei wurde ersetzt.")
+        self._update_pending_cuts_ui()
+
+    def _enqueue_pending_split(self, original_path: str, index: int, result: dict):
+        had_same = any(p.source_path == original_path for p in self.pending_video_cuts)
+        self.pending_video_cuts = [p for p in self.pending_video_cuts if p.source_path != original_path]
+        self.pending_video_cuts.append(
+            PendingVideoCut(
+                source_path=original_path,
+                list_index=index,
+                kind="split",
+                split_ms=result["split_ms"],
+            )
+        )
+        if had_same:
+            print("Hinweis: Ausstehender Schnitt für dieselbe Datei wurde ersetzt.")
+        self._update_pending_cuts_ui()
+
+    def _update_pending_cuts_ui(self):
+        n = len(self.pending_video_cuts)
+        if self.drag_drop:
+            self.drag_drop.set_pending_cuts_count(n)
+        if self.progress_handler:
+            if n:
+                self.progress_handler.set_status(f"Status: {n} Schnitt(e) in der Warteschlange.")
+            else:
+                self.progress_handler.set_status("Status: Bereit.")
+
+    def clear_pending_video_cuts(self):
+        self.pending_video_cuts.clear()
+        self._update_pending_cuts_ui()
+
+    def discard_pending_cuts_for_path(self, path: str):
+        self.pending_video_cuts = [p for p in self.pending_video_cuts if p.source_path != path]
+        self._update_pending_cuts_ui()
+
+    def request_apply_pending_cuts(self):
+        if not self.pending_video_cuts:
+            messagebox.showinfo(
+                "Warteschlange",
+                "Es sind keine ausstehenden Schnitte geplant.",
+                parent=self.root,
+            )
+            return
+        self._open_pending_cuts_review_dialog()
+
+    def _open_pending_cuts_review_dialog(self):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Ausstehende Schnitte")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.geometry("+%d+%d" % (self.root.winfo_rootx() + 50, self.root.winfo_rooty() + 50))
+
+        tk.Label(
+            dlg,
+            text="Geplante Operationen (von oben nach unten nacheinander):",
+            font=("Arial", 10, "bold"),
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+
+        lb_h = min(16, max(4, len(self.pending_video_cuts) + 2))
+        lb = tk.Listbox(dlg, width=92, height=lb_h, font=("Consolas", 9))
+        for p in self.pending_video_cuts:
+            lb.insert(tk.END, p.summary_line())
+        lb.pack(fill="both", expand=True, padx=10, pady=6)
+
+        btn_fr = tk.Frame(dlg)
+        btn_fr.pack(fill="x", padx=10, pady=8)
+
+        def refresh_list():
+            lb.delete(0, tk.END)
+            for p in self.pending_video_cuts:
+                lb.insert(tk.END, p.summary_line())
+            self._update_pending_cuts_ui()
+
+        def remove_sel():
+            sel = lb.curselection()
+            if not sel:
+                return
+            i = int(sel[0])
+            if 0 <= i < len(self.pending_video_cuts):
+                self.pending_video_cuts.pop(i)
+                refresh_list()
+
+        def apply_all():
+            if not self.pending_video_cuts:
+                dlg.destroy()
+                return
+            if not messagebox.askokcancel(
+                "Schnitte anwenden",
+                f"{len(self.pending_video_cuts)} geplante Schnitt(e) mit FFmpeg verarbeiten?\n"
+                "Dies kann je nach Material und Anzahl einige Minuten dauern.",
+                parent=dlg,
+            ):
+                return
+            try:
+                dlg.grab_release()
+            except tk.TclError:
+                pass
+            dlg.destroy()
+            self._start_pending_cuts_batch()
+
+        ttk.Button(btn_fr, text="Ausgewähltes entfernen", command=remove_sel).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_fr, text="Alle anwenden …", command=apply_all).pack(side=tk.LEFT, padx=4)
+
+        def close_dlg():
+            try:
+                dlg.grab_release()
+            except tk.TclError:
+                pass
+            dlg.destroy()
+
+        ttk.Button(btn_fr, text="Schließen", command=close_dlg).pack(side=tk.RIGHT, padx=4)
+
+    def _find_video_index_for_path(self, path: str) -> Optional[int]:
+        if not self.drag_drop:
+            return None
+        try:
+            return self.drag_drop.get_video_paths().index(path)
+        except ValueError:
+            return None
+
+    def _start_pending_cuts_batch(self):
+        self._pending_cuts_batch_running = True
+        self._suppress_preview_regenerate_after_metadata = True
+        if self.video_preview:
+            self.video_preview.halt_preview_for_cut_batch()
+
+        snapshot = list(self.pending_video_cuts)
+        self.pending_video_cuts.clear()
+        self._update_pending_cuts_ui()
+
+        def runner():
+            try:
+                self._pending_cuts_batch_thread(snapshot)
+            finally:
+                self._pending_cuts_batch_running = False
+                self._suppress_preview_regenerate_after_metadata = False
+                self.root.after(0, self._kick_preview_regenerate_after_batch)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _kick_preview_regenerate_after_batch(self):
+        """Einmalige Vorschau-Regeneration nach Ende der Schnitt-Warteschlange (Hauptthread)."""
+        if not self.video_preview or not self.drag_drop:
+            return
+        paths = self.drag_drop.get_video_paths()
+        if paths:
+            self.video_preview.regenerate_preview_after_cut(paths)
+
+    def _restore_pending_snapshot(self, items: List[PendingVideoCut]):
+        self.pending_video_cuts = items + self.pending_video_cuts
+        self._update_pending_cuts_ui()
+
+    def _pending_cuts_batch_thread(self, snapshot: List[PendingVideoCut]):
+        for i, item in enumerate(snapshot):
+            path = item.source_path
+            if not os.path.exists(path):
+
+                def _missing(p=path, rest=snapshot[i:]):
+                    messagebox.showerror(
+                        "Warteschlange",
+                        f"Datei nicht gefunden, Abbruch der Warteschlange:\n{p}",
+                        parent=self.root,
+                    )
+                    self._restore_pending_snapshot(rest)
+                    if self.progress_handler:
+                        self.progress_handler.set_status("Status: Warteschlange mit Fehler abgebrochen.")
+
+                self.root.after(0, _missing)
+                return
+
+            svc = VideoCutterService()
+
+            def pcb(_pct, msg, step=i + 1, total=len(snapshot)):
+                if not self.progress_handler:
+                    return
+                self.root.after(
+                    0,
+                    lambda m=msg, s=step, t=total: self.progress_handler.set_status(
+                        f"Status: Schnitt {s}/{t} — {m}"
+                    ),
+                )
+
+            try:
+                if item.kind == "trim":
+                    ok = svc.apply_trim_overwrite(
+                        path, item.start_ms / 1000.0, item.end_ms / 1000.0, pcb
+                    )
+                    result: Dict[str, Any] = {"action": "cut"} if ok else {}
+                else:
+                    p1, p2 = svc.apply_split_overwrite(path, (item.split_ms or 0) / 1000.0, pcb)
+                    ok = bool(p1 and p2)
+                    result = (
+                        {"action": "split", "part1_path": p1, "part2_path": p2} if ok else {}
+                    )
+            except Exception as e:
+                err = str(e)
+
+                def _err_ui(e=err, rest=snapshot[i:]):
+                    messagebox.showerror("Warteschlange", f"FFmpeg-Fehler:\n{e}", parent=self.root)
+                    self._restore_pending_snapshot(rest)
+                    if self.progress_handler:
+                        self.progress_handler.set_status("Status: Warteschlange mit Fehler abgebrochen.")
+
+                self.root.after(0, _err_ui)
+                return
+
+            if not ok:
+
+                def _fail_ui(it=item, rest=snapshot[i:]):
+                    messagebox.showerror(
+                        "Warteschlange",
+                        f"Schnitt fehlgeschlagen (FFmpeg):\n{it.summary_line()}",
+                        parent=self.root,
+                    )
+                    self._restore_pending_snapshot(rest)
+                    if self.progress_handler:
+                        self.progress_handler.set_status("Status: Warteschlange mit Fehler abgebrochen.")
+
+                self.root.after(0, _fail_ui)
+                return
+
+            holder: Dict[str, Any] = {"done": False, "error": None}
+
+            def main_ui_step(it=item, res=result):
+                try:
+                    idx = self._find_video_index_for_path(it.source_path)
+                    if idx is None:
+                        raise RuntimeError("Video nicht mehr in der Liste.")
+                    paths = self._sync_apply_cut_or_split_result(it.source_path, idx, res)
+
+                    def finish_meta():
+                        self._on_metadata_refreshed()
+                        holder["done"] = True
+
+                    if paths and self.video_preview:
+                        self.video_preview.refresh_metadata_async(paths, on_complete_callback=finish_meta)
+                    else:
+                        self._on_metadata_refreshed()
+                        holder["done"] = True
+                except Exception as ex:
+                    holder["error"] = str(ex)
+                    holder["done"] = True
+
+            self.root.after(0, main_ui_step)
+            deadline = time.monotonic() + 7200
+            while not holder["done"]:
+                if time.monotonic() > deadline:
+
+                    def _to(rest=snapshot[i:]):
+                        messagebox.showerror(
+                            "Warteschlange",
+                            "Zeitüberschreitung bei der Metadaten-Aktualisierung.",
+                            parent=self.root,
+                        )
+                        self._restore_pending_snapshot(rest)
+
+                    self.root.after(0, _to)
+                    return
+                time.sleep(0.05)
+
+            if holder.get("error"):
+                err = holder["error"]
+
+                def _e2(e=err, rest=snapshot[i:]):
+                    messagebox.showerror(
+                        "Warteschlange",
+                        f"GUI-Aktualisierung fehlgeschlagen:\n{e}",
+                        parent=self.root,
+                    )
+                    self._restore_pending_snapshot(rest)
+                    if self.progress_handler:
+                        self.progress_handler.set_status("Status: Warteschlange mit Fehler abgebrochen.")
+
+                self.root.after(0, _e2)
+                return
+
+        def _done_all():
+            if self.progress_handler:
+                self.progress_handler.set_status("Status: Warteschlange fertig.")
+
+        self.root.after(0, _done_all)
 
     def _on_metadata_refreshed(self):
         """
@@ -1794,7 +2116,11 @@ class VideoGeneratorApp:
         if self.drag_drop:
             self.drag_drop.refresh_table()
 
-        # 2. Video-Vorschau regenerieren (verwendet die *neue* Liste der Originale)
+        # 2. Video-Vorschau regenerieren — während Schnitt-Warteschlange unterdrückt;
+        #    danach einmalig in _kick_preview_regenerate_after_batch.
+        if getattr(self, "_suppress_preview_regenerate_after_metadata", False):
+            return
+
         if self.video_preview and self.drag_drop:
             original_paths = self.drag_drop.get_video_paths()
             self.video_preview.regenerate_preview_after_cut(original_paths)

@@ -2,13 +2,10 @@
 from tkinter import ttk, messagebox
 import os
 import threading
-import subprocess
 import json
-import time
 import sys
 import shutil
 from typing import Callable, Dict
-import multiprocessing
 
 try:
     from src.utils.path_helper import setup_vlc_paths
@@ -25,16 +22,13 @@ except Exception as e:
     vlc = None
 
 from .circular_spinner import CircularSpinner
-from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
-from src.utils.hardware_acceleration import HardwareAccelerationDetector
-from src.utils.config import ConfigManager
 from src.video.cutter_service import VideoCutterService
 
 
 class VideoCutterDialog(tk.Toplevel):
     """
-    Ein modales Dialogfenster zum Schneiden (Trimmen) oder Teilen (Splitten)
-    eines einzelnen Videoclips (einer temporären Kopie).
+    Modales Dialogfenster zum Planen von Trim oder Split für einen Clip.
+    Die FFmpeg-Verarbeitung erfolgt über die Warteschlange in der Haupt-App.
     """
 
     # --- Farben für die benutzerdefinierte Fortschrittsanzeige ---
@@ -60,13 +54,7 @@ class VideoCutterDialog(tk.Toplevel):
         self.video_path = video_path
         self.on_complete_callback = on_complete_callback
 
-        # Lade Config und Hardware-Acceleration
-        self.config_manager = ConfigManager()
-        self.config = self.config_manager.get_settings()
-        self.hw_detector = HardwareAccelerationDetector()
-        self.hw_info = self.hw_detector.detect_hardware() if self.config.get('hardware_acceleration_enabled', True) else None
-
-        # NEU: Service-Layer für Video-Verarbeitung
+        # Service-Layer für Metadaten / Keyframes (FFmpeg läuft in der App-Warteschlange)
         self.cutter_service = VideoCutterService()
 
         self.title("Video schneiden")
@@ -85,10 +73,12 @@ class VideoCutterDialog(tk.Toplevel):
         self.fps = 30.0  # Standard, wird überschrieben
         self.start_time_ms = None
         self.end_time_ms = None
-        self.is_processing = False  # Verhindert Aktionen während FFmpeg läuft
+        self.is_processing = False  # Verhindert Aktionen während des Ladens / Verarbeitens
         self.is_dragging_playhead = False
         self._updater_job = None
-        self._seek_debounce_timer = None  # NEU: Timer für Debouncing beim Seek
+        self._seek_debounce_timer = None  # Timer für Debouncing beim Seek
+        self._pending_seek_ms = None
+        self._seek_apply_job = None  # after-Job für Hauptthread-Seek (serialisiert)
 
         # NEU: VLC-Event-Callbacks speichern für sauberes Detach
         self._vlc_callbacks = {}
@@ -119,6 +109,23 @@ class VideoCutterDialog(tk.Toplevel):
 
         # Video laden (synchrone Info, asynchrones Laden)
         self._load_video_info_and_start()
+
+    def _schedule_gui(self, fn: Callable[[], None]) -> None:
+        """VLC ruft Event-Handler in Fremdthreads auf — Tk nur im Hauptthread anfassen."""
+        def wrapper():
+            try:
+                if not self.winfo_exists():
+                    return
+                fn()
+            except tk.TclError:
+                pass
+            except Exception as e:
+                print(f"Cutter GUI-Update: {e}")
+
+        try:
+            self.after(0, wrapper)
+        except tk.TclError:
+            pass
 
     def show(self):
         """Macht das Fenster sichtbar und zentriert es auf dem Parent-Fenster."""
@@ -206,11 +213,11 @@ class VideoCutterDialog(tk.Toplevel):
         # Events binden (mit gespeicherten Callbacks für sauberes Detach)
         events = self.media_player.event_manager()
 
-        self._vlc_callbacks['end_reached'] = self._on_end_reached
-        self._vlc_callbacks['time_changed'] = self._on_time_changed
-        self._vlc_callbacks['playing'] = lambda e: self.play_pause_btn.config(text="⏸")
-        self._vlc_callbacks['paused'] = lambda e: self.play_pause_btn.config(text="▶")
-        self._vlc_callbacks['stopped'] = lambda e: self.play_pause_btn.config(text="▶")
+        self._vlc_callbacks['end_reached'] = self._on_end_reached_vlc
+        self._vlc_callbacks['time_changed'] = self._on_time_changed_vlc
+        self._vlc_callbacks['playing'] = self._on_vlc_playing_vlc
+        self._vlc_callbacks['paused'] = self._on_vlc_paused_vlc
+        self._vlc_callbacks['stopped'] = self._on_vlc_stopped_vlc
 
         events.event_attach(vlc.EventType.MediaPlayerEndReached, self._vlc_callbacks['end_reached'])
         events.event_attach(vlc.EventType.MediaPlayerTimeChanged, self._vlc_callbacks['time_changed'])
@@ -219,7 +226,7 @@ class VideoCutterDialog(tk.Toplevel):
         events.event_attach(vlc.EventType.MediaPlayerStopped, self._vlc_callbacks['stopped'])
 
         # UI initialisieren
-        self._on_time_changed(None)  # Zeit-Label initial setzen
+        self._on_time_changed_ui()  # Zeit-Label initial setzen (Hauptthread)
         self._draw_custom_progress()
         self._set_processing(False)  # Alle Buttons aktivieren
 
@@ -229,239 +236,6 @@ class VideoCutterDialog(tk.Toplevel):
 
     # _get_video_info, _find_keyframe_before, _find_keyframe_after ENTFERNT
     # --> Ersetzt durch VideoCutterService
-
-    def _build_encode_cmd(self, input_path: str, video_info: dict, output_path: str,
-                         ss: float, duration: float, force_keyframe_at_start: bool = True,
-                         use_software_fallback: bool = False) -> list:
-        """
-        Erstellt einen FFmpeg-Befehl für hochqualitatives Re-Encoding eines Segments
-        mit Hardware-Beschleunigung und Multicore-Processing.
-
-        Args:
-            input_path: Eingabe-Video
-            video_info: Video-Metadaten
-            output_path: Ausgabe-Datei
-            ss: Start-Zeit in Sekunden
-            duration: Dauer in Sekunden
-            force_keyframe_at_start: Keyframe am Anfang erzwingen
-            use_software_fallback: Erzwingt Software-Encoding (bei HW-Fehlern)
-        """
-        cmd = ["ffmpeg", "-y"]
-
-        # Hardware-Beschleunigung für Input (Decoding)
-        use_hw_accel = (not use_software_fallback and
-                       self.config.get('hardware_acceleration_enabled', True) and
-                       self.hw_info and
-                       self.hw_info.get('available', False))
-
-        if use_hw_accel and self.hw_info.get('hwaccel'):
-            # Nur hwaccel, KEIN hwaccel_output_format
-            # Das vermeidet Pixel-Format-Probleme
-            cmd.extend(['-hwaccel', self.hw_info['hwaccel']])
-            if self.hw_info.get('device'):
-                cmd.extend(['-hwaccel_device', self.hw_info['device']])
-
-        cmd.extend([
-            "-ss", str(ss),
-            "-i", input_path,
-            "-t", str(duration),
-        ])
-
-        # Codec-Auswahl mit Hardware-Beschleunigung
-        if use_hw_accel and self.hw_info.get('encoder'):
-            # Hardware-Encoder verwenden
-            encoder = self.hw_info['encoder']
-            cmd.extend(["-c:v", encoder])
-
-            # Hardware-spezifische Parameter
-            hw_type = self.hw_info.get('type')
-            if hw_type == 'nvidia':
-                # NVIDIA NVENC - hochqualitative Presets
-                cmd.extend([
-                    "-preset", "p7",  # p7 = höchste Qualität (p1=schnellste, p7=beste)
-                    "-tune", "hq",    # High Quality
-                    "-rc", "vbr",     # Variable Bitrate
-                    "-cq", "19",      # Constant Quality (niedriger = besser, 0-51)
-                    "-b:v", "0",      # Unlimitierte Bitrate für VBR
-                ])
-                # NVIDIA bevorzugt yuv420p
-                cmd.extend(["-pix_fmt", "yuv420p"])
-            elif hw_type == 'intel':
-                # Intel QSV - ICQ Mode für beste Qualität
-                cmd.extend([
-                    "-global_quality", "19",  # 18-23 ist gut (niedriger = besser)
-                    "-preset", "veryslow",    # Beste Qualität
-                    "-look_ahead", "1",       # Lookahead für bessere Qualität
-                ])
-                # Intel QSV bevorzugt nv12
-                cmd.extend(["-pix_fmt", "nv12"])
-            elif hw_type == 'amd':
-                # AMD AMF
-                cmd.extend([
-                    "-quality", "quality",  # Quality mode statt speed
-                    "-rc", "cqp",          # Constant QP
-                    "-qp_i", "19",         # I-Frame QP
-                    "-qp_p", "19",         # P-Frame QP
-                ])
-                # AMD bevorzugt nv12
-                cmd.extend(["-pix_fmt", "nv12"])
-            elif hw_type == 'videotoolbox':
-                # Apple VideoToolbox
-                cmd.extend([
-                    "-b:v", "0",           # Variable Bitrate
-                    "-q:v", "65",          # Quality (0-100, höher = besser)
-                ])
-                # VideoToolbox bevorzugt nv12
-                cmd.extend(["-pix_fmt", "nv12"])
-        else:
-            # Software-Encoder mit hoher Qualität
-            if video_info['vcodec'] == 'hevc':
-                cmd.extend(["-c:v", "libx265"])
-            else:
-                cmd.extend(["-c:v", "libx264"])
-
-            cmd.extend([
-                "-crf", "18",  # Sehr hohe Qualität (18 ist nahezu verlustfrei)
-                "-preset", "medium",
-            ])
-
-            # Multicore-Processing nur bei Software-Encoding
-            if self.config.get('parallel_processing_enabled', True):
-                threads = max(1, multiprocessing.cpu_count() - 1)  # Einen Kern für OS freilassen
-                cmd.extend(["-threads", str(threads)])
-
-            # Software-Encoder: yuv420p ist sicher
-            cmd.extend(["-pix_fmt", "yuv420p"])
-
-        # FPS nur wenn vorhanden und gültig
-        if video_info.get('fps') and video_info['fps'] > 0:
-            cmd.extend(["-r", str(video_info['fps'])])
-
-        # Keyframe am Anfang erzwingen (wichtig für Concatenation)
-        # KORRIGIERT: Nur erster Frame als Keyframe, nicht alle Frames
-        if force_keyframe_at_start:
-            cmd.extend(["-force_key_frames", "0"])
-
-        # Audio-Codec
-        if video_info.get('acodec'):
-            # Verwende korrekte FFmpeg Encoder-Namen
-            if video_info['acodec'] == 'aac':
-                cmd.extend(["-c:a", "aac"])
-            elif video_info['acodec'] == 'mp3':
-                cmd.extend(["-c:a", "libmp3lame"])
-            elif video_info['acodec'] == 'opus':
-                cmd.extend(["-c:a", "libopus"])
-            elif video_info['acodec'] == 'vorbis':
-                cmd.extend(["-c:a", "libvorbis"])
-            else:
-                cmd.extend(["-c:a", "aac"])  # Sicherer Fallback
-
-            # Audio-Bitrate
-            if video_info.get('audio_bitrate'):
-                try:
-                    bitrate = int(video_info['audio_bitrate']) // 1000
-                    cmd.extend(["-b:a", f"{min(bitrate, 320)}k"])
-                except:
-                    cmd.extend(["-b:a", "192k"])
-            else:
-                cmd.extend(["-b:a", "192k"])
-
-            # Audio-Parameter
-            if video_info.get('sample_rate'):
-                cmd.extend(["-ar", str(video_info['sample_rate'])])
-            if video_info.get('channels'):
-                cmd.extend(["-ac", str(min(int(video_info['channels']), 2))])
-        else:
-            cmd.extend(["-an"])  # Kein Audio
-
-        # Timestamp-Handling und Optimierungen
-        cmd.extend([
-            "-avoid_negative_ts", "make_zero",
-            "-fflags", "+genpts",
-            "-movflags", "+faststart",
-            "-map", "0:v:0?", "-map", "0:a:0?",
-            output_path
-        ])
-
-        return cmd
-
-    def _encode_segment_robust(self, input_path: str, video_info: dict, output_path: str,
-                               ss: float, duration: float, force_keyframe_at_start: bool = True,
-                               segment_name: str = "Segment") -> bool:
-        """
-        Führt Encoding mit automatischem Software-Fallback bei Hardware-Fehlern aus.
-
-        Args:
-            input_path: Eingabe-Video
-            video_info: Video-Metadaten
-            output_path: Ausgabe-Datei
-            ss: Start-Zeit in Sekunden
-            duration: Dauer in Sekunden
-            force_keyframe_at_start: Keyframe am Anfang erzwingen
-            segment_name: Name für Logging
-
-        Returns:
-            True bei Erfolg, False bei Fehler
-        """
-        # Erst mit Hardware versuchen
-        cmd = self._build_encode_cmd(input_path, video_info, output_path,
-                                     ss, duration, force_keyframe_at_start,
-                                     use_software_fallback=False)
-
-        print(f"Encode {segment_name}: {' '.join(cmd[:15])}...")  # Erste 15 Argumente
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                              creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-
-        if result.returncode == 0 and os.path.exists(output_path):
-            print(f"✅ {segment_name} erfolgreich (Hardware)")
-            return True
-
-        # Bei Fehler: Prüfe ob es ein Hardware-Problem ist
-        stderr_lower = result.stderr.lower()
-        hw_errors = [
-            'incompatible pixel format',
-            'impossible to convert',
-            'could not open encoder',
-            'hwaccel',
-            'qsv',
-            'nvenc',
-            'amf',
-            'videotoolbox'
-        ]
-
-        is_hw_error = any(err in stderr_lower for err in hw_errors)
-
-        if is_hw_error:
-            print(f"⚠️ Hardware-Encoding fehlgeschlagen, versuche Software-Fallback...")
-            print(f"   Fehler: {result.stderr[:200]}")
-
-            # Cleanup fehlgeschlagener Output
-            if os.path.exists(output_path):
-                try:
-                    os.remove(output_path)
-                except:
-                    pass
-
-            # Erneuter Versuch mit Software-Encoding
-            cmd_sw = self._build_encode_cmd(input_path, video_info, output_path,
-                                           ss, duration, force_keyframe_at_start,
-                                           use_software_fallback=True)
-
-            print(f"Encode {segment_name} (Software): {' '.join(cmd_sw[:15])}...")
-            result_sw = subprocess.run(cmd_sw, capture_output=True, text=True,
-                                      creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-
-            if result_sw.returncode == 0 and os.path.exists(output_path):
-                print(f"✅ {segment_name} erfolgreich (Software-Fallback)")
-                return True
-            else:
-                print(f"❌ {segment_name} fehlgeschlagen (auch mit Software)")
-                raise subprocess.CalledProcessError(result_sw.returncode, cmd_sw,
-                                                   result_sw.stdout, result_sw.stderr)
-        else:
-            # Kein Hardware-Fehler, anderer Fehler
-            raise subprocess.CalledProcessError(result.returncode, cmd,
-                                              result.stdout, result.stderr)
 
     def _create_widgets(self):
         """Erstellt die UI-Elemente des Dialogs."""
@@ -551,11 +325,19 @@ class VideoCutterDialog(tk.Toplevel):
         apply_button_frame = tk.Frame(action_frame)
         apply_button_frame.grid(row=0, column=1, sticky="e")
 
-        self.buttons["split"] = tk.Button(apply_button_frame, text="Am Playhead teilen", command=self._on_split)
+        self.buttons["split"] = tk.Button(
+            apply_button_frame, text="Teilung planen", command=self._on_split_queue
+        )
         self.buttons["split"].pack(side=tk.LEFT, padx=5, ipady=5)
 
-        self.buttons["apply"] = tk.Button(apply_button_frame, text="Übernehmen (Schneiden)", command=self._on_apply,
-                                          font=("Arial", 10, "bold"), bg="#4CAF50", fg="white")
+        self.buttons["apply"] = tk.Button(
+            apply_button_frame,
+            text="Trim zur Warteschlange",
+            command=self._on_apply_queue,
+            font=("Arial", 10, "bold"),
+            bg="#4CAF50",
+            fg="white",
+        )
         self.buttons["apply"].pack(side=tk.LEFT, padx=5, ipady=5)
 
         self._set_processing(True)  # Starte im deaktivierten Modus, bis Video geladen ist
@@ -578,20 +360,34 @@ class VideoCutterDialog(tk.Toplevel):
 
     # --- UI Update & Event Handler ---
 
-    def _on_time_changed(self, event):
-        """Wird vom VLC Event aufgerufen, um Zeit und Playhead zu aktualisieren."""
-        # Verhindere Updates während der Verarbeitung oder beim Ziehen durch den Benutzer
+    def _on_time_changed_vlc(self, event):
+        """VLC-Thread: nur in die Tk-Queue einreihen."""
+        self._schedule_gui(self._on_time_changed_ui)
+
+    def _on_time_changed_ui(self):
+        """Hauptthread: Zeit und Playhead aus dem Player lesen und UI aktualisieren."""
         if self.is_processing or self.is_dragging_playhead:
+            return
+        if not self.media_player:
             return
 
         current_time = self.media_player.get_time()
-        if current_time < 0: current_time = 0
+        if current_time < 0:
+            current_time = 0
 
-        # Aktualisiere Zeit-Label
-        self.time_label.config(text=f"{self._format_time(current_time)} / {self._format_time(self.total_duration_ms)}")
-
-        # Zeichne nur den Playhead neu
+        self.time_label.config(
+            text=f"{self._format_time(current_time)} / {self._format_time(self.total_duration_ms)}"
+        )
         self._draw_playhead(current_time)
+
+    def _on_vlc_playing_vlc(self, event):
+        self._schedule_gui(lambda: self.play_pause_btn.config(text="⏸"))
+
+    def _on_vlc_paused_vlc(self, event):
+        self._schedule_gui(lambda: self.play_pause_btn.config(text="▶"))
+
+    def _on_vlc_stopped_vlc(self, event):
+        self._schedule_gui(lambda: self.play_pause_btn.config(text="▶"))
 
     def _format_time(self, ms: int) -> str:
         """Formatiert Millisekunden in MM:SS:mmm."""
@@ -730,12 +526,35 @@ class VideoCutterDialog(tk.Toplevel):
         self._seek_debounce_timer = self.after(50, lambda: self._perform_seek(target_time_ms))
 
     def _perform_seek(self, target_time_ms: int):
-        """Führt den eigentlichen Seek-Vorgang in einem Thread durch."""
-        threading.Thread(
-            target=self._set_time_thread_safe,
-            args=(target_time_ms,),
-            daemon=True
-        ).start()
+        """Seek nur im Tk-Hauptthread; überlappende Aufrufe werden zusammengefasst (last wins)."""
+        self._pending_seek_ms = target_time_ms
+        if self._seek_apply_job is not None:
+            try:
+                self.after_cancel(self._seek_apply_job)
+            except tk.TclError:
+                pass
+            self._seek_apply_job = None
+
+        def run():
+            self._seek_apply_job = None
+            self._apply_pending_seek()
+
+        try:
+            self._seek_apply_job = self.after(0, run)
+        except tk.TclError:
+            self._seek_apply_job = None
+
+    def _apply_pending_seek(self):
+        if not self.winfo_exists() or not self.media_player:
+            return
+        t = self._pending_seek_ms
+        if t is None:
+            return
+        try:
+            self.media_player.set_time(t)
+        except Exception as e:
+            print(f"Cutter set_time: {e}")
+        self.after(30, self._update_ui_after_seek)
 
     # --- Button-Aktionen ---
 
@@ -780,31 +599,10 @@ class VideoCutterDialog(tk.Toplevel):
         # 4. Debounced Seek für bessere Performance bei schnellen Tastendrücken
         self._debounced_seek(int(new_time))
 
-    def _set_time_thread_safe(self, target_time_ms: int):
-        """
-        [THREAD] Setzt die Zeit im VLC-Player mit Timeout-Schutz.
-        Optimiert für schnelles Zapping ohne UI-Freeze.
-        """
-        try:
-            # Direkt set_time aufrufen (VLC ist thread-safe)
-            # Das Blocking passiert im Thread, nicht im UI-Thread
-            self.media_player.set_time(target_time_ms)
-
-            # Kurz warten, damit VLC die Position aktualisiert
-            time.sleep(0.02)  # 20ms - minimal aber ausreichend
-
-            # UI-Update nur wenn Fenster noch existiert
-            if self.winfo_exists():
-                # Update mit kleiner Verzögerung für glatte Darstellung
-                self.after(30, self._update_ui_after_seek)
-
-        except Exception as e:
-            print(f"Fehler in _set_time_thread_safe: {e}")
-
     def _update_ui_after_seek(self):
         """Aktualisiert die UI nach einem Seek-Vorgang."""
         try:
-            if not self.winfo_exists():
+            if not self.winfo_exists() or not self.media_player:
                 return
 
             current_time = self.media_player.get_time()
@@ -858,177 +656,53 @@ class VideoCutterDialog(tk.Toplevel):
         self.destroy()  # Dialog selbst schließen
         self.on_complete_callback({"action": "cancel"})  # App benachrichtigen
 
-    def _on_apply(self):
-        """Startet den 'Trim'-Vorgang (Überschreiben)."""
-        if self.is_processing: return
-
-        if self.start_time_ms is None and self.end_time_ms is None:
-            messagebox.showinfo("Keine Änderung",
-                                "Sie haben keinen IN- or OUT-Punkt gesetzt. Es gibt nichts zu schneiden.", parent=self)
+    def _on_apply_queue(self):
+        """Legt einen Trim in die App-Warteschlange (ohne FFmpeg)."""
+        if self.is_processing:
             return
 
-        # Sicherstellen, dass Start < Ende
+        if self.start_time_ms is None and self.end_time_ms is None:
+            messagebox.showinfo(
+                "Keine Änderung",
+                "Sie haben keinen IN- oder OUT-Punkt gesetzt. Es gibt nichts zu schneiden.",
+                parent=self,
+            )
+            return
+
         start_ms = self.start_time_ms if self.start_time_ms is not None else 0
         end_ms = self.end_time_ms if self.end_time_ms is not None else self.total_duration_ms
         if self.start_time_ms is not None and self.end_time_ms is not None:
             if end_ms < start_ms:
                 start_ms, end_ms = end_ms, start_ms
 
-        # Player stoppen UND Mediendatei freigeben, um WinError 32 zu verhindern
         if self.media_player.is_playing():
             self.media_player.stop()
-        self.media_player.set_media(None)  # Wichtig! Gibt Datei frei
+        self.media_player.set_media(None)
 
-        self._set_processing(True)
-        self.status_label.config(text="Video wird geschnitten (Trim)...")
+        self._close_dialog_with_result(
+            {"action": "queue_trim", "start_ms": start_ms, "end_ms": end_ms}
+        )
 
-        threading.Thread(
-            target=self._run_cut_task,
-            args=(start_ms, end_ms),
-            daemon=True
-        ).start()
-
-    def _on_split(self):
-        """Startet den 'Split'-Vorgang."""
-        if self.is_processing: return
+    def _on_split_queue(self):
+        """Legt einen Split in die App-Warteschlange (ohne FFmpeg)."""
+        if self.is_processing:
+            return
 
         split_time_ms = self.media_player.get_time()
 
-        if split_time_ms <= 100 or split_time_ms >= (self.total_duration_ms - 100):  # Toleranz
-            messagebox.showwarning("Ungültiger Split-Punkt",
-                                   "Sie können nicht zu nah am Anfang oder Ende des Clips teilen.", parent=self)
+        if split_time_ms <= 100 or split_time_ms >= (self.total_duration_ms - 100):
+            messagebox.showwarning(
+                "Ungültiger Split-Punkt",
+                "Sie können nicht zu nah am Anfang oder Ende des Clips teilen.",
+                parent=self,
+            )
             return
 
-        # Player stoppen UND Mediendatei freigeben, um WinError 32 zu verhindern
         if self.media_player.is_playing():
             self.media_player.stop()
-        self.media_player.set_media(None)  # Wichtig! Gibt Datei frei
+        self.media_player.set_media(None)
 
-        self._set_processing(True)
-        self.status_label.config(text="Video wird geteilt (Split)...")
-
-        threading.Thread(
-            target=self._run_split_task,
-            args=(split_time_ms,),
-            daemon=True
-        ).start()
-
-    # --- Verarbeitungs-Threads (FFmpeg) ---
-
-    def _run_cut_task(self, start_ms: int, end_ms: int):
-        """
-        [THREAD] Führt präzisen Cut aus mit Smart-Cut-Technologie.
-        Nutzt VideoCutterService für saubere Trennung von UI und Logik.
-        """
-        # KORRIGIERT: Extension vom Input übernehmen statt hart .mp4
-        base, ext = os.path.splitext(self.video_path)
-        temp_output_path = f"{base}.__temp_cut__{ext}"
-
-        try:
-            start_sec = start_ms / 1000.0
-            end_sec = end_ms / 1000.0
-
-            # Progress-Callback für UI-Updates
-            def progress_callback(percent, status_text):
-                self.after(0, lambda: self.status_label.config(text=status_text))
-
-            # Service aufrufen
-            success = self.cutter_service.execute_trim(
-                self.video_path,
-                start_sec,
-                end_sec,
-                temp_output_path,
-                progress_callback
-            )
-
-            if not success:
-                raise Exception("Trim-Operation fehlgeschlagen")
-
-            # Original überschreiben (atomarer mit os.replace statt copy2+remove)
-            self.after(0, lambda: self.status_label.config(text="Überschreibe Original..."))
-            time.sleep(0.2)
-
-            # Atomare Ersetzung (robuster als copy+remove)
-            if os.path.exists(temp_output_path):
-                os.replace(temp_output_path, self.video_path)
-                print(f"✅ Video erfolgreich getrimmt: {self.video_path}")
-            else:
-                raise Exception("Temporäre Ausgabe nicht gefunden")
-
-            # Callback im Haupt-Thread auslösen
-            self.after(0, self._handle_processing_complete, {"action": "cut"})
-
-        except Exception as e:
-            self._handle_error_in_thread(f"Fehler beim Smart Cut: {e}")
-        finally:
-            # Cleanup temp file
-            if os.path.exists(temp_output_path):
-                try:
-                    os.remove(temp_output_path)
-                except Exception as del_e:
-                    print(f"Konnte temp. Schnittdatei nicht löschen: {del_e}")
-
-    def _run_split_task(self, split_time_ms: int):
-        """
-        [THREAD] Führt präzisen Split aus.
-        Nutzt VideoCutterService für saubere Trennung von UI und Logik.
-        """
-        base, ext = os.path.splitext(self.video_path)
-        temp_part1_path = f"{base}.__temp_part1__{ext}"
-        part2_path = f"{base}_2{ext}"
-
-        try:
-            split_sec = split_time_ms / 1000.0
-
-            # Progress-Callback für UI-Updates
-            def progress_callback(percent, status_text):
-                self.after(0, lambda: self.status_label.config(text=status_text))
-
-            # Service aufrufen
-            success = self.cutter_service.execute_split(
-                self.video_path,
-                split_sec,
-                temp_part1_path,
-                part2_path,
-                progress_callback
-            )
-
-            if not success:
-                raise Exception("Split-Operation fehlgeschlagen")
-
-            # Finalisierung: Teil 1 überschreibt Original, wird dann zu _1 umbenannt
-            self.after(0, lambda: self.status_label.config(text="Finalisiere Split..."))
-            time.sleep(0.2)
-
-            # Definiere part1_path
-            part1_path = f"{base}_1{ext}"
-
-            # Atomare Operationen
-            if os.path.exists(temp_part1_path):
-                # Original wird mit Teil 1 überschrieben
-                os.replace(temp_part1_path, self.video_path)
-                # Original-Video wird zu _1 umbenannt
-                os.replace(self.video_path, part1_path)
-
-                print("\n=== SPLIT ERFOLGREICH ===")
-                print(f"Teil 1: {part1_path}")
-                print(f"Teil 2: {part2_path}\n")
-            else:
-                raise Exception("Temporäre Teil-1-Datei nicht gefunden")
-
-            # Callback im Haupt-Thread auslösen
-            result = {"action": "split", "part1_path": part1_path, "part2_path": part2_path}
-            self.after(0, self._handle_processing_complete, result)
-
-        except Exception as e:
-            self._handle_error_in_thread(f"Fehler beim Split: {e}")
-        finally:
-            # Cleanup temp file
-            if temp_part1_path and os.path.exists(temp_part1_path):
-                try:
-                    os.remove(temp_part1_path)
-                except Exception as del_e:
-                    print(f"Konnte temp. Split-Datei nicht löschen: {del_e}")
+        self._close_dialog_with_result({"action": "queue_split", "split_ms": split_time_ms})
 
     # --- Thread-Kommunikation & Status ---
 
@@ -1050,10 +724,6 @@ class VideoCutterDialog(tk.Toplevel):
 
         # Play-Button separat
         self.play_pause_btn.config(state=tk.DISABLED if is_processing else tk.NORMAL)
-
-    def _handle_error_in_thread(self, error_msg: str):
-        """[THREAD-SAFE] Zeigt einen Fehler im Haupt-Thread an."""
-        self.after(0, self._handle_error, error_msg)
 
     def _handle_error(self, error_msg: str):
         """[MAIN-THREAD] Zeigt Fehler an und setzt UI zurück."""
@@ -1089,35 +759,37 @@ class VideoCutterDialog(tk.Toplevel):
                 self.play_pause_btn.config(text="▶")
                 # Zeit auf 0 setzen
                 self.after(50, lambda: self.media_player.set_time(0))
-                self.after(100, lambda: self._on_time_changed(None))  # UI Update erzwingen
+                self.after(100, self._on_time_changed_ui)  # UI Update erzwingen
         except Exception as e:
             print(f"Fehler beim Neuladen des Mediums: {e}")
 
-    def _handle_processing_complete(self, result: dict):
-        """[MAIN-THREAD] Wird aufgerufen, wenn Cut/Split erfolgreich war."""
-        print("Verarbeitung erfolgreich abgeschlossen.")
-        # KORREKTUR: Setze UI zurück *bevor* der Callback die App benachrichtigt
+    def _close_dialog_with_result(self, result: dict):
+        """Schließt den Dialog und meldet das Ergebnis an die App (z. B. Warteschlange)."""
         self._set_processing(False)
-
-        # Räume VLC-Ressourcen auf *bevor* der Dialog zerstört wird
         self._cleanup()
-
-        # WICHTIG: grab_release() vor destroy(), sonst kann Hauptfenster blockieren
-        self.grab_release()
-        self.destroy()  # Dialog selbst schließen
-
-        # App benachrichtigen, dass alles fertig ist
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
         self.on_complete_callback(result)
 
     def _cleanup(self):
         """Stoppt den Player und gibt VLC-Ressourcen frei."""
-        # Cleanup für Debounce-Timer
+        # Cleanup für Debounce-Timer und Seek-Queue
         if hasattr(self, '_seek_debounce_timer') and self._seek_debounce_timer is not None:
             try:
                 self.after_cancel(self._seek_debounce_timer)
                 self._seek_debounce_timer = None
-            except:
+            except tk.TclError:
                 pass
+        if getattr(self, '_seek_apply_job', None) is not None:
+            try:
+                self.after_cancel(self._seek_apply_job)
+                self._seek_apply_job = None
+            except tk.TclError:
+                pass
+        self._pending_seek_ms = None
 
         # VLC-Player cleanup
         if hasattr(self, 'media_player') and self.media_player:
@@ -1150,13 +822,26 @@ class VideoCutterDialog(tk.Toplevel):
             except Exception as e:
                 print(f"Fehler beim Freigeben der VLC-Instanz: {e}")
 
-    def _on_end_reached(self, event):
-        """Setzt den Player auf Anfang zurück, wenn das Ende erreicht ist."""
-        # self._stop_updater() # Nicht mehr nötig
+    def _on_end_reached_vlc(self, event):
+        """VLC-Thread: Ende der Wiedergabe — UI/Player nur im Hauptthread."""
+        self._schedule_gui(self._on_end_reached_ui)
+
+    def _on_end_reached_ui(self):
+        """Hauptthread: Player stoppen und Anzeige zurücksetzen."""
+        if not self.media_player:
+            return
         self.play_pause_btn.config(text="▶")
-        # Setze Zeit auf 0 und stoppe den Player explizit
-        self.after(50, lambda: (
-            self.media_player.stop(),  # Wichtig: Stoppen, nicht nur Zeit setzen
-            self._draw_playhead(0),
-            self.time_label.config(text=f"{self._format_time(0)} / {self._format_time(self.total_duration_ms)}")
-        ))
+
+        def after_stop():
+            if not self.winfo_exists() or not self.media_player:
+                return
+            try:
+                self.media_player.stop()
+            except Exception as e:
+                print(f"Cutter stop am Ende: {e}")
+            self._draw_playhead(0)
+            self.time_label.config(
+                text=f"{self._format_time(0)} / {self._format_time(self.total_duration_ms)}"
+            )
+
+        self.after(50, after_stop)

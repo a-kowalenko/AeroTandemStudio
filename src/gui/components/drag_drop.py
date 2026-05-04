@@ -235,6 +235,14 @@ class DragDropFrame:
         self.cut_button = tk.Button(video_button_frame, text="✂ Schneiden", command=self.open_cut_dialog)
         self.cut_button.pack(side=tk.LEFT, padx=5)
 
+        self.apply_pending_cuts_button = tk.Button(
+            video_button_frame,
+            text="Warteschlange anwenden …",
+            command=self.open_apply_pending_cuts_dialog,
+            state="disabled",
+        )
+        self.apply_pending_cuts_button.pack(side=tk.LEFT, padx=5)
+
         tk.Button(video_button_frame, text="✕ Entfernen", command=self.remove_selected_video).pack(side=tk.LEFT, padx=2)
         tk.Button(video_button_frame, text="🗑 Alle Videos löschen", command=self.clear_videos).pack(side=tk.LEFT, padx=2)
 
@@ -1082,6 +1090,9 @@ class DragDropFrame:
             if self.app and hasattr(self.app, 'video_preview'):
                 self.app.video_preview.remove_path_from_cache(original_path)
 
+            if self.app and hasattr(self.app, "discard_pending_cuts_for_path"):
+                self.app.discard_pending_cuts_for_path(original_path)
+
             # NEU: Aktualisiere Wasserzeichen-Index
             if self.watermark_clip_index == index:
                 self.watermark_clip_index = None
@@ -1140,6 +1151,9 @@ class DragDropFrame:
     def clear_videos(self):
         """Entfernt alle Videos"""
         self.video_paths.clear()
+
+        if self.app and hasattr(self.app, "clear_pending_video_cuts"):
+            self.app.clear_pending_video_cuts()
 
         # NEU: Löschen Sie auch die Wasserzeichen-Auswahl
         self.watermark_clip_index = None
@@ -1393,6 +1407,24 @@ class DragDropFrame:
 
         # Rufe die Methode in app.py auf
         self.app.request_cut_dialog(video_path, index)
+
+    def open_apply_pending_cuts_dialog(self):
+        if not self.app or not hasattr(self.app, "request_apply_pending_cuts"):
+            messagebox.showerror("Fehler", "Warteschlange ist in dieser Ansicht nicht verfügbar.")
+            return
+        self.app.request_apply_pending_cuts()
+
+    def set_pending_cuts_count(self, count: int):
+        """Aktiviert den Button zur Anwendung der geplanten Schnitte."""
+        if not hasattr(self, "apply_pending_cuts_button"):
+            return
+        if count > 0:
+            self.apply_pending_cuts_button.config(
+                state="normal",
+                text=f"Warteschlange anwenden ({count}) …",
+            )
+        else:
+            self.apply_pending_cuts_button.config(state="disabled", text="Warteschlange anwenden …")
 
     def set_cut_button_enabled(self, enabled: bool):
         """Sperrt/Entsperrt den Schneiden-Button basierend auf Vorschau-Status."""

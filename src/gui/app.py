@@ -1,5 +1,6 @@
 ﻿import tkinter as tk
 from tkinter import messagebox, ttk
+import math
 import threading
 import os
 import queue
@@ -183,6 +184,114 @@ class VideoGeneratorApp:
         # Weiter mit nächstem Init-Schritt
         self.root.after(10, self._init_step_2)
 
+    def _create_reset_session_icon(self):
+        """Raster-Reload-Icon (weiß, transparent); None bei fehlendem PIL."""
+        try:
+            from PIL import Image, ImageDraw, ImageTk
+        except ImportError:
+            return None
+        try:
+            size = 24
+            scale = 5
+            s = size * scale
+            img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            cx = cy = s / 2
+            r = s * 0.36
+            stroke = max(int(round(s * 0.09)), scale * 2)
+            white = (255, 255, 255, 255)
+            # Bogen (Lücke oben-rechts), Pfeil am Endpunkt
+            draw.arc(
+                [cx - r, cy - r, cx + r, cy + r],
+                start=38,
+                end=328,
+                fill=white,
+                width=stroke,
+            )
+            end_deg = 328
+            theta = math.radians(end_deg)
+            tx = cx + r * math.cos(theta)
+            ty = cy + r * math.sin(theta)
+            travel = math.radians(end_deg + 90)
+            ah = r * 0.52
+            spread = math.radians(36)
+            p0 = (tx, ty)
+            p1 = (tx - ah * math.cos(travel - spread), ty - ah * math.sin(travel - spread))
+            p2 = (tx - ah * math.cos(travel + spread), ty - ah * math.sin(travel + spread))
+            draw.polygon([p0, p1, p2], fill=white)
+            try:
+                resample = Image.Resampling.LANCZOS
+            except AttributeError:
+                resample = Image.LANCZOS
+            img = img.resize((size, size), resample)
+            return ImageTk.PhotoImage(img)
+        except Exception:
+            return None
+
+    def _build_reset_session_button(self, controls_row, size_reference_button=None):
+        """Zurücksetzen-Button mit Raster-Icon (Fallback: Unicode).
+
+        Mit size_reference_button (Erstellen): gleiche Höhe und Breite wie früher
+        width=4 / width=36 relativ zum Erstellen-Button.
+        """
+        self._reset_session_icon = self._create_reset_session_icon()
+        base_kw = dict(
+            command=self.reset_session,
+            bg="#FF9800",
+            fg="white",
+            activebackground="#F57C00",
+            activeforeground="white",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+
+        parent = controls_row
+        if size_reference_button is not None:
+            self.root.update_idletasks()
+            ref = size_reference_button
+            ref_h = max(ref.winfo_reqheight(), 1)
+            ref_w_full = max(ref.winfo_reqwidth(), 1)
+            reset_w = max(int(round(ref_w_full * (4.0 / 36.0))), ref_h)
+            shell = tk.Frame(
+                controls_row,
+                height=ref_h,
+                width=reset_w,
+                bg="#FF9800",
+                highlightthickness=0,
+                bd=0,
+            )
+            shell.pack_propagate(False)
+            shell.pack(side="right")
+            parent = shell
+
+        if self._reset_session_icon is not None:
+            self.reset_session_button = tk.Button(
+                parent,
+                image=self._reset_session_icon,
+                compound=tk.CENTER,
+                **base_kw,
+            )
+        else:
+            fb_kw = dict(**base_kw)
+            if parent is controls_row:
+                fb_kw["width"] = 4
+                fb_kw["height"] = 2
+            self.reset_session_button = tk.Button(
+                parent,
+                text="\u21bb",
+                font=("Arial", 12, "bold"),
+                **fb_kw,
+            )
+
+        if parent is controls_row:
+            self.reset_session_button.pack(side="right")
+        else:
+            self.reset_session_button.pack(expand=True, fill="both")
+
+        self.create_tooltip(self.reset_session_button, "Formular und alle importierten Medien leeren")
+
     def _finish_setup_gui(self):
         """Finalisiert setup_gui - erstellt Upload-Frame etc."""
         # Event-Binding
@@ -232,6 +341,8 @@ class VideoGeneratorApp:
                                           bg="#4CAF50", fg="white",
                                           width=36, height=2)
         self.erstellen_button.pack(side="right", padx=(10, 0))
+
+        self._build_reset_session_button(controls_row, size_reference_button=self.erstellen_button)
 
         self.pack_components()
         self.load_settings()
@@ -431,6 +542,7 @@ class VideoGeneratorApp:
         )
         self.erstellen_button.pack(side="right", padx=(10, 0))
 
+        self._build_reset_session_button(controls_row, size_reference_button=self.erstellen_button)
 
         self.pack_components()
         self.load_settings()
@@ -476,19 +588,6 @@ class VideoGeneratorApp:
         self.sd_status_indicator.create_widgets()
         # Wird später gepackt wenn Monitoring aktiv ist
 
-        # Zurücksetzen (rechts, links neben Einstellungen)
-        self.reset_session_button = tk.Button(
-            header_frame,
-            text="Zurücksetzen",
-            font=("Arial", 10),
-            command=self.reset_session,
-            bg="#eceff1",
-            fg="#37474f",
-            relief="flat",
-            padx=10,
-        )
-        self.reset_session_button.pack(side="right", padx=(0, 6))
-
         # Settings-Button (rechts)
         self.settings_button = tk.Button(
             header_frame,
@@ -503,7 +602,6 @@ class VideoGeneratorApp:
 
         # Tooltip für Settings-Button
         self.create_tooltip(self.settings_button, "Einstellungen öffnen")
-        self.create_tooltip(self.reset_session_button, "Formular und alle importierten Medien leeren")
 
     def create_tooltip(self, widget, text):
         """Erstellt einen Tooltip für ein Widget"""

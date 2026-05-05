@@ -364,8 +364,6 @@ class SDCardMonitor:
         """
         try:
             limit_mb = settings.get("sd_size_limit_mb", 2000)
-            skip_processed = settings.get("sd_skip_processed", False)
-
             # Scanne Dateien
             dcim_source = os.path.join(drive, "DCIM")
             if not os.path.isdir(dcim_source):
@@ -390,13 +388,9 @@ class SDCardMonitor:
                         try:
                             size_bytes = os.path.getsize(file_path)
 
-                            # Filtere bereits verarbeitete Dateien wenn Option aktiv
-                            if skip_processed:
-                                ident = self.history.compute_identity(file_path)
-                                if ident:
-                                    identity_hash, _ = ident
-                                    if self.history.contains(identity_hash):
-                                        continue  # Überspringe bereits verarbeitete Datei
+                            # Performance: Für den Größenlimit-Dialog keine teuren
+                            # Hash-/Historienprüfungen durchführen. Der eigentliche
+                            # Backup-Schritt filtert Duplikate weiterhin korrekt.
 
                             files_info.append({
                                 'path': file_path,

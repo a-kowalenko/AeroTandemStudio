@@ -7,6 +7,7 @@ import os
 from PIL import Image, ImageTk
 import subprocess
 import threading
+from collections import deque
 
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 
@@ -43,6 +44,7 @@ class SDFileSelectorDialog:
 
         # Thumbnail-Cache
         self.thumbnail_cache = {}  # path -> PhotoImage
+        self._prepare_file_metadata()
 
         # NEU: Drag-Selection Variablen
         self.drag_start_x = 0
@@ -56,9 +58,20 @@ class SDFileSelectorDialog:
         self.thumbnail_widgets = {}  # path -> (frame_widget, bbox)
 
         # NEU: Async Thumbnail-Loading
-        self.thumbnail_queue = []  # Queue von (file_info, thumb_label) Paaren
+        self.thumbnail_queue = deque()  # Queue von (file_info, thumb_label) Paaren
         self.is_loading_thumbnails = False
         self.loading_cancelled = False
+        self._thumbnail_workers_active = 0
+        self._max_thumbnail_workers = 2
+
+        # Progressive Rendering
+        self.thumbnail_batch_size = 60
+        self.details_batch_size = 250
+        self._filtered_files_cache = []
+        self._thumbnail_render_index = 0
+        self._details_render_index = 0
+        self._thumb_render_generation = 0
+        self._details_render_generation = 0
 
         # Mousewheel-Scrolling Callback (wird von switch_to_thumbnails gesetzt)
         self.mousewheel_callback = None
@@ -67,6 +80,18 @@ class SDFileSelectorDialog:
         self.sd_card_path = None
         self.sd_check_running = False
         self._extract_sd_card_path()
+
+    def _prepare_file_metadata(self):
+        """Berechnet Dateisystem-Metadaten einmalig für schnellere Filter/Sortierung."""
+        for file_info in self.files_info:
+            path = file_info.get('path')
+            if not path:
+                file_info['mtime'] = 0
+                continue
+            try:
+                file_info['mtime'] = os.path.getmtime(path)
+            except Exception:
+                file_info['mtime'] = 0
 
     def show(self):
         """Zeigt den Dialog an"""
@@ -351,35 +376,17 @@ class SDFileSelectorDialog:
         self.thumbnail_widgets = {}
 
         # Reset Thumbnail-Queue
-        self.thumbnail_queue = []
+        self.thumbnail_queue = deque()
         self.loading_cancelled = False
+        self._thumb_render_generation += 1
+        generation = self._thumb_render_generation
 
         # Canvas-Referenz für Scroll-Handler speichern
         self.current_canvas = canvas
 
         # Filtere und sortiere Dateien
-        filtered_files = self.get_filtered_files()
-
-        # Thumbnails in Grid anzeigen - SOFORT ohne auf Loading zu warten
-        cols = 4
-        for idx, file_info in enumerate(filtered_files):
-            row = idx // cols
-            col = idx % cols
-
-            frame_widget = self.create_thumbnail_widget(scrollable_frame, file_info, row, col)
-
-            # Speichere Widget und Position für Drag-Selection
-            if frame_widget:
-                # Warte bis Widget platziert ist
-                scrollable_frame.update_idletasks()
-                x = frame_widget.winfo_x()
-                y = frame_widget.winfo_y()
-                w = frame_widget.winfo_width()
-                h = frame_widget.winfo_height()
-                self.thumbnail_widgets[file_info['path']] = (frame_widget, (x, y, x+w, y+h))
-
-        # Starte asynchrones Thumbnail-Loading
-        self.start_thumbnail_loading()
+        self._filtered_files_cache = self.get_filtered_files()
+        self._thumbnail_render_index = 0
 
         canvas.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
@@ -514,6 +521,49 @@ class SDFileSelectorDialog:
         # WICHTIG: Binde auch auf view_container für globales Scrolling
         self.view_container.bind("<MouseWheel>", _on_mousewheel, add=True)
 
+        # Rendere Kacheln in Batches für flüssigere UI
+        self._render_thumbnail_batch(scrollable_frame, generation)
+
+    def _render_thumbnail_batch(self, parent, generation):
+        """Rendert Kacheln schrittweise, um die UI responsiv zu halten."""
+        if generation != self._thumb_render_generation or self.loading_cancelled:
+            return
+        if not parent.winfo_exists():
+            return
+
+        start = self._thumbnail_render_index
+        end = min(start + self.thumbnail_batch_size, len(self._filtered_files_cache))
+        cols = 4
+
+        for idx in range(start, end):
+            file_info = self._filtered_files_cache[idx]
+            row = idx // cols
+            col = idx % cols
+            frame_widget = self.create_thumbnail_widget(parent, file_info, row, col)
+            if frame_widget:
+                self.thumbnail_widgets[file_info['path']] = (frame_widget, (0, 0, 0, 0))
+
+        self._thumbnail_render_index = end
+        self._refresh_thumbnail_bboxes()
+        self.start_thumbnail_loading()
+
+        if end < len(self._filtered_files_cache):
+            self.dialog.after(1, lambda: self._render_thumbnail_batch(parent, generation))
+
+    def _refresh_thumbnail_bboxes(self):
+        """Aktualisiert Widget-Bounding-Boxes gesammelt statt pro Element."""
+        for path, (widget, _) in list(self.thumbnail_widgets.items()):
+            try:
+                if not widget.winfo_exists():
+                    continue
+                x = widget.winfo_x()
+                y = widget.winfo_y()
+                w = widget.winfo_width()
+                h = widget.winfo_height()
+                self.thumbnail_widgets[path] = (widget, (x, y, x + w, y + h))
+            except Exception:
+                continue
+
     def _on_tab_changed(self, event):
         """Handler für Tab-Wechsel"""
         selected_tab = self.notebook.index(self.notebook.select())
@@ -546,9 +596,8 @@ class SDFileSelectorDialog:
         elif sort_by == "Typ":
             files.sort(key=lambda f: (not f['is_video'], f['filename'].lower()), reverse=reverse)
         elif sort_by == "Datum":
-            # Sortiere nach Datei-Änderungsdatum
-            import os
-            files.sort(key=lambda f: os.path.getmtime(f['path']), reverse=reverse)
+            # Sortiere nach gecachtem Datei-Änderungsdatum
+            files.sort(key=lambda f: f.get('mtime', 0), reverse=reverse)
 
         return files
 
@@ -951,10 +1000,58 @@ class SDFileSelectorDialog:
         tree.column('path', width=250)
 
         # Filtere und sortiere Dateien
-        filtered_files = self.get_filtered_files()
+        self._filtered_files_cache = self.get_filtered_files()
+        self._details_render_index = 0
+        self._details_render_generation += 1
+        generation = self._details_render_generation
+        self._render_details_batch(tree, generation)
 
-        # Daten einfügen
-        for file_info in filtered_files:
+        # Events
+        def on_tree_select(event):
+            # Lösche alle Markierungen und setze neu basierend auf TreeView-Selection
+            selected_items = tree.selection()
+            new_markierte_paths = set()
+            for item in selected_items:
+                path = tree.item(item)['tags'][0]
+                if path not in self.selected_paths:
+                    new_markierte_paths.add(path)
+            self.markierte_paths = new_markierte_paths
+
+            for item in tree.get_children():
+                path = tree.item(item)['tags'][0]
+                values = list(tree.item(item)['values'])
+                if path in self.selected_paths:
+                    values[0] = '✅'
+                elif path in self.markierte_paths:
+                    values[0] = '⬛'
+                else:
+                    values[0] = ''
+                tree.item(item, values=values)
+
+            self.update_mark_button()
+
+        tree.bind('<<TreeviewSelect>>', on_tree_select)
+
+        def on_double_click(event):
+            item = tree.identify_row(event.y)
+            if item:
+                path = tree.item(item)['tags'][0]
+                file_info = next(f for f in self.files_info if f['path'] == path)
+                self.show_preview(file_info)
+
+        tree.bind('<Double-Button-1>', on_double_click)
+
+    def _render_details_batch(self, tree, generation):
+        """Fügt Detail-Zeilen in Batches ein, um Hänger zu vermeiden."""
+        if generation != self._details_render_generation:
+            return
+        if not tree.winfo_exists():
+            return
+
+        start = self._details_render_index
+        end = min(start + self.details_batch_size, len(self._filtered_files_cache))
+        for idx in range(start, end):
+            file_info = self._filtered_files_cache[idx]
             is_marked = file_info['path'] in self.markierte_paths
             is_selected = file_info['path'] in self.selected_paths
 
@@ -969,10 +1066,9 @@ class SDFileSelectorDialog:
             size_mb = file_info['size_bytes'] / (1024 * 1024)
 
             # Filedatum
-            import os
             import time
             try:
-                mtime = os.path.getmtime(file_info['path'])
+                mtime = file_info.get('mtime', 0)
                 date_str = time.strftime("%d.%m.%Y %H:%M", time.localtime(mtime))
             except:
                 date_str = "Unbekannt"
@@ -985,56 +1081,9 @@ class SDFileSelectorDialog:
                 date_str,
                 file_info['path']
             ), tags=(file_info['path'],))
-
-        # NEU: TreeviewSelect Event - Synchronisiere markierte_paths mit TreeView-Selection
-        def on_tree_select(event):
-            # Lösche alle Markierungen und setze neu basierend auf TreeView-Selection
-            # WICHTIG: Nur nicht-ausgewählte Dateien können markiert werden
-
-            # Hole alle aktuell selektierten Items im TreeView (blau markiert)
-            selected_items = tree.selection()
-
-            # Baue neue Markierungs-Liste auf
-            new_markierte_paths = set()
-
-            for item in selected_items:
-                path = tree.item(item)['tags'][0]
-
-                # Überspringe bereits ausgewählte Files (grün)
-                if path not in self.selected_paths:
-                    new_markierte_paths.add(path)
-
-            # Update markierte_paths
-            self.markierte_paths = new_markierte_paths
-
-            # Update Tree-Symbole für ALLE Dateien
-            for item in tree.get_children():
-                path = tree.item(item)['tags'][0]
-                values = list(tree.item(item)['values'])
-
-                if path in self.selected_paths:
-                    values[0] = '✅'  # Grün: Ausgewählt
-                elif path in self.markierte_paths:
-                    values[0] = '⬛'  # Schwarz: Markiert (blau selektiert)
-                else:
-                    values[0] = ''
-
-                tree.item(item, values=values)
-
-            self.update_mark_button()
-
-        # Binde TreeviewSelect Event (feuert bei Shift+Ctrl+Click und normalen Clicks)
-        tree.bind('<<TreeviewSelect>>', on_tree_select)
-
-        # Doppelklick für Preview
-        def on_double_click(event):
-            item = tree.identify_row(event.y)
-            if item:
-                path = tree.item(item)['tags'][0]
-                file_info = next(f for f in self.files_info if f['path'] == path)
-                self.show_preview(file_info)
-
-        tree.bind('<Double-Button-1>', on_double_click)
+        self._details_render_index = end
+        if end < len(self._filtered_files_cache):
+            self.dialog.after(1, lambda: self._render_details_batch(tree, generation))
 
     def show_preview(self, file_info):
         """Zeigt Vorschau für eine Datei"""
@@ -1477,20 +1526,22 @@ class SDFileSelectorDialog:
 
     def start_thumbnail_loading(self):
         """Startet asynchrones Laden der Thumbnails in einem Background-Thread"""
-        if self.is_loading_thumbnails or not self.thumbnail_queue:
+        if not self.thumbnail_queue:
             return
 
-        self.is_loading_thumbnails = True
-
-        # Starte Thread für Thumbnail-Generierung
-        thread = threading.Thread(target=self._load_thumbnails_worker, daemon=True)
-        thread.start()
+        while self._thumbnail_workers_active < self._max_thumbnail_workers and self.thumbnail_queue:
+            self._thumbnail_workers_active += 1
+            self.is_loading_thumbnails = True
+            thread = threading.Thread(target=self._load_thumbnails_worker, daemon=True)
+            thread.start()
 
     def _load_thumbnails_worker(self):
         """Worker-Thread: Lädt Thumbnails nacheinander und aktualisiert UI"""
-        while self.thumbnail_queue and not self.loading_cancelled:
-            # Hole nächstes Item aus Queue
-            file_info, thumb_label, thumb_frame, container_frame, on_click, on_double_click = self.thumbnail_queue.pop(0)
+        while not self.loading_cancelled:
+            try:
+                file_info, thumb_label, thumb_frame, container_frame, on_click, on_double_click = self.thumbnail_queue.popleft()
+            except IndexError:
+                break
 
             # Generiere Thumbnail
             thumbnail_img = self.generate_thumbnail(file_info)
@@ -1511,7 +1562,8 @@ class SDFileSelectorDialog:
                 except:
                     break
 
-        self.is_loading_thumbnails = False
+        self._thumbnail_workers_active = max(0, self._thumbnail_workers_active - 1)
+        self.is_loading_thumbnails = self._thumbnail_workers_active > 0
 
     def _update_thumbnail_ui(self, thumb_label, thumb_frame, thumbnail_img, on_click, on_double_click):
         """Aktualisiert Thumbnail im UI (läuft im Haupt-Thread)"""

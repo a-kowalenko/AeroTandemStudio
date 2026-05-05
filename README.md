@@ -458,7 +458,7 @@ Pfad: `config/config.json`
 {
   "speicherort": "C:\\Videos\\Tandem",
   "ort": "Calden",
-  "dauer": 8,
+  "dauer": 5,
   "outside_video": false,
   "tandemmaster": "",
   "videospringer": "",

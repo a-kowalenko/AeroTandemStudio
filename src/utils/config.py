@@ -41,7 +41,7 @@ class ConfigManager:
         return {
             "speicherort": "",
             "ort": "Calden",
-            "dauer": 8,
+            "dauer": 5,
             "outside_video": False,
             "tandemmaster": "",
             "videospringer": "",

@@ -237,7 +237,7 @@ class VideoProcessor:
         tandemmaster = form_data["tandemmaster"]
         videospringer = form_data["videospringer"]
         datum = form_data["datum"]
-        dauer = settings.get("dauer", "8")
+        dauer = settings.get("dauer", "5")
         ort = form_data["ort"]
         speicherort = settings.get("speicherort", "")
         outside_video_mode = form_data["video_mode"] == "outside"

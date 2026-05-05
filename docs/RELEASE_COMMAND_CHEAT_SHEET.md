@@ -32,6 +32,13 @@
 
 ## Pre-Release Workflows
 
+### Vorher -> Nachher: `python build.py major --prerelease alpha`
+
+- `0.11.3.1` -> `1.0.0.0-alpha`
+- `0.2.0-alpha` -> `1.0.0.0-alpha`
+- `5.9.0-beta.3` -> `6.0.0.0-alpha`
+- `1.2.3` -> `2.0.0.0-alpha`
+
 ### Alpha
 
 - Neue Alpha nach Minor-Bump:

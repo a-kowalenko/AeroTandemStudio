@@ -1133,7 +1133,7 @@ class SettingsDialog:
 
         # Allgemein
         self.speicherort_var.set(settings.get("speicherort", ""))
-        self.dauer_var.set(str(settings.get("dauer", 8)))
+        self.dauer_var.set(str(settings.get("dauer", 5)))
 
         # SD-Karten Backup
         self.sd_backup_folder_var.set(settings.get("sd_backup_folder", ""))

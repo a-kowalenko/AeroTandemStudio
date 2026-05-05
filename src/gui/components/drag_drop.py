@@ -136,6 +136,7 @@ class DragDropFrame:
         self.watermark_clip_index = None  # NEU: Index des Clips für Wasserzeichen
         self.watermark_photo_indices = []  # NEU: Liste für Foto-Mehrfachauswahl
         self.show_watermark_column = False  # NEU: Steuert Sichtbarkeit der Wasserzeichen-Spalte
+        self._wm_auto_select_running = False
         self.is_encoding = False  # NEU: Steuert Sichtbarkeit der Progress-Spalte vs. Datum/Uhrzeit
         # Unix-Zeit der Quelldatei beim Import-Kopieren (Key: normpath der Kopie im temp_dir)
         self._import_source_ts_by_dest: dict[str, float] = {}
@@ -2023,74 +2024,93 @@ class DragDropFrame:
         was_visible = self.show_watermark_column
         self.show_watermark_column = visible
 
+        # Keine Arbeit, wenn Sichtbarkeit unverändert ist.
+        if was_visible == visible:
+            return
+
         if visible:
             self.video_tree.column("WM", width=20, minwidth=30, stretch=False)
 
             # NEU: Automatisch längstes Video auswählen, wenn Spalte neu sichtbar wird
             # und noch kein Video markiert ist
             if not was_visible and self.watermark_clip_index is None and self.video_paths:
-                self._auto_select_longest_video()
+                self._auto_select_longest_video_async()
         else:
             self.video_tree.column("WM", width=0, minwidth=0, stretch=False)
 
         # Aktualisiere die Tabelle, um die Änderungen sofort zu reflektieren
         self.video_tree.update_idletasks()
 
+    def _auto_select_longest_video_async(self):
+        """Startet die Auswahl des längsten Videos asynchron, um UI-Ruckler zu vermeiden."""
+        if self._wm_auto_select_running:
+            return
+        self._wm_auto_select_running = True
+
+        worker = threading.Thread(target=self._auto_select_longest_video, daemon=True)
+        worker.start()
+
     def _auto_select_longest_video(self):
         """
         Wählt automatisch das längste Video als Wasserzeichen aus.
         Wird aufgerufen, wenn die Wasserzeichen-Spalte sichtbar wird.
         """
-        if not self.video_paths:
-            return
+        try:
+            if not self.video_paths:
+                return
 
-        longest_index = None
-        longest_duration = 0.0
+            longest_index = None
+            longest_duration = 0.0
 
-        for i, video_path in enumerate(self.video_paths):
-            # Versuche Dauer aus Metadaten-Cache zu holen
-            duration_seconds = 0.0
+            for i, video_path in enumerate(self.video_paths):
+                # Versuche Dauer aus Metadaten-Cache zu holen
+                duration_seconds = 0.0
 
-            if self.app and hasattr(self.app, 'video_preview'):
-                metadata = self.app.video_preview.get_cached_metadata(video_path)
-                if metadata:
-                    duration_str = metadata.get("duration", "0:00")
-                    # Konvertiere "MM:SS" zu Sekunden
+                if self.app and hasattr(self.app, 'video_preview'):
+                    metadata = self.app.video_preview.get_cached_metadata(video_path)
+                    if metadata:
+                        duration_str = metadata.get("duration", "0:00")
+                        # Konvertiere "MM:SS" zu Sekunden
+                        try:
+                            parts = duration_str.split(':')
+                            if len(parts) == 2:
+                                duration_seconds = int(parts[0]) * 60 + int(parts[1])
+                        except:
+                            pass
+
+                # Fallback: ffprobe verwenden
+                if duration_seconds == 0.0:
                     try:
-                        parts = duration_str.split(':')
-                        if len(parts) == 2:
-                            duration_seconds = int(parts[0]) * 60 + int(parts[1])
+                        result = subprocess.run([
+                            'ffprobe', '-v', 'error', '-show_entries',
+                            'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1',
+                            video_path
+                        ], capture_output=True, text=True, timeout=5, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+
+                        if result.returncode == 0:
+                            duration_seconds = float(result.stdout.strip())
                     except:
                         pass
 
-            # Fallback: ffprobe verwenden
-            if duration_seconds == 0.0:
-                try:
-                    result = subprocess.run([
-                        'ffprobe', '-v', 'error', '-show_entries',
-                        'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1',
-                        video_path
-                    ], capture_output=True, text=True, timeout=5, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
+                # Vergleiche mit bisherigem Maximum
+                if duration_seconds > longest_duration:
+                    longest_duration = duration_seconds
+                    longest_index = i
 
-                    if result.returncode == 0:
-                        duration_seconds = float(result.stdout.strip())
-                except:
-                    pass
+            # Wähle das längste Video aus
+            if longest_index is not None:
+                def apply_selection():
+                    self.watermark_clip_index = longest_index
+                    print(f"✅ Automatisch längstes Video als Wasserzeichen ausgewählt: Index {longest_index}, Dauer {longest_duration:.1f}s")
+                    self._update_video_table()
 
-            # Vergleiche mit bisherigem Maximum
-            if duration_seconds > longest_duration:
-                longest_duration = duration_seconds
-                longest_index = i
+                    # Synchronisiere mit video_preview
+                    if self.app and hasattr(self.app, 'video_preview'):
+                        self.app.video_preview.update_wm_button_state()
 
-        # Wähle das längste Video aus
-        if longest_index is not None:
-            self.watermark_clip_index = longest_index
-            print(f"✅ Automatisch längstes Video als Wasserzeichen ausgewählt: Index {longest_index}, Dauer {longest_duration:.1f}s")
-            self._update_video_table()
-
-            # Synchronisiere mit video_preview
-            if self.app and hasattr(self.app, 'video_preview'):
-                self.app.video_preview.update_wm_button_state()
+                self.frame.after(0, apply_selection)
+        finally:
+            self._wm_auto_select_running = False
 
     def get_watermark_clip_index(self):
         """Gibt den Index des für Wasserzeichen ausgewählten Clips zurück (oder None)"""

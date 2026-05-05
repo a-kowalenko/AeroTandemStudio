@@ -75,6 +75,8 @@ class FormFields:
 
         # Aktueller Formular-Modus
         self.form_mode = 'manual'  # Startet im manuellen Modus
+        self._suspend_trace_callbacks = False
+        self._last_layout_signature = None
 
         # Lade Einstellungen und baue initiales Formular
         self.load_initial_settings()
@@ -106,17 +108,49 @@ class FormFields:
         """
         Aktualisiert das Formular-Layout basierend auf dem QR-Scan-Ergebnis.
         """
-        self.clear_form()
+        layout_signature = self._build_layout_signature(qr_success, kunde)
+        if layout_signature == self._last_layout_signature:
+            return
 
+        self._suspend_trace_callbacks = True
+
+        try:
+            self.clear_form()
+
+            if qr_success and kunde:
+                self.form_mode = 'kunde'
+                self.build_kunde_form(kunde)
+            else:
+                # Dies fängt qr_success=False ODER kunde=None ab
+                self.form_mode = 'manual'
+                self.build_manual_form()
+        finally:
+            self._suspend_trace_callbacks = False
+
+        self._last_layout_signature = layout_signature
+        self._notify_watermark_visibility_update()
+
+    def _build_layout_signature(self, qr_success, kunde):
+        """Erstellt eine Signatur zur Erkennung unveränderter Layout-Zustände."""
         if qr_success and kunde:
-            self.form_mode = 'kunde'
-            self.build_kunde_form(kunde)
-        else:
-            # Dies fängt qr_success=False ODER kunde=None ab
-            self.form_mode = 'manual'
-            self.build_manual_form()
+            return (
+                "kunde",
+                kunde.kunden_id_hash or "",
+                kunde.booking_id_hash or "",
+                kunde.vorname or "",
+                kunde.nachname or "",
+                bool(kunde.handcam_foto),
+                bool(kunde.handcam_video),
+                bool(kunde.outside_foto),
+                bool(kunde.outside_video),
+                bool(kunde.ist_bezahlt_handcam_foto),
+                bool(kunde.ist_bezahlt_handcam_video),
+                bool(kunde.ist_bezahlt_outside_foto),
+                bool(kunde.ist_bezahlt_outside_video),
+            )
+        return ("manual",)
 
-        # NEU: Benachrichtige App über Wasserzeichen-Status-Änderungen nach Formular-Update
+    def _notify_watermark_visibility_update(self):
         # Nur aufrufen, wenn die App vollständig initialisiert ist
         if (self.app and
             hasattr(self.app, 'update_watermark_column_visibility') and
@@ -747,6 +781,9 @@ class FormFields:
         Trace-Callback, der die entsprechende Bezahlt-Checkbox
         deaktiviert, wenn das Produkt abgewählt wird.
         """
+        if self._suspend_trace_callbacks:
+            return
+
         try:
             if product_name == 'handcam_foto' and not self.handcam_foto_var.get():
                 self.handcam_foto_bezahlt_var.set(False)
@@ -760,13 +797,7 @@ class FormFields:
             # Widget existiert möglicherweise nicht mehr
             print("Fehler beim Zurücksetzen der Bezahlt-Checkbox.")
 
-        # NEU: Benachrichtige App über Wasserzeichen-Status-Änderungen
-        # Nur aufrufen, wenn die App vollständig initialisiert ist
-        if (self.app and
-            hasattr(self.app, 'update_watermark_column_visibility') and
-            hasattr(self.app, 'form_fields') and
-            hasattr(self.app, 'drag_drop')):
-            self.app.update_watermark_column_visibility()
+        self._notify_watermark_visibility_update()
 
     def _on_payment_status_changed(self, product_name=None):
         """
@@ -775,6 +806,9 @@ class FormFields:
         wenn die Bezahlt-Checkbox ausgewählt wird.
         Aktualisiert die Wasserzeichen-Spalten-Sichtbarkeit.
         """
+        if self._suspend_trace_callbacks:
+            return
+
         # Automatisches Aktivieren der Produkt-Checkbox
         if product_name:
             try:
@@ -790,12 +824,6 @@ class FormFields:
                 # Widget existiert möglicherweise nicht mehr
                 print(f"Fehler beim Aktivieren der Produkt-Checkbox für {product_name}: {e}")
 
-        # Benachrichtige App über Wasserzeichen-Status-Änderungen
-        # Nur aufrufen, wenn die App vollständig initialisiert ist
-        if (self.app and
-            hasattr(self.app, 'update_watermark_column_visibility') and
-            hasattr(self.app, 'form_fields') and
-            hasattr(self.app, 'drag_drop')):
-            self.app.update_watermark_column_visibility()
+        self._notify_watermark_visibility_update()
 
 

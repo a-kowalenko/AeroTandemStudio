@@ -83,6 +83,8 @@ class VideoGeneratorApp:
         # Für Threading und Ladefenster ---
         self.analysis_queue = None
         self.loading_window = None
+        self._last_video_wm_visible = None
+        self._last_photo_wm_visible = None
 
         # SD-Karten Monitor
         self.sd_card_monitor = None
@@ -1627,17 +1629,20 @@ class VideoGeneratorApp:
         print(f"   Outside Video: {form_data.get('outside_video', False)}, Bezahlt: {form_data.get('ist_bezahlt_outside_video', False)}")
         print(f"   → Spalte sichtbar: {video_wm_sichtbar}")
 
-        # Zeige Spalte wenn Video ausgewählt aber nicht bezahlt ist
-        self.drag_drop.set_watermark_column_visible(video_wm_sichtbar)
+        if self._last_video_wm_visible != video_wm_sichtbar:
+            # Zeige Spalte wenn Video ausgewählt aber nicht bezahlt ist
+            self.drag_drop.set_watermark_column_visible(video_wm_sichtbar)
 
-        # Wenn spalte nicht mehr sichtbar, lösche Auswahl
-        if not video_wm_sichtbar:
-            self.drag_drop.clear_watermark_selection()
+            # Wenn spalte nicht mehr sichtbar, lösche Auswahl
+            if not video_wm_sichtbar:
+                self.drag_drop.clear_watermark_selection()
 
-        # NEU: Button in VideoPreview steuern
-        if hasattr(self, 'video_preview'):
-            self.video_preview.set_wm_button_visibility(video_wm_sichtbar)
-            self.video_preview.update_wm_button_state()  # Status aktualisieren
+            # NEU: Button in VideoPreview steuern
+            if hasattr(self, 'video_preview'):
+                self.video_preview.set_wm_button_visibility(video_wm_sichtbar)
+                self.video_preview.update_wm_button_state()  # Status aktualisieren
+
+            self._last_video_wm_visible = video_wm_sichtbar
 
         # --- NEU: Foto-Logik ---
         foto_gewaehlt = form_data.get("handcam_foto", False) or form_data.get("outside_foto", False)
@@ -1648,17 +1653,20 @@ class VideoGeneratorApp:
         print(f"   Foto gewählt: {foto_gewaehlt}, Foto bezahlt: {foto_bezahlt}")
         print(f"   → Spalte sichtbar: {foto_wm_sichtbar}")
 
-        # Rufe die neue Methode in drag_drop auf
-        self.drag_drop.set_photo_watermark_column_visible(foto_wm_sichtbar)
+        if self._last_photo_wm_visible != foto_wm_sichtbar:
+            # Rufe die neue Methode in drag_drop auf
+            self.drag_drop.set_photo_watermark_column_visible(foto_wm_sichtbar)
 
-        # Wenn spalte nicht mehr sichtbar, lösche Auswahl
-        if not foto_wm_sichtbar:
-            self.drag_drop.clear_photo_watermark_selection()
+            # Wenn spalte nicht mehr sichtbar, lösche Auswahl
+            if not foto_wm_sichtbar:
+                self.drag_drop.clear_photo_watermark_selection()
 
-        # NEU: Button in PhotoPreview steuern
-        if hasattr(self, 'photo_preview'):
-            self.photo_preview.set_wm_button_visibility(foto_wm_sichtbar)
-            self.photo_preview.update_wm_button_state()  # Status aktualisieren
+            # NEU: Button in PhotoPreview steuern
+            if hasattr(self, 'photo_preview'):
+                self.photo_preview.set_wm_button_visibility(foto_wm_sichtbar)
+                self.photo_preview.update_wm_button_state()  # Status aktualisieren
+
+            self._last_photo_wm_visible = foto_wm_sichtbar
 
 
     def _switch_to_cancel_mode(self):

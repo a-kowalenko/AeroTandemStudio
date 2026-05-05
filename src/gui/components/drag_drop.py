@@ -268,11 +268,17 @@ class DragDropFrame:
 
         self.apply_pending_cuts_button = tk.Button(
             video_button_frame,
-            text="Warteschlange anwenden …",
+            text="Warteschlange",
             command=self.open_apply_pending_cuts_dialog,
-            state="disabled",
+            state="normal",
+            bg="#d35400",
+            fg="white",
+            activebackground="#a04000",
+            activeforeground="white",
+            relief="raised",
+            bd=2,
         )
-        self.apply_pending_cuts_button.pack(side=tk.LEFT, padx=5)
+        self._apply_pending_cuts_button_pack = {"side": tk.LEFT, "padx": 5}
 
         tk.Button(video_button_frame, text="✕ Entfernen", command=self.remove_selected_video).pack(side=tk.LEFT, padx=2)
         tk.Button(video_button_frame, text="🗑 Alle Videos löschen", command=self.clear_videos).pack(side=tk.LEFT, padx=2)
@@ -1832,16 +1838,16 @@ class DragDropFrame:
         self.app.request_apply_pending_cuts()
 
     def set_pending_cuts_count(self, count: int):
-        """Aktiviert den Button zur Anwendung der geplanten Schnitte."""
+        """Zeigt den Warteschlange-Button nur bei ausstehenden Schnitten."""
         if not hasattr(self, "apply_pending_cuts_button"):
             return
         if count > 0:
-            self.apply_pending_cuts_button.config(
-                state="normal",
-                text=f"Warteschlange anwenden ({count}) …",
-            )
+            if not self.apply_pending_cuts_button.winfo_ismapped():
+                self.apply_pending_cuts_button.pack(**self._apply_pending_cuts_button_pack)
+            self.apply_pending_cuts_button.config(state="normal", text="Warteschlange")
         else:
-            self.apply_pending_cuts_button.config(state="disabled", text="Warteschlange anwenden …")
+            if self.apply_pending_cuts_button.winfo_ismapped():
+                self.apply_pending_cuts_button.pack_forget()
 
     def set_cut_button_enabled(self, enabled: bool):
         """Sperrt/Entsperrt den Schneiden-Button basierend auf Vorschau-Status."""
@@ -2183,6 +2189,34 @@ class DragDropFrame:
         self._update_photo_table()
 
         # NEU: Synchronisiere mit photo_preview
+        if self.app and hasattr(self.app, 'photo_preview'):
+            self.app.photo_preview.update_wm_button_state()
+
+    def set_photo_watermark_for_indices(self, indices, marked: bool):
+        """
+        Setzt die Wasserzeichen-Markierung für mehrere Foto-Indizes auf einen
+        einheitlichen Zielzustand.
+        """
+        if not indices:
+            return
+
+        valid_indices = sorted({
+            int(i) for i in indices
+            if isinstance(i, int) and 0 <= i < len(self.photo_paths)
+        })
+        if not valid_indices:
+            return
+
+        current_marked = set(self.watermark_photo_indices)
+        if marked:
+            current_marked.update(valid_indices)
+        else:
+            current_marked.difference_update(valid_indices)
+
+        self.watermark_photo_indices = sorted(current_marked)
+        self._update_photo_table()
+
+        # Synchronisiere den Button-Status in der Foto-Vorschau.
         if self.app and hasattr(self.app, 'photo_preview'):
             self.app.photo_preview.update_wm_button_state()
 

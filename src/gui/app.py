@@ -1743,6 +1743,16 @@ class VideoGeneratorApp:
         if hasattr(self, 'photo_preview'):
             self.photo_preview.update_wm_button_state()
 
+    def set_photo_watermark_for_indices(self, indices, marked: bool):
+        """Setzt Preview-Status für mehrere Foto-Indizes in einem Schritt."""
+        if not hasattr(self, "drag_drop"):
+            return
+
+        self.drag_drop.set_photo_watermark_for_indices(indices, marked)
+
+        if hasattr(self, "photo_preview"):
+            self.photo_preview.update_wm_button_state()
+
     # --- NEUE METHODEN FÜR DEN SCHNEIDE-DIALOG ---
 
     def request_cut_dialog(self, video_path: str, index: int):

@@ -1204,9 +1204,35 @@ class PhotoPreview:
         Wird aufgerufen, wenn der Wasserzeichen-Button geklickt wird.
         Leitet die Aktion an app.py weiter.
         """
-        if self.app and hasattr(self.app, 'toggle_photo_watermark') and self.current_photo_index is not None:
-            if 0 <= self.current_photo_index < len(self.photo_paths):
-                self.app.toggle_photo_watermark(self.current_photo_index)
+        if not self.app or not hasattr(self.app, 'drag_drop') or not self.photo_paths:
+            return
+
+        # Bei expliziter Mehrfachauswahl: auf alle markierten Fotos anwenden.
+        if self.explicitly_selected and self.selected_photos:
+            target_indices = sorted(
+                i for i in self.selected_photos
+                if 0 <= i < len(self.photo_paths)
+            )
+        elif self.current_photo_index is not None and 0 <= self.current_photo_index < len(self.photo_paths):
+            target_indices = [self.current_photo_index]
+        else:
+            target_indices = []
+
+        if not target_indices:
+            return
+
+        # Einheitliches Ziel für die komplette Auswahl:
+        # Wenn mindestens ein Foto noch nicht markiert ist -> alle markieren,
+        # sonst alle entmarkieren.
+        should_mark_all = any(
+            not self.app.drag_drop.is_photo_watermarked(i) for i in target_indices
+        )
+
+        if hasattr(self.app, "set_photo_watermark_for_indices"):
+            self.app.set_photo_watermark_for_indices(target_indices, should_mark_all)
+        elif len(target_indices) == 1 and hasattr(self.app, 'toggle_photo_watermark'):
+            # Fallback für ältere App-Versionen
+            self.app.toggle_photo_watermark(target_indices[0])
 
     def set_wm_button_visibility(self, visible: bool):
         """Zeigt oder verbirgt den Wasserzeichen-Button (gesteuert von app.py)."""

@@ -4,6 +4,7 @@ Unicode true
 
 !define APP_NAME "Aero Tandem Studio"
 !define /file APP_VERSION "VERSION.txt"
+!define /file APP_VERSION_WINDOWS "VERSION_WINDOWS.txt"
 !define BUILD_DIR "dist\\${APP_NAME} v${APP_VERSION}"
 !define APP_EXE "${APP_NAME}.exe"
 !define APP_PUBLISHER "Andreas Kowalenko"
@@ -22,7 +23,7 @@ RequestExecutionLevel admin
 InstallDir "$PROGRAMFILES64\${APP_NAME}"
 
 ; --- Metadaten ---
-VIProductVersion "${APP_VERSION}"
+VIProductVersion "${APP_VERSION_WINDOWS}"
 VIAddVersionKey "Publisher" "${APP_PUBLISHER}"
 VIAddVersionKey "FileDescription" "${APP_NAME} Installer"
 VIAddVersionKey "LegalCopyright" "${APP_PUBLISHER}"

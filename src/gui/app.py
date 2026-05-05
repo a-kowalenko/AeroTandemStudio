@@ -71,6 +71,7 @@ class VideoGeneratorApp:
         self.pending_video_cuts: List[PendingVideoCut] = []
         self._pending_cuts_batch_running = False
         self._suppress_preview_regenerate_after_metadata = False
+        self._cut_batch_button_snapshot: Optional[Dict[str, str]] = None
         self.APP_VERSION = APP_VERSION
 
         # Preview Tab-Elemente
@@ -1472,7 +1473,14 @@ class VideoGeneratorApp:
             and self.video_preview
             and progress is not None
         ):
-            self.root.after(0, self.video_preview.update_encoding_progress, progress, fps, eta)
+            self.root.after(
+                0,
+                self.video_preview.update_encoding_progress,
+                progress,
+                fps,
+                eta,
+                task_name,
+            )
 
     def _handle_status_update(self, status_type, message):
         """Callback für Statusupdates"""
@@ -1983,6 +1991,7 @@ class VideoGeneratorApp:
     def _start_pending_cuts_batch(self):
         self._pending_cuts_batch_running = True
         self._suppress_preview_regenerate_after_metadata = True
+        self._disable_create_button_for_cut_batch()
         if self.video_preview:
             self.video_preview.halt_preview_for_cut_batch()
 
@@ -1996,9 +2005,37 @@ class VideoGeneratorApp:
             finally:
                 self._pending_cuts_batch_running = False
                 self._suppress_preview_regenerate_after_metadata = False
+                self.root.after(0, self._restore_create_button_after_cut_batch)
                 self.root.after(0, self._kick_preview_regenerate_after_batch)
 
         threading.Thread(target=runner, daemon=True).start()
+
+    def _disable_create_button_for_cut_batch(self):
+        """Deaktiviert den Erstellen-Button während der Schnitt-Warteschlange."""
+        btn = getattr(self, "erstellen_button", None)
+        if not btn:
+            return
+        if self._cut_batch_button_snapshot is None:
+            self._cut_batch_button_snapshot = {
+                "text": btn.cget("text"),
+                "bg": btn.cget("bg"),
+                "state": btn.cget("state"),
+            }
+        btn.config(text="Schnitt läuft...", bg="#808080", state="disabled")
+
+    def _restore_create_button_after_cut_batch(self):
+        """Stellt den vorherigen Zustand des Erstellen-Buttons nach der Warteschlange wieder her."""
+        btn = getattr(self, "erstellen_button", None)
+        if not btn:
+            return
+        snapshot = self._cut_batch_button_snapshot
+        self._cut_batch_button_snapshot = None
+        if snapshot:
+            btn.config(
+                text=snapshot.get("text", "Erstellen"),
+                bg=snapshot.get("bg", "#4CAF50"),
+                state=snapshot.get("state", "normal"),
+            )
 
     def _kick_preview_regenerate_after_batch(self):
         """Einmalige Vorschau-Regeneration nach Ende der Schnitt-Warteschlange (Hauptthread)."""
@@ -2013,6 +2050,18 @@ class VideoGeneratorApp:
         self._update_pending_cuts_ui()
 
     def _pending_cuts_batch_thread(self, snapshot: List[PendingVideoCut]):
+        total_items = max(1, len(snapshot))
+
+        def _set_cut_preview_state(progress: float, eta_text: str):
+            self._update_encoding_progress(
+                task_name="Cutting/Trimming",
+                progress=max(0.0, min(100.0, float(progress))),
+                eta=eta_text,
+                encoding_lane=0,
+            )
+
+        _set_cut_preview_state(0, "Schnitt-Warteschlange gestartet")
+
         for i, item in enumerate(snapshot):
             path = item.source_path
             if not os.path.exists(path):
@@ -2026,6 +2075,7 @@ class VideoGeneratorApp:
                     self._restore_pending_snapshot(rest)
                     if self.progress_handler:
                         self.progress_handler.set_status("Status: Warteschlange mit Fehler abgebrochen.")
+                    _set_cut_preview_state((((i) / total_items) * 100.0), "Abgebrochen (Datei fehlt)")
 
                 self.root.after(0, _missing)
                 return
@@ -2033,14 +2083,24 @@ class VideoGeneratorApp:
             svc = VideoCutterService()
 
             def pcb(_pct, msg, step=i + 1, total=len(snapshot)):
-                if not self.progress_handler:
-                    return
-                self.root.after(
-                    0,
-                    lambda m=msg, s=step, t=total: self.progress_handler.set_status(
-                        f"Status: Schnitt {s}/{t} — {m}"
-                    ),
+                total_safe = max(1, total)
+                bounded_pct = max(0.0, min(100.0, float(_pct or 0.0)))
+                queue_pct = (((step - 1) + (bounded_pct / 100.0)) / total_safe) * 100.0
+                cut_task_name = "Trimming" if item.kind == "trim" else "Cutting"
+                eta_text = f"Schnitt {step}/{total_safe} — {msg}"
+                self._update_encoding_progress(
+                    task_name=cut_task_name,
+                    progress=queue_pct,
+                    eta=eta_text,
+                    encoding_lane=0,
                 )
+                if self.progress_handler:
+                    self.root.after(
+                        0,
+                        lambda m=msg, s=step, t=total_safe: self.progress_handler.set_status(
+                            f"Status: Schnitt {s}/{t} — {m}"
+                        ),
+                    )
 
             try:
                 if item.kind == "trim":
@@ -2062,6 +2122,7 @@ class VideoGeneratorApp:
                     self._restore_pending_snapshot(rest)
                     if self.progress_handler:
                         self.progress_handler.set_status("Status: Warteschlange mit Fehler abgebrochen.")
+                    _set_cut_preview_state((((i) / total_items) * 100.0), "Abgebrochen (FFmpeg-Fehler)")
 
                 self.root.after(0, _err_ui)
                 return
@@ -2077,6 +2138,7 @@ class VideoGeneratorApp:
                     self._restore_pending_snapshot(rest)
                     if self.progress_handler:
                         self.progress_handler.set_status("Status: Warteschlange mit Fehler abgebrochen.")
+                    _set_cut_preview_state((((i) / total_items) * 100.0), "Abgebrochen (Schnitt fehlgeschlagen)")
 
                 self.root.after(0, _fail_ui)
                 return
@@ -2115,6 +2177,7 @@ class VideoGeneratorApp:
                             parent=self.root,
                         )
                         self._restore_pending_snapshot(rest)
+                        _set_cut_preview_state((((i) / total_items) * 100.0), "Abgebrochen (Timeout)")
 
                     self.root.after(0, _to)
                     return
@@ -2132,6 +2195,7 @@ class VideoGeneratorApp:
                     self._restore_pending_snapshot(rest)
                     if self.progress_handler:
                         self.progress_handler.set_status("Status: Warteschlange mit Fehler abgebrochen.")
+                    _set_cut_preview_state((((i) / total_items) * 100.0), "Abgebrochen (GUI-Fehler)")
 
                 self.root.after(0, _e2)
                 return
@@ -2139,6 +2203,12 @@ class VideoGeneratorApp:
         def _done_all():
             if self.progress_handler:
                 self.progress_handler.set_status("Status: Warteschlange fertig.")
+            if self.video_preview:
+                self.video_preview.update_encoding_progress(
+                    100,
+                    task_name="Cutting/Trimming",
+                    eta="Fertig",
+                )
 
         self.root.after(0, _done_all)
 

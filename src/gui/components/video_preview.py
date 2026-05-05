@@ -2636,7 +2636,7 @@ class VideoPreview:
         """Gibt den Pfad des kombinierten Videos zurück"""
         return self.combined_video_path
 
-    def update_encoding_progress(self, progress, fps=None, eta=None, **_kwargs):
+    def update_encoding_progress(self, progress, fps=None, eta=None, task_name="Encoding", **_kwargs):
         """
         Aktualisiert die Encoding-Fortschrittsanzeige in der Video-Preview.
 
@@ -2647,7 +2647,7 @@ class VideoPreview:
         """
         # Update Encoding-Label mit Fortschrittsanzeige
         if progress is not None:
-            status_text = f"Encoding: {int(progress)}%"
+            status_text = f"{task_name}: {int(progress)}%"
             if fps and fps > 0:
                 status_text += f" ({fps:.1f} fps)"
             if eta:

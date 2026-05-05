@@ -5,54 +5,219 @@ Vollständiger Build-Prozess für Aero Tandem Studio
 Verwendung:
     python build.py              # Nur PyInstaller Build (Build-Version +1)
     python build.py setup        # PyInstaller + NSIS Installer (Build-Version +1)
+    python build.py build setup  # Explizit Build-Level "build" + Installer
     python build.py minor        # Nur PyInstaller (Minor-Version +1)
     python build.py minor setup  # PyInstaller + Installer (Minor-Version +1)
     python build.py patch setup  # PyInstaller + Installer (Patch-Version +1)
     python build.py major setup  # PyInstaller + Installer (Major-Version +1)
+    python build.py major alpha setup                  # Legacy: setze Pre-Release auf "alpha"
+    python build.py major -alpha setup                 # Legacy Kurzform: setze Pre-Release auf "alpha"
+    python build.py major --prerelease alpha setup     # Empfohlen
+    python build.py build --prerelease beta.3 setup    # Empfohlen
+    python build.py none --clear-prerelease setup      # Entfernt Pre-Release ohne Versionsbump
 """
 import os
 import sys
 import subprocess
 import shutil
+import re
 from pathlib import Path
 
-def bump_version(level="build"):
+UNSET = object()
+
+SEMVER_PATTERN = re.compile(
+    r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+    r"(?:\.(?P<build>0|[1-9]\d*))?"
+    r"(?:-(?P<prerelease>[0-9A-Za-z.-]+))?"
+    r"(?:\+(?P<metadata>[0-9A-Za-z.-]+))?$"
+)
+
+def parse_version(version):
+    """
+    Parst SemVer-ähnliche Versionen:
+      MAJOR.MINOR.PATCH[.BUILD][-PRERELEASE][+METADATA]
+    """
+    match = SEMVER_PATTERN.match(version)
+    if not match:
+        raise ValueError(
+            f"Ungültige Version '{version}'. Erwartet: "
+            "MAJOR.MINOR.PATCH[.BUILD][-PRERELEASE][+METADATA]"
+        )
+
+    return {
+        "major": int(match.group("major")),
+        "minor": int(match.group("minor")),
+        "patch": int(match.group("patch")),
+        "build": int(match.group("build")) if match.group("build") is not None else None,
+        "prerelease": match.group("prerelease"),
+        "metadata": match.group("metadata"),
+    }
+
+def format_version(version_data):
+    """Formatiert Version aus geparsten Bestandteilen zurück in String."""
+    version = f"{version_data['major']}.{version_data['minor']}.{version_data['patch']}"
+    if version_data["build"] is not None:
+        version += f".{version_data['build']}"
+    if version_data["prerelease"]:
+        version += f"-{version_data['prerelease']}"
+    if version_data["metadata"]:
+        version += f"+{version_data['metadata']}"
+    return version
+
+def get_windows_version_tuple(version_data):
+    """
+    Liefert numerische 4er-Version für Windows/NSIS.
+    Pre-Release/Metadata werden hier absichtlich ignoriert.
+    """
+    return (
+        version_data["major"],
+        version_data["minor"],
+        version_data["patch"],
+        version_data["build"] if version_data["build"] is not None else 0,
+    )
+
+def write_windows_version_for_nsis(version_data):
+    """Schreibt numerische 4er-Version für NSIS VIProductVersion."""
+    numeric_version = ".".join(str(part) for part in get_windows_version_tuple(version_data))
+    Path("VERSION_WINDOWS.txt").write_text(numeric_version + "\n", encoding="utf-8")
+    print(f"   ✅ VERSION_WINDOWS.txt aktualisiert mit {numeric_version}")
+
+def validate_semver_identifier(value, field_name):
+    """Validiert Pre-Release/Metadata Identifier."""
+    if value is None:
+        return None
+    if not re.fullmatch(r"[0-9A-Za-z.-]+", value):
+        raise ValueError(
+            f"Ungültiger {field_name}-Wert '{value}'. Erlaubt sind nur [0-9A-Za-z.-]"
+        )
+    return value
+
+def parse_cli_args(raw_args):
+    """
+    CLI Parsing mit Rückwärtskompatibilität.
+    Unterstützt:
+      - Level: build|minor|patch|major|none
+      - setup (an beliebiger Position)
+      - Legacy: <level> <prerelease> setup oder <level> -<prerelease> setup
+      - Empfohlen: --prerelease / --metadata / --clear-*
+    """
+    valid_levels = {"build", "minor", "patch", "major", "none"}
+    level = None
+    create_installer = False
+    prerelease_override = UNSET
+    metadata_override = UNSET
+
+    i = 0
+    while i < len(raw_args):
+        arg = raw_args[i]
+        lower_arg = arg.lower()
+
+        if lower_arg == "setup":
+            create_installer = True
+        elif lower_arg in valid_levels:
+            if level is not None:
+                raise ValueError(f"Build-Level mehrfach angegeben: '{level}' und '{arg}'")
+            level = lower_arg
+        elif arg in ("--prerelease", "-p"):
+            if i + 1 >= len(raw_args):
+                raise ValueError(f"{arg} benötigt einen Wert, z.B. --prerelease alpha.1")
+            i += 1
+            prerelease_override = validate_semver_identifier(raw_args[i], "prerelease")
+        elif arg.startswith("--prerelease="):
+            prerelease_override = validate_semver_identifier(
+                arg.split("=", 1)[1], "prerelease"
+            )
+        elif arg == "--clear-prerelease":
+            prerelease_override = None
+        elif arg in ("--metadata", "-m"):
+            if i + 1 >= len(raw_args):
+                raise ValueError(f"{arg} benötigt einen Wert, z.B. --metadata build.42")
+            i += 1
+            metadata_override = validate_semver_identifier(raw_args[i], "metadata")
+        elif arg.startswith("--metadata="):
+            metadata_override = validate_semver_identifier(arg.split("=", 1)[1], "metadata")
+        elif arg == "--clear-metadata":
+            metadata_override = None
+        elif arg.startswith("-") and len(arg) > 1 and prerelease_override is UNSET:
+            # Legacy Kurzform, z.B. "major -alpha setup"
+            prerelease_override = validate_semver_identifier(arg[1:], "prerelease")
+        elif prerelease_override is UNSET:
+            # Legacy positional, z.B. "major alpha setup"
+            prerelease_override = validate_semver_identifier(arg, "prerelease")
+        else:
+            raise ValueError(f"Unbekannter Parameter: '{arg}'")
+
+        i += 1
+
+    return {
+        "level": level or "build",
+        "create_installer": create_installer,
+        "prerelease_override": prerelease_override,
+        "metadata_override": metadata_override,
+    }
+
+def bump_version(level="build", prerelease_override=UNSET, metadata_override=UNSET):
     """
     Liest VERSION.txt, erhöht die gewählte Versionskomponente und schreibt sie zurück.
 
     Args:
-        level: "major", "minor", "patch" oder "build"
+        level: "major", "minor", "patch", "build" oder "none"
+        prerelease_override: Neuer Pre-Release-Wert, None zum Entfernen, UNSET für unverändert
+        metadata_override: Neue Build-Metadata, None zum Entfernen, UNSET für unverändert
 
     Returns:
         Die neue Version als String
     """
     version_file = Path("VERSION.txt")
     version = version_file.read_text(encoding="utf-8").strip()
-    parts = [int(p) for p in version.split(".")]
-    while len(parts) < 4:
-        parts.append(0)
-
-    major, minor, patch, build = parts
+    parsed = parse_version(version)
+    major = parsed["major"]
+    minor = parsed["minor"]
+    patch = parsed["patch"]
+    build = parsed["build"]
+    prerelease = parsed["prerelease"]
+    metadata = parsed["metadata"]
 
     if level == "major":
         major += 1
-        minor = patch = build = 0
+        minor = patch = 0
+        build = 0
+        prerelease = None
+        metadata = None
     elif level == "minor":
         minor += 1
-        patch = build = 0
+        patch = 0
+        build = 0
+        prerelease = None
+        metadata = None
     elif level == "patch":
         patch += 1
         build = 0
+        prerelease = None
+        metadata = None
     elif level == "build":
-        build += 1
+        build = 1 if build is None else build + 1
     elif level == "none":
         print(f"   Version bleibt unverändert: {version}")
-        return version
     else:
         raise ValueError(f"Unknown level '{level}', use: major | minor | patch | build | none")
 
-    new_version = f"{major}.{minor}.{patch}.{build}"
+    if prerelease_override is not UNSET:
+        prerelease = prerelease_override
+    if metadata_override is not UNSET:
+        metadata = metadata_override
+
+    new_version_data = {
+        "major": major,
+        "minor": minor,
+        "patch": patch,
+        "build": build,
+        "prerelease": prerelease,
+        "metadata": metadata,
+    }
+    new_version = format_version(new_version_data)
     version_file.write_text(new_version + "\n", encoding="utf-8")
+    write_windows_version_for_nsis(new_version_data)
     print(f"   Version: {version} → {new_version}")
     return new_version
 
@@ -82,12 +247,8 @@ def update_version_info():
     version_file = Path("VERSION.txt")
     version_str = version_file.read_text(encoding="utf-8").strip()
 
-    # Version in Tuple konvertieren (z.B. "0.1.0.1" → (0, 1, 0, 1))
-    version_parts = tuple(int(x) for x in version_str.split('.'))
-
-    # Auf 4 Teile auffüllen falls nötig
-    while len(version_parts) < 4:
-        version_parts = version_parts + (0,)
+    parsed_version = parse_version(version_str)
+    version_parts = get_windows_version_tuple(parsed_version)
 
     # version_info.txt Template
     version_info_content = f'''# UTF-8
@@ -166,34 +327,44 @@ def main():
     print()
 
     # 1. Parameter analysieren
-    args = [arg.lower() for arg in sys.argv[1:]]
-
-    # Prüfe ob 'setup' Parameter übergeben wurde
-    create_installer = 'setup' in args
-
-    # Entferne 'setup' aus den Args, um Build-Level zu bestimmen
-    build_levels = [arg for arg in args if arg != 'setup']
-    level = build_levels[0] if build_levels else "build"
+    try:
+        cli = parse_cli_args(sys.argv[1:])
+    except ValueError as exc:
+        print(f"❌ Ungültige Parameter: {exc}")
+        return 1
+    create_installer = cli["create_installer"]
+    level = cli["level"]
+    prerelease_override = cli["prerelease_override"]
+    metadata_override = cli["metadata_override"]
 
     # Verhindere automatischen Version-Bump in GitHub Actions
     if os.environ.get('GITHUB_ACTIONS') == 'true':
         print("ℹ️  GitHub Actions erkannt: Version wird nicht hochgezählt.")
         level = "none"
 
-    # Validiere Build-Level
-    valid_levels = ["build", "minor", "patch", "major", "none"]
-    if level not in valid_levels:
-        print(f"❌ Ungültiger Build-Level: '{level}'")
-        print(f"   Gültige Werte: {', '.join(valid_levels)}")
-        return 1
-
     print(f"📋 Build-Level: {level}")
+    if prerelease_override is UNSET:
+        print("🏷️  Pre-Release: unverändert")
+    elif prerelease_override is None:
+        print("🏷️  Pre-Release: wird entfernt")
+    else:
+        print(f"🏷️  Pre-Release: {prerelease_override}")
+    if metadata_override is UNSET:
+        print("🧩 Metadata: unverändert")
+    elif metadata_override is None:
+        print("🧩 Metadata: wird entfernt")
+    else:
+        print(f"🧩 Metadata: {metadata_override}")
     print(f"📦 Installer erstellen: {'Ja' if create_installer else 'Nein'}")
     print()
 
     # 2. Version hochzählen
     print("📋 Aktualisiere Version...")
-    new_version = bump_version(level)
+    new_version = bump_version(
+        level,
+        prerelease_override=prerelease_override,
+        metadata_override=metadata_override,
+    )
 
     # 3. Version Info aktualisieren
     update_version_info()

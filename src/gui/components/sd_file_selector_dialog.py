@@ -7,6 +7,8 @@ import os
 from PIL import Image, ImageTk
 import subprocess
 import threading
+import queue
+import math
 from collections import deque
 
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
@@ -38,12 +40,14 @@ class SDFileSelectorDialog:
         self.filter_type_var = tk.StringVar(value="Alle")
         self.filter_sort_var = tk.StringVar(value="Datum")  # Standard: Datum
         self.filter_sort_order_var = tk.StringVar(value="↓ Ab")  # Standard: Absteigend (neueste zuerst)
+        self.thumbnail_page_size_var = tk.StringVar(value="100")
 
         # Standardmäßig KEINE Dateien ausgewählt (User muss explizit auswählen)
         # self.selected_paths bleibt leer
 
         # Thumbnail-Cache
         self.thumbnail_cache = {}  # path -> PhotoImage
+        self.thumbnail_pil_cache = {}  # path -> PIL.Image
         self._prepare_file_metadata()
 
         # NEU: Drag-Selection Variablen
@@ -63,15 +67,41 @@ class SDFileSelectorDialog:
         self.loading_cancelled = False
         self._thumbnail_workers_active = 0
         self._max_thumbnail_workers = 2
+        self.thumbnail_result_queue = queue.Queue()
+        self.thumbnail_ui_poll_active = False
+        self.max_ui_updates_per_tick = 2
 
         # Progressive Rendering
-        self.thumbnail_batch_size = 60
+        self.thumbnail_batch_size = 6
         self.details_batch_size = 250
         self._filtered_files_cache = []
         self._thumbnail_render_index = 0
         self._details_render_index = 0
         self._thumb_render_generation = 0
         self._details_render_generation = 0
+        self._thumbnail_all_filtered = []
+        self.thumbnail_render_tasks = {}  # path -> queued render task tuple
+        self.queued_thumbnail_paths = set()
+        self.inflight_thumbnail_paths = set()
+        self.failed_thumbnail_paths = set()
+        self._visible_enqueue_after_id = None
+        self.thumbnail_row_height = 220
+        self.thumbnail_cols = 4
+        self.thumbnail_load_threshold = 0.85
+        self.details_load_threshold = 0.90
+        self.thumbnail_parent = None
+        self.thumbnail_saved_render_index = 0
+        self.thumbnail_saved_scroll = 0.0
+        self.thumbnail_current_page = 1
+        self.thumbnail_total_pages = 1
+        self.thumbnail_page_jump_var = tk.StringVar(value="1")
+        self.thumbnail_prefetch_queue = deque()
+        self.thumbnail_prefetch_inflight = set()
+        self.thumbnail_prefetch_workers_active = 0
+        self.max_thumbnail_prefetch_workers = 4
+        self.thumbnail_prefetch_result_queue = queue.Queue()
+        self.thumbnail_prefetch_ui_poll_active = False
+        self.max_prefetch_ui_updates_per_tick = 2
 
         # Mousewheel-Scrolling Callback (wird von switch_to_thumbnails gesetzt)
         self.mousewheel_callback = None
@@ -112,7 +142,7 @@ class SDFileSelectorDialog:
         self._start_sd_card_monitoring()
 
         # Initial Thumbnail-Ansicht laden
-        self.switch_to_thumbnails()
+        self.switch_to_thumbnails(reset_page=True)
 
     def center_dialog(self):
         """Zentriert den Dialog über dem Parent-Fenster"""
@@ -263,6 +293,50 @@ class SDFileSelectorDialog:
         order_combo.pack(side='left')
         order_combo.bind('<<ComboboxSelected>>', lambda e: self.apply_filters())
 
+        # Pagination (nur Kacheln)
+        tk.Label(filter_group, text="Pro Seite:", font=("Arial", 9)).pack(side='left', padx=(10, 3))
+        page_size_combo = ttk.Combobox(
+            filter_group,
+            textvariable=self.thumbnail_page_size_var,
+            values=["50", "100", "200", "500"],
+            state='readonly',
+            width=5
+        )
+        page_size_combo.pack(side='left', padx=(0, 6))
+        page_size_combo.bind('<<ComboboxSelected>>', lambda e: self._on_thumbnail_page_size_changed())
+
+        self.thumb_first_button = tk.Button(
+            filter_group, text="|◀", command=self._go_to_thumbnail_first,
+            font=("Arial", 9), width=2
+        )
+        self.thumb_first_button.pack(side='left', padx=(0, 3))
+        self.thumb_prev_button = tk.Button(
+            filter_group, text="◀", command=lambda: self._change_thumbnail_page(-1),
+            font=("Arial", 9), width=2
+        )
+        self.thumb_prev_button.pack(side='left', padx=(0, 6))
+        self.thumb_page_label = tk.Label(filter_group, text="1/1", font=("Arial", 9), width=7)
+        self.thumb_page_label.pack(side='left')
+        self.thumb_jump_entry = tk.Entry(
+            filter_group, textvariable=self.thumbnail_page_jump_var, width=5, justify='center'
+        )
+        self.thumb_jump_entry.pack(side='left', padx=(3, 3))
+        self.thumb_jump_entry.bind('<Return>', lambda e: self._on_thumbnail_page_jump())
+        self.thumb_jump_button = tk.Button(
+            filter_group, text="Go", command=self._on_thumbnail_page_jump, font=("Arial", 9), width=3
+        )
+        self.thumb_jump_button.pack(side='left', padx=(0, 3))
+        self.thumb_next_button = tk.Button(
+            filter_group, text="▶", command=lambda: self._change_thumbnail_page(1),
+            font=("Arial", 9), width=2
+        )
+        self.thumb_next_button.pack(side='left', padx=(8, 3))
+        self.thumb_last_button = tk.Button(
+            filter_group, text="▶|", command=self._go_to_thumbnail_last,
+            font=("Arial", 9), width=2
+        )
+        self.thumb_last_button.pack(side='left', padx=(0, 0))
+
         # Aktualisiere Sortierrichtungs-Variable für neue Labels
         if self.filter_sort_order_var.get() == "Aufsteigend":
             self.filter_sort_order_var.set("↑ Auf")
@@ -341,8 +415,18 @@ class SDFileSelectorDialog:
                  relief='raised', bd=2,
                  cursor='hand2').pack(side='right', padx=2)
 
-    def switch_to_thumbnails(self):
+    def switch_to_thumbnails(self, reset_page=False):
         """Wechselt zur Thumbnail-Ansicht"""
+        # Restore-Infos sichern, falls wir aus der Thumbnail-Ansicht kommen
+        restore_scroll = self.thumbnail_saved_scroll
+        restore_render_index = self.thumbnail_saved_render_index
+        if self.view_mode == "thumbnail" and self.current_canvas:
+            try:
+                restore_scroll = self.current_canvas.yview()[0]
+            except Exception:
+                pass
+            restore_render_index = max(restore_render_index, self._thumbnail_render_index)
+
         self.view_mode = "thumbnail"
 
         # Lösche alte Ansicht
@@ -364,7 +448,13 @@ class SDFileSelectorDialog:
         )
 
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def on_canvas_yview(*args):
+            scrollbar.set(*args)
+            self._schedule_visible_thumbnail_enqueue(canvas)
+            self._maybe_render_more_thumbnails()
+
+        canvas.configure(yscrollcommand=on_canvas_yview)
 
         # Speichere Canvas-Referenz (kein separates Overlay mehr)
         # Rectangle wird direkt auf Haupt-Canvas gezeichnet
@@ -374,6 +464,10 @@ class SDFileSelectorDialog:
         # Speichere Canvas-Referenz für Drag-Selection
         self.drag_canvas = canvas
         self.thumbnail_widgets = {}
+        self.thumbnail_render_tasks = {}
+        self.queued_thumbnail_paths.clear()
+        self.inflight_thumbnail_paths.clear()
+        self.failed_thumbnail_paths.clear()
 
         # Reset Thumbnail-Queue
         self.thumbnail_queue = deque()
@@ -383,10 +477,16 @@ class SDFileSelectorDialog:
 
         # Canvas-Referenz für Scroll-Handler speichern
         self.current_canvas = canvas
+        self.thumbnail_parent = scrollable_frame
 
-        # Filtere und sortiere Dateien
-        self._filtered_files_cache = self.get_filtered_files()
+        # Filtere/sortiere und paginiere Dateien
+        self._prepare_thumbnail_page(reset_page=reset_page)
         self._thumbnail_render_index = 0
+        self.thumbnail_saved_scroll = max(0.0, min(1.0, restore_scroll))
+        self.thumbnail_saved_render_index = min(
+            len(self._filtered_files_cache),
+            max(self.thumbnail_batch_size, restore_render_index)
+        )
 
         canvas.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
@@ -469,7 +569,13 @@ class SDFileSelectorDialog:
                 if path in self.selected_paths:
                     continue
 
-                widget_x1, widget_y1, widget_x2, widget_y2 = bbox
+                try:
+                    widget_x1 = widget.winfo_x()
+                    widget_y1 = widget.winfo_y()
+                    widget_x2 = widget_x1 + widget.winfo_width()
+                    widget_y2 = widget_y1 + widget.winfo_height()
+                except Exception:
+                    continue
 
                 if not (canvas_x2 < widget_x1 or canvas_x1 > widget_x2 or
                        canvas_y2 < widget_y1 or canvas_y1 > widget_y2):
@@ -499,6 +605,8 @@ class SDFileSelectorDialog:
         # Binde auch Scroll-Events auf Canvas
         def on_canvas_scroll(event):
             canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            self._schedule_visible_thumbnail_enqueue(canvas)
+            self._maybe_render_more_thumbnails()
             return "break"
         canvas.bind('<MouseWheel>', on_canvas_scroll)
 
@@ -507,6 +615,8 @@ class SDFileSelectorDialog:
             try:
                 if canvas.winfo_exists():
                     canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                    self._schedule_visible_thumbnail_enqueue(canvas)
+                    self._maybe_render_more_thumbnails()
                     return "break"  # Verhindere weitere Event-Propagierung
             except:
                 pass  # Canvas existiert nicht mehr
@@ -520,9 +630,11 @@ class SDFileSelectorDialog:
 
         # WICHTIG: Binde auch auf view_container für globales Scrolling
         self.view_container.bind("<MouseWheel>", _on_mousewheel, add=True)
+        canvas.bind("<Configure>", lambda e: self._schedule_visible_thumbnail_enqueue(canvas), add=True)
 
         # Rendere Kacheln in Batches für flüssigere UI
         self._render_thumbnail_batch(scrollable_frame, generation)
+        self.dialog.after(0, self._fill_thumbnail_viewport)
 
     def _render_thumbnail_batch(self, parent, generation):
         """Rendert Kacheln schrittweise, um die UI responsiv zu halten."""
@@ -537,40 +649,302 @@ class SDFileSelectorDialog:
 
         for idx in range(start, end):
             file_info = self._filtered_files_cache[idx]
-            row = idx // cols
-            col = idx % cols
-            frame_widget = self.create_thumbnail_widget(parent, file_info, row, col)
+            row = idx // self.thumbnail_cols
+            col = idx % self.thumbnail_cols
+            frame_widget = self.create_thumbnail_widget(parent, file_info, row, col, queue_thumbnail=False)
             if frame_widget:
                 self.thumbnail_widgets[file_info['path']] = (frame_widget, (0, 0, 0, 0))
 
         self._thumbnail_render_index = end
-        self._refresh_thumbnail_bboxes()
+        # Sicheres Initial- und Folge-Queueing für sichtbare/preload Kacheln
+        self._enqueue_visible_thumbnail_tasks(self.current_canvas)
+        self._schedule_visible_thumbnail_enqueue(self.current_canvas)
+        return end < len(self._filtered_files_cache)
+
+    def _maybe_render_more_thumbnails(self):
+        """Rendert weitere Kachel-Widgets nur bei Bedarf (nahe Listenende)."""
+        if self.view_mode != "thumbnail":
+            return
+        if not self.current_canvas or not self.thumbnail_parent:
+            return
+        if self._thumbnail_render_index >= len(self._filtered_files_cache):
+            return
+        try:
+            _, y2 = self.current_canvas.yview()
+        except Exception:
+            return
+        if y2 >= self.thumbnail_load_threshold:
+            self._render_thumbnail_batch(self.thumbnail_parent, self._thumb_render_generation)
+
+    def _fill_thumbnail_viewport(self):
+        """Füllt initial den sichtbaren Bereich ohne Voll-Render."""
+        if self.view_mode != "thumbnail" or not self.current_canvas:
+            return
+        # 1) Vorherigen Render-Stand nachladen (damit Tab-Wechsel nicht "vergisst")
+        while self._thumbnail_render_index < self.thumbnail_saved_render_index:
+            if self._thumbnail_render_index >= len(self._filtered_files_cache):
+                break
+            self._render_thumbnail_batch(self.thumbnail_parent, self._thumb_render_generation)
+
+        # 2) Scrollposition wiederherstellen
+        try:
+            self.current_canvas.yview_moveto(self.thumbnail_saved_scroll)
+        except Exception:
+            pass
+
+        # 3) Sichtbaren Bereich sicher füllen
+        for _ in range(4):
+            try:
+                _, y2 = self.current_canvas.yview()
+            except Exception:
+                break
+            if y2 < 1.0:
+                break
+            if self._thumbnail_render_index >= len(self._filtered_files_cache):
+                break
+            self._render_thumbnail_batch(self.thumbnail_parent, self._thumb_render_generation)
+
+    def _schedule_visible_thumbnail_enqueue(self, canvas):
+        """Debounced Trigger für viewport-basiertes Thumbnail-Prefetching."""
+        if not canvas or not canvas.winfo_exists():
+            return
+        if self._visible_enqueue_after_id and self.dialog:
+            try:
+                self.dialog.after_cancel(self._visible_enqueue_after_id)
+            except Exception:
+                pass
+        self._visible_enqueue_after_id = self.dialog.after(
+            60, lambda: self._enqueue_visible_thumbnail_tasks(canvas)
+        )
+
+    def _enqueue_visible_thumbnail_tasks(self, canvas):
+        """Queue nur für sichtbare Kacheln + eine Viewport-Höhe prefetch oben/unten."""
+        if self.loading_cancelled or not canvas or not canvas.winfo_exists():
+            return
+        if not self._filtered_files_cache:
+            return
+
+        top = canvas.canvasy(0)
+        viewport_height = max(1, canvas.winfo_height())
+        bottom = top + viewport_height
+        prefetch_top = max(0, top - viewport_height)
+        prefetch_bottom = bottom + viewport_height
+
+        start_row = max(0, int(prefetch_top // self.thumbnail_row_height))
+        end_row = int(prefetch_bottom // self.thumbnail_row_height) + 1
+        start_idx = start_row * self.thumbnail_cols
+        end_idx = min(len(self._filtered_files_cache), (end_row + 1) * self.thumbnail_cols)
+
+        for idx in range(start_idx, end_idx):
+            path = self._filtered_files_cache[idx]['path']
+            if path in self.thumbnail_cache:
+                continue
+            if path in self.failed_thumbnail_paths:
+                continue
+            if path in self.queued_thumbnail_paths or path in self.inflight_thumbnail_paths:
+                continue
+
+            task = self.thumbnail_render_tasks.get(path)
+            if task:
+                self.thumbnail_queue.append(task)
+                self.queued_thumbnail_paths.add(path)
+
+        # Falls bei schnellem Scrollen nichts gequeued werden konnte, lade minimal
+        # den ersten noch ungeladenen gerenderten Task als Fallback.
+        if not self.thumbnail_queue and not self.inflight_thumbnail_paths:
+            for path, task in self.thumbnail_render_tasks.items():
+                if path in self.thumbnail_cache or path in self.failed_thumbnail_paths:
+                    continue
+                if path in self.queued_thumbnail_paths:
+                    continue
+                self.thumbnail_queue.append(task)
+                self.queued_thumbnail_paths.add(path)
+                break
+
         self.start_thumbnail_loading()
 
-        if end < len(self._filtered_files_cache):
-            self.dialog.after(1, lambda: self._render_thumbnail_batch(parent, generation))
+    def _prefetch_adjacent_thumbnail_pages(self, page_size):
+        """Lädt Thumbnails der vorherigen/nächsten Seite vor (ohne UI-Block)."""
+        pages = []
+        # stale inflight bereinigen, falls bereits im Cache
+        self.thumbnail_prefetch_inflight = {
+            p for p in self.thumbnail_prefetch_inflight
+            if p not in self.thumbnail_cache and p not in self.thumbnail_pil_cache
+        }
+        if self.thumbnail_current_page > 1:
+            pages.append(self.thumbnail_current_page - 1)
+        if self.thumbnail_current_page < self.thumbnail_total_pages:
+            pages.append(self.thumbnail_current_page + 1)
 
-    def _refresh_thumbnail_bboxes(self):
-        """Aktualisiert Widget-Bounding-Boxes gesammelt statt pro Element."""
-        for path, (widget, _) in list(self.thumbnail_widgets.items()):
-            try:
-                if not widget.winfo_exists():
+        for page in pages:
+            start_idx = (page - 1) * page_size
+            end_idx = min(len(self._thumbnail_all_filtered), start_idx + page_size)
+            page_items = self._thumbnail_all_filtered[start_idx:end_idx]
+            # nächste Seite priorisieren
+            if page == self.thumbnail_current_page + 1:
+                iterator = reversed(page_items)
+                use_left = True
+            else:
+                iterator = page_items
+                use_left = False
+
+            for file_info in iterator:
+                path = file_info['path']
+                if path in self.thumbnail_cache or path in self.thumbnail_pil_cache:
                     continue
-                x = widget.winfo_x()
-                y = widget.winfo_y()
-                w = widget.winfo_width()
-                h = widget.winfo_height()
-                self.thumbnail_widgets[path] = (widget, (x, y, x + w, y + h))
-            except Exception:
+                if path in self.thumbnail_prefetch_inflight:
+                    continue
+                if use_left:
+                    self.thumbnail_prefetch_queue.appendleft(file_info)
+                else:
+                    self.thumbnail_prefetch_queue.append(file_info)
+                self.thumbnail_prefetch_inflight.add(path)
+
+        self._start_thumbnail_prefetch_worker()
+
+    def _start_thumbnail_prefetch_worker(self):
+        if not self.thumbnail_prefetch_queue:
+            return
+        if not self.thumbnail_prefetch_ui_poll_active:
+            self.thumbnail_prefetch_ui_poll_active = True
+            self.dialog.after(30, self._process_prefetch_results)
+
+        while self.thumbnail_prefetch_workers_active < self.max_thumbnail_prefetch_workers and self.thumbnail_prefetch_queue:
+            self.thumbnail_prefetch_workers_active += 1
+            thread = threading.Thread(target=self._thumbnail_prefetch_worker, daemon=True)
+            thread.start()
+
+    def _thumbnail_prefetch_worker(self):
+        while not self.loading_cancelled:
+            try:
+                file_info = self.thumbnail_prefetch_queue.popleft()
+            except IndexError:
+                break
+            path = file_info['path']
+            if path in self.thumbnail_cache or path in self.thumbnail_pil_cache:
+                self.thumbnail_prefetch_inflight.discard(path)
                 continue
+            image = self.generate_thumbnail(file_info)
+            if image:
+                self.thumbnail_pil_cache[path] = image
+                self.thumbnail_prefetch_result_queue.put(path)
+            self.thumbnail_prefetch_inflight.discard(path)
+        self.thumbnail_prefetch_workers_active = max(0, self.thumbnail_prefetch_workers_active - 1)
+
+    def _process_prefetch_results(self):
+        """Konvertiert prefetched PIL-Bilder in Tk-Cache für sofortige Anzeige."""
+        if self.loading_cancelled:
+            self.thumbnail_prefetch_ui_poll_active = False
+            return
+
+        processed = 0
+        while processed < self.max_prefetch_ui_updates_per_tick:
+            try:
+                path = self.thumbnail_prefetch_result_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if path in self.thumbnail_cache:
+                processed += 1
+                continue
+            pil_image = self.thumbnail_pil_cache.get(path)
+            if pil_image is not None:
+                try:
+                    self.thumbnail_cache[path] = ImageTk.PhotoImage(pil_image)
+                except Exception:
+                    pass
+            processed += 1
+
+        if self.thumbnail_prefetch_workers_active > 0 or self.thumbnail_prefetch_queue or not self.thumbnail_prefetch_result_queue.empty():
+            self.dialog.after(30, self._process_prefetch_results)
+        else:
+            self.thumbnail_prefetch_ui_poll_active = False
 
     def _on_tab_changed(self, event):
         """Handler für Tab-Wechsel"""
         selected_tab = self.notebook.index(self.notebook.select())
         if selected_tab == 0:
-            self.switch_to_thumbnails()
+            self.switch_to_thumbnails(reset_page=False)
         else:
             self.switch_to_details()
+
+    def _prepare_thumbnail_page(self, reset_page=False):
+        """Berechnet gefilterte Kachel-Daten inkl. Pagination."""
+        self._thumbnail_all_filtered = self.get_filtered_files()
+        try:
+            page_size = int(self.thumbnail_page_size_var.get())
+        except Exception:
+            page_size = 100
+        page_size = max(1, page_size)
+
+        total_items = len(self._thumbnail_all_filtered)
+        self.thumbnail_total_pages = max(1, math.ceil(total_items / page_size))
+
+        if reset_page:
+            self.thumbnail_current_page = 1
+        self.thumbnail_current_page = max(1, min(self.thumbnail_current_page, self.thumbnail_total_pages))
+
+        start_idx = (self.thumbnail_current_page - 1) * page_size
+        end_idx = start_idx + page_size
+        self._filtered_files_cache = self._thumbnail_all_filtered[start_idx:end_idx]
+        self._update_thumbnail_pagination_ui()
+        self._prefetch_adjacent_thumbnail_pages(page_size)
+
+    def _update_thumbnail_pagination_ui(self):
+        """Aktualisiert Seitenanzeige/Buttons für Kacheln."""
+        if hasattr(self, 'thumb_page_label'):
+            self.thumb_page_label.config(text=f"{self.thumbnail_current_page}/{self.thumbnail_total_pages}")
+        if hasattr(self, 'thumbnail_page_jump_var'):
+            self.thumbnail_page_jump_var.set(str(self.thumbnail_current_page))
+        if hasattr(self, 'thumb_first_button'):
+            self.thumb_first_button.config(state=('normal' if self.thumbnail_current_page > 1 else 'disabled'))
+        if hasattr(self, 'thumb_prev_button'):
+            self.thumb_prev_button.config(state=('normal' if self.thumbnail_current_page > 1 else 'disabled'))
+        if hasattr(self, 'thumb_next_button'):
+            self.thumb_next_button.config(state=('normal' if self.thumbnail_current_page < self.thumbnail_total_pages else 'disabled'))
+        if hasattr(self, 'thumb_last_button'):
+            self.thumb_last_button.config(state=('normal' if self.thumbnail_current_page < self.thumbnail_total_pages else 'disabled'))
+
+    def _on_thumbnail_page_size_changed(self):
+        """Handler für geänderte Kachel-Seitengröße."""
+        if self.view_mode == "thumbnail":
+            self.switch_to_thumbnails(reset_page=True)
+
+    def _change_thumbnail_page(self, delta):
+        """Blättert in der Kachel-Pagination vor/zurück."""
+        new_page = self.thumbnail_current_page + delta
+        if new_page < 1 or new_page > self.thumbnail_total_pages:
+            return
+        self.thumbnail_current_page = new_page
+        if self.view_mode == "thumbnail":
+            self.switch_to_thumbnails(reset_page=False)
+
+    def _go_to_thumbnail_page(self, page):
+        """Springt zu einer spezifischen Kachel-Seite."""
+        target = int(page)
+        target = max(1, min(target, self.thumbnail_total_pages))
+        if target == self.thumbnail_current_page:
+            return
+        self.thumbnail_current_page = target
+        if self.view_mode == "thumbnail":
+            self.switch_to_thumbnails(reset_page=False)
+
+    def _go_to_thumbnail_first(self):
+        """Springt auf die erste Seite."""
+        self._go_to_thumbnail_page(1)
+
+    def _go_to_thumbnail_last(self):
+        """Springt auf die letzte Seite."""
+        self._go_to_thumbnail_page(self.thumbnail_total_pages)
+
+    def _on_thumbnail_page_jump(self):
+        """Handler für direkte Seiteneingabe."""
+        try:
+            target = int(self.thumbnail_page_jump_var.get().strip())
+        except Exception:
+            self.thumbnail_page_jump_var.set(str(self.thumbnail_current_page))
+            return
+        self._go_to_thumbnail_page(target)
 
     def get_filtered_files(self):
         """Gibt gefilterte und sortierte Dateiliste zurück"""
@@ -604,11 +978,11 @@ class SDFileSelectorDialog:
     def apply_filters(self):
         """Wendet Filter an und lädt Ansicht neu"""
         if self.view_mode == "thumbnail":
-            self.switch_to_thumbnails()
+            self.switch_to_thumbnails(reset_page=True)
         else:
             self.switch_to_details()
 
-    def create_thumbnail_widget(self, parent, file_info, row, col):
+    def create_thumbnail_widget(self, parent, file_info, row, col, queue_thumbnail=True):
         """Erstellt ein Thumbnail-Widget mit Rand-Markierung"""
         path = file_info['path']
         is_marked = path in self.markierte_paths
@@ -703,6 +1077,14 @@ class SDFileSelectorDialog:
             thumbnail_img = self.thumbnail_cache[path]
             thumb_label = tk.Label(thumb_frame, image=thumbnail_img, bg='#f0f0f0')
             thumb_label.image = thumbnail_img
+            thumb_label._file_path = path
+            thumb_label.place(relx=0.5, rely=0.5, anchor='center')
+        elif path in self.thumbnail_pil_cache:
+            thumbnail_img = ImageTk.PhotoImage(self.thumbnail_pil_cache[path])
+            self.thumbnail_cache[path] = thumbnail_img
+            thumb_label = tk.Label(thumb_frame, image=thumbnail_img, bg='#f0f0f0')
+            thumb_label.image = thumbnail_img
+            thumb_label._file_path = path
             thumb_label.place(relx=0.5, rely=0.5, anchor='center')
         else:
             # Zeige Platzhalter
@@ -715,11 +1097,15 @@ class SDFileSelectorDialog:
 
             thumb_label = tk.Label(thumb_frame, text=loading_text, font=("Arial", 20),
                                   bg='#f0f0f0', fg='#666')
+            thumb_label._file_path = path
             thumb_label.place(relx=0.5, rely=0.5, anchor='center')
 
-            # Füge zur Thumbnail-Queue hinzu für asynchrones Laden
-            # Speichere auch Click-Handler und Widgets für späteren Zugriff
-            self.thumbnail_queue.append((file_info, thumb_label, thumb_frame, frame, on_click, on_double_click))
+            # Speichere Task für viewport-basiertes Queueing
+            task = (file_info, thumb_label, thumb_frame, frame, on_click, on_double_click)
+            self.thumbnail_render_tasks[path] = task
+            if queue_thumbnail:
+                self.thumbnail_queue.append(task)
+                self.queued_thumbnail_paths.add(path)
 
         # NEU: Video/Foto-Icon in oberer LINKER Ecke (NACH thumb_label, damit es darüber liegt!)
         icon_text = "🎬" if file_info['is_video'] else "🖼"
@@ -865,7 +1251,13 @@ class SDFileSelectorDialog:
             if path in self.selected_paths:
                 continue
 
-            widget_x1, widget_y1, widget_x2, widget_y2 = bbox
+            try:
+                widget_x1 = widget.winfo_x()
+                widget_y1 = widget.winfo_y()
+                widget_x2 = widget_x1 + widget.winfo_width()
+                widget_y2 = widget_y1 + widget.winfo_height()
+            except Exception:
+                continue
 
             if not (canvas_x2 < widget_x1 or canvas_x1 > widget_x2 or
                    canvas_y2 < widget_y1 or canvas_y1 > widget_y2):
@@ -888,12 +1280,13 @@ class SDFileSelectorDialog:
         self.update_mark_button()
 
     def generate_thumbnail(self, file_info):
-        """Generiert echtes Thumbnail für Datei"""
+        """Generiert PIL-Thumbnail für Datei (ohne Tk-Aufrufe im Worker-Thread)."""
         path = file_info['path']
-
-        # Prüfe Cache
-        if path in self.thumbnail_cache:
-            return self.thumbnail_cache[path]
+        if path in self.thumbnail_pil_cache:
+            try:
+                return self.thumbnail_pil_cache[path].copy()
+            except Exception:
+                pass
 
         try:
             if file_info['is_video']:
@@ -920,16 +1313,17 @@ class SDFileSelectorDialog:
                     # Führe FFmpeg aus (leise)
                     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, creationflags=SUBPROCESS_CREATE_NO_WINDOW)
 
-                    # Lade generiertes Bild
+                    # Lade generiertes Bild als PIL-Objekt
                     img = Image.open(tmp_path)
-                    photo = ImageTk.PhotoImage(img)
-                    self.thumbnail_cache[path] = photo
+                    img_copy = img.copy()
+                    img.close()
+                    self.thumbnail_pil_cache[path] = img_copy.copy()
 
                     # Lösche temporäre Datei
                     import os
                     os.unlink(tmp_path)
 
-                    return photo
+                    return img_copy
                 except Exception as e:
                     print(f"FFmpeg-Fehler für {file_info['filename']}: {e}")
                     # Cleanup
@@ -943,9 +1337,9 @@ class SDFileSelectorDialog:
                 # Foto-Thumbnail
                 img = Image.open(path)
                 img.thumbnail((180, 135), Image.Resampling.LANCZOS)
-                photo = ImageTk.PhotoImage(img)
-                self.thumbnail_cache[path] = photo
-                return photo
+                img_copy = img.copy()
+                self.thumbnail_pil_cache[path] = img_copy.copy()
+                return img_copy
         except Exception as e:
             print(f"Fehler beim Thumbnail-Generieren für {file_info['filename']}: {e}")
             return None
@@ -959,6 +1353,14 @@ class SDFileSelectorDialog:
 
     def switch_to_details(self):
         """Wechselt zur Detail-Ansicht"""
+        # Zustand der Thumbnail-Ansicht merken, bevor sie neu aufgebaut wird
+        if self.current_canvas:
+            try:
+                self.thumbnail_saved_scroll = self.current_canvas.yview()[0]
+            except Exception:
+                pass
+        self.thumbnail_saved_render_index = max(self.thumbnail_saved_render_index, self._thumbnail_render_index)
+
         self.view_mode = "details"
 
         # Lösche alte Ansicht
@@ -972,11 +1374,16 @@ class SDFileSelectorDialog:
         scrollbar = ttk.Scrollbar(tree_frame, orient='vertical')
         scrollbar.pack(side='right', fill='y')
 
+        def on_tree_yview(*args):
+            scrollbar.set(*args)
+            self._maybe_render_more_details()
+
         tree = ttk.Treeview(tree_frame,
                            columns=('select', 'filename', 'type', 'size', 'date', 'path'),
                            show='headings',
-                           yscrollcommand=scrollbar.set)
+                           yscrollcommand=on_tree_yview)
         tree.pack(side='left', fill='both', expand=True)
+        scrollbar.config(command=tree.yview)
 
         # Speichere TreeView-Referenz für optimierte Updates
         self.current_tree = tree
@@ -1005,6 +1412,7 @@ class SDFileSelectorDialog:
         self._details_render_generation += 1
         generation = self._details_render_generation
         self._render_details_batch(tree, generation)
+        self.dialog.after(0, self._fill_details_viewport)
 
         # Events
         def on_tree_select(event):
@@ -1082,8 +1490,37 @@ class SDFileSelectorDialog:
                 file_info['path']
             ), tags=(file_info['path'],))
         self._details_render_index = end
-        if end < len(self._filtered_files_cache):
-            self.dialog.after(1, lambda: self._render_details_batch(tree, generation))
+        return end < len(self._filtered_files_cache)
+
+    def _maybe_render_more_details(self):
+        """Rendert weitere Detail-Zeilen nur bei Bedarf."""
+        if self.view_mode != "details":
+            return
+        if not self.current_tree or not self.current_tree.winfo_exists():
+            return
+        if self._details_render_index >= len(self._filtered_files_cache):
+            return
+        try:
+            _, y2 = self.current_tree.yview()
+        except Exception:
+            return
+        if y2 >= self.details_load_threshold:
+            self._render_details_batch(self.current_tree, self._details_render_generation)
+
+    def _fill_details_viewport(self):
+        """Füllt initial den sichtbaren Bereich in der Detailansicht."""
+        if self.view_mode != "details" or not self.current_tree:
+            return
+        for _ in range(3):
+            try:
+                _, y2 = self.current_tree.yview()
+            except Exception:
+                break
+            if y2 < 1.0:
+                break
+            if self._details_render_index >= len(self._filtered_files_cache):
+                break
+            self._render_details_batch(self.current_tree, self._details_render_generation)
 
     def show_preview(self, file_info):
         """Zeigt Vorschau für eine Datei"""
@@ -1529,6 +1966,10 @@ class SDFileSelectorDialog:
         if not self.thumbnail_queue:
             return
 
+        if not self.thumbnail_ui_poll_active:
+            self.thumbnail_ui_poll_active = True
+            self.dialog.after(20, self._process_thumbnail_results)
+
         while self._thumbnail_workers_active < self._max_thumbnail_workers and self.thumbnail_queue:
             self._thumbnail_workers_active += 1
             self.is_loading_thumbnails = True
@@ -1543,37 +1984,81 @@ class SDFileSelectorDialog:
             except IndexError:
                 break
 
-            # Generiere Thumbnail
-            thumbnail_img = self.generate_thumbnail(file_info)
+            path = file_info['path']
+            self.queued_thumbnail_paths.discard(path)
+            self.inflight_thumbnail_paths.add(path)
 
-            # Aktualisiere UI im Haupt-Thread
-            if thumbnail_img and not self.loading_cancelled:
-                try:
-                    self.dialog.after(0, self._update_thumbnail_ui, thumb_label, thumb_frame,
-                                    thumbnail_img, on_click, on_double_click)
-                except:
-                    # Dialog wurde geschlossen
-                    break
+            # Bereits gerendertes Tk-Thumbnail wiederverwenden
+            if path in self.thumbnail_cache:
+                self.thumbnail_result_queue.put((thumb_label, thumb_frame, self.thumbnail_cache[path], None, on_click, on_double_click))
+                continue
+            if path in self.thumbnail_pil_cache:
+                self.thumbnail_result_queue.put((thumb_label, thumb_frame, None, self.thumbnail_pil_cache[path].copy(), on_click, on_double_click))
+                continue
+
+            # Generiere PIL-Thumbnail im Worker
+            thumbnail_image = self.generate_thumbnail(file_info)
+            if thumbnail_image and not self.loading_cancelled:
+                self.thumbnail_result_queue.put((thumb_label, thumb_frame, None, thumbnail_image, on_click, on_double_click))
             elif not self.loading_cancelled:
-                # Fallback wenn Thumbnail-Generierung fehlschlägt
                 icon = "🎬" if file_info['is_video'] else "🖼️"
-                try:
-                    self.dialog.after(0, self._update_thumbnail_fallback, thumb_label, icon)
-                except:
-                    break
+                self.thumbnail_result_queue.put((thumb_label, thumb_frame, None, icon, on_click, on_double_click))
 
         self._thumbnail_workers_active = max(0, self._thumbnail_workers_active - 1)
         self.is_loading_thumbnails = self._thumbnail_workers_active > 0
+        if not self.is_loading_thumbnails and not self.thumbnail_queue and not self.loading_cancelled:
+            # Nach Worker-Ende ggf. neue sichtbare Tasks nachziehen
+            self._schedule_visible_thumbnail_enqueue(self.current_canvas)
+
+    def _process_thumbnail_results(self):
+        """Verarbeitet Thumbnail-Ergebnisse im UI-Thread in kleinen Batches."""
+        if self.loading_cancelled:
+            self.thumbnail_ui_poll_active = False
+            return
+
+        processed = 0
+        while processed < self.max_ui_updates_per_tick:
+            try:
+                thumb_label, thumb_frame, cached_photo, payload, on_click, on_double_click = self.thumbnail_result_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if cached_photo is not None:
+                self._update_thumbnail_ui(thumb_label, thumb_frame, cached_photo, on_click, on_double_click)
+            elif isinstance(payload, Image.Image):
+                photo = ImageTk.PhotoImage(payload)
+                self._update_thumbnail_ui(thumb_label, thumb_frame, photo, on_click, on_double_click)
+            else:
+                self._update_thumbnail_fallback(thumb_label, payload)
+                path = getattr(thumb_label, "_file_path", None)
+                if path:
+                    self.failed_thumbnail_paths.add(path)
+            path = getattr(thumb_label, "_file_path", None)
+            if path:
+                self.inflight_thumbnail_paths.discard(path)
+            processed += 1
+
+        if (self._thumbnail_workers_active > 0) or (not self.thumbnail_result_queue.empty()):
+            self.dialog.after(20, self._process_thumbnail_results)
+        else:
+            self.thumbnail_ui_poll_active = False
 
     def _update_thumbnail_ui(self, thumb_label, thumb_frame, thumbnail_img, on_click, on_double_click):
         """Aktualisiert Thumbnail im UI (läuft im Haupt-Thread)"""
         try:
+            # Cache für spätere Wiederverwendung
+            file_path = getattr(thumb_label, "_file_path", None)
+            if file_path and file_path not in self.thumbnail_cache:
+                self.thumbnail_cache[file_path] = thumbnail_img
+
             # Lösche alten Platzhalter
             thumb_label.destroy()
 
             # Erstelle neues Label mit Thumbnail
             new_label = tk.Label(thumb_frame, image=thumbnail_img, bg='#f0f0f0')
             new_label.image = thumbnail_img  # Referenz behalten
+            if file_path:
+                new_label._file_path = file_path
             new_label.place(relx=0.5, rely=0.5, anchor='center')
 
             # WICHTIG: Binde Click-Events auf das neue Label

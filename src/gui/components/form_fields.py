@@ -13,6 +13,7 @@ class FormFields:
 
         # --- Variablen für ALLE Formular-Typen ---
         self.ort_var = tk.StringVar(value="Calden")
+        self.gast_name_var = tk.StringVar()
         self.tandemmaster_var = tk.StringVar()
         self.videospringer_var = tk.StringVar()
 
@@ -57,6 +58,7 @@ class FormFields:
         self.entry_nachname = None  # NEU
         self.is_valid = True
 
+        self.entry_gast_name = None
         self.entry_tandemmaster = None
         self.entry_datum = None
         self.label_videospringer = None
@@ -95,6 +97,7 @@ class FormFields:
         self.entry_vorname = None
         self.entry_nachname = None
 
+        self.entry_gast_name = None
         self.entry_tandemmaster = None
         self.entry_datum = None
         self.label_videospringer = None
@@ -323,6 +326,7 @@ class FormFields:
         self.nachname_var.set("")
 
         # --- VERSCHOBENE Felder ---
+        row = self._create_gast_name_field(row)
         row = self._create_tandemmaster_field(row)
         row = self._create_datum_ort_fields(row)
         # --- ENDE VERSCHOBEN ---
@@ -458,6 +462,15 @@ class FormFields:
 
         self.entry_kunde_id.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
         self.entry_booking_id.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
+        return row + 1
+
+    def _create_gast_name_field(self, row):
+        tk.Label(self.frame, text="Name:", font=("Arial", 11)).grid(row=row, column=0, padx=5, pady=5,
+                                                                    sticky="w")
+        self.gast_name_var.set(self.config.get_settings().get("gast_name", ""))
+        self.entry_gast_name = tk.Entry(self.frame, font=("Arial", 11),
+                                        textvariable=self.gast_name_var)
+        self.entry_gast_name.grid(row=row, column=1, columnspan=4, padx=5, pady=5, sticky="ew")
         return row + 1
 
     def _create_tandemmaster_field(self, row):
@@ -668,6 +681,7 @@ class FormFields:
         """Lädt Einstellungen nur in die Variablen (Widgets existieren noch nicht)."""
         settings = self.config.get_settings()
         self.ort_var.set(settings.get("ort", "Calden"))
+        self.gast_name_var.set(settings.get("gast_name", ""))
         self.tandemmaster_var.set(settings.get("tandemmaster", ""))
         self.videospringer_var.set(settings.get("videospringer", ""))
         self.video_mode_var.set(settings.get("video_mode", "handcam"))
@@ -697,8 +711,8 @@ class FormFields:
         else:  # 'manual'
             data["kunden_id"] = self.kunde_id_var.get().strip()
             data["booking_id"] = self.booking_id_var.get().strip()
-            if not data["gast"]:
-                data["gast"] = data["kunden_id"] or "Unbekannt"
+            name = self.gast_name_var.get().strip()
+            data["gast"] = name or data["kunden_id"] or "Unbekannt"
 
         # Werte nur basierend auf dem Modus setzen
         mode = self.video_mode_var.get()
@@ -731,6 +745,7 @@ class FormFields:
 
         # Nur allgemeine, nicht-kunden-spezifische Daten speichern
         current_settings_data["ort"] = self.ort_var.get()
+        current_settings_data["gast_name"] = self.gast_name_var.get()
         current_settings_data["tandemmaster"] = self.tandemmaster_var.get()
         current_settings_data["video_mode"] = self.video_mode_var.get()
         current_settings_data["videospringer"] = self.videospringer_var.get()

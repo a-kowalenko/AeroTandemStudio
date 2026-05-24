@@ -1607,6 +1607,8 @@ class VideoGeneratorApp:
                 else:
                     self.form_fields.videospringer_var.set("")
                     settings["videospringer"] = ""
+                self.form_fields.gast_name_var.set("")
+                settings["gast_name"] = ""
                 self.config.save_settings(settings)
 
             if hasattr(self, "progress_handler") and self.progress_handler:

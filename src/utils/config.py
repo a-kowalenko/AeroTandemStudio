@@ -31,6 +31,8 @@ class ConfigManager:
                         settings["sd_skip_processed"] = False
                     if "sd_pc_name" not in settings:
                         settings["sd_pc_name"] = ""
+                    if "gast_name" not in settings:
+                        settings["gast_name"] = ""
                     return settings
             except (json.JSONDecodeError, FileNotFoundError):
                 return self.get_default_settings()
@@ -43,6 +45,7 @@ class ConfigManager:
             "ort": "Calden",
             "dauer": 5,
             "outside_video": False,
+            "gast_name": "",
             "tandemmaster": "",
             "videospringer": "",
             "keep_tandemmaster_on_session_reset": False,

@@ -460,6 +460,7 @@ Pfad: `config/config.json`
   "ort": "Calden",
   "dauer": 5,
   "outside_video": false,
+  "gast_name": "",
   "tandemmaster": "",
   "videospringer": "",
   "upload_to_server": false,

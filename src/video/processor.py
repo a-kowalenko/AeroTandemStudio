@@ -121,108 +121,102 @@ class VideoProcessor:
         except (ValueError, ZeroDivisionError, TypeError):
             return 30
 
-    def _final_delivery_h264_encode_args(self):
+    @staticmethod
+    def _get_work_temp_dir(*path_hints):
         """
-        Video-Re-Encode zu einem einheitlichen H.264-Stream (yuv420p, avc1).
-        Erforderlich, weil Stream-Copy von Intro + Hauptvideo im MP4 zu gemischter
-        avcC / inkompatiblen SPS-PPS führt (VLC spielt mit, Browser/WMP nicht).
+        Temp-Verzeichnis auf dem Laufwerk des Quellvideos (nicht immer %TEMP% auf C:).
         """
-        p = self._get_encoding_params('h264')
-        enc = p.get('encoder') or 'libx264'
-        args = ['-c:v', enc]
-        if enc == 'libx264':
-            args.extend(['-preset', 'fast', '-crf', '20'])
-            if getattr(self, 'parallel_processing_enabled', True):
-                args.extend(['-threads', '0'])
-            else:
-                args.extend(['-threads', '1'])
-        elif enc.endswith('_nvenc'):
-            args.extend(['-preset', 'p4', '-rc', 'vbr', '-cq', '21'])
-        elif enc.endswith('_qsv'):
-            args.extend(['-global_quality', '23', '-look_ahead', '0'])
-        elif enc.endswith('_amf'):
-            args.extend(['-quality', 'balanced', '-rc', 'cqp', '-qp_i', '21', '-qp_p', '21'])
-        elif enc.endswith('_videotoolbox'):
-            args.extend(['-q:v', '60'])
-        elif enc.endswith('_vaapi'):
-            args.extend(['-qp', '21'])
-        else:
-            args = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '20']
-            if getattr(self, 'parallel_processing_enabled', True):
-                args.extend(['-threads', '0'])
-            else:
-                args.extend(['-threads', '1'])
-        args.extend(['-pix_fmt', 'yuv420p', '-tag:v', 'avc1'])
-        return args
+        for path_hint in path_hints:
+            if not path_hint:
+                continue
+            base = path_hint if os.path.isdir(path_hint) else os.path.dirname(os.path.abspath(path_hint))
+            if not base or not os.path.isdir(base):
+                continue
+            work = os.path.join(base, ".aerotandem_work")
+            try:
+                os.makedirs(work, exist_ok=True)
+                if os.access(work, os.W_OK):
+                    return work
+            except OSError:
+                continue
+        return tempfile.gettempdir()
 
-    def _build_final_intro_body_input_args(
-        self,
-        use_concat_demuxer,
-        concat_list_path,
-        temp_intro_ts_path,
-        temp_combined_ts_path,
-    ):
-        """Gemeinsame Eingabe-Argumente für Stream-Copy und Re-Encode beim Final-Mux."""
-        cmd = ['ffmpeg', '-y', '-fflags', '+genpts']
-        if use_concat_demuxer:
-            cmd.extend(['-f', 'concat', '-safe', '0', '-i', concat_list_path])
-        else:
-            concat_input = f'concat:{temp_intro_ts_path}|{temp_combined_ts_path}'
-            cmd.extend(['-i', concat_input])
-        return cmd
+    def _normalize_mp4_for_concat(self, input_path, output_path, video_params):
+        """Remux nur Video+Audio mit sauberen Timestamps (Stream-Copy, kein Neuencode)."""
+        cmd = ['ffmpeg', '-y', '-fflags', '+genpts', '-i', input_path, '-map', '0:v:0']
+        if video_params.get('has_audio', True):
+            cmd.extend(['-map', '0:a:0'])
+        cmd.extend([
+            '-c', 'copy',
+            '-avoid_negative_ts', 'make_zero',
+            '-movflags', '+faststart',
+            output_path,
+        ])
+        subprocess.run(
+            cmd, capture_output=True, text=True, check=True,
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW,
+        )
+
+    def _mp4_to_mpegts_stream_copy(self, input_path, output_ts, vcodec, video_params):
+        """MP4 → MPEG-TS per Stream-Copy (Annex-B) für robustes HEVC/H.264-Concat."""
+        vcodec = self._normalize_vcodec_name(vcodec)
+        bsf_map = {'h264': 'h264_mp4toannexb', 'hevc': 'hevc_mp4toannexb'}
+        bsf = bsf_map.get(vcodec)
+
+        cmd = ['ffmpeg', '-y', '-fflags', '+genpts', '-i', input_path, '-map', '0:v:0']
+        if video_params.get('has_audio', True):
+            cmd.extend(['-map', '0:a:0'])
+        cmd.extend(['-c', 'copy', '-avoid_negative_ts', 'make_zero'])
+        if bsf:
+            cmd.extend(['-bsf:v', bsf])
+        cmd.extend(['-f', 'mpegts', output_ts])
+        subprocess.run(
+            cmd, capture_output=True, text=True, check=True,
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW,
+        )
 
     def _build_final_intro_body_stream_copy_command(
         self,
         full_video_output_path,
         video_params,
-        use_concat_demuxer,
-        concat_list_path,
-        temp_intro_ts_path,
-        temp_combined_ts_path,
+        concat_list_path=None,
+        intro_ts_path=None,
+        body_ts_path=None,
     ):
         """
         Intro + Hauptvideo per Stream-Copy zusammenfügen (schnell, Hauptvideo unverändert).
+        HEVC: MPEG-TS-Concat (verhindert eingefrorenes Intro-Bild im Browser).
+        H.264: MP4 concat demuxer.
         """
-        cmd = self._build_final_intro_body_input_args(
-            use_concat_demuxer, concat_list_path, temp_intro_ts_path, temp_combined_ts_path
-        )
+        if intro_ts_path and body_ts_path:
+            concat_input = f'concat:{intro_ts_path}|{body_ts_path}'
+            cmd = ['ffmpeg', '-y', '-fflags', '+genpts', '-i', concat_input]
+        else:
+            cmd = [
+                'ffmpeg', '-y', '-fflags', '+genpts',
+                '-f', 'concat', '-safe', '0', '-i', concat_list_path,
+            ]
+
         cmd.extend(['-map', '0:v:0'])
         if video_params.get('has_audio', True):
             cmd.extend(['-map', '0:a:0'])
 
-        cmd.extend(['-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-movflags', '+faststart'])
+        cmd.extend([
+            '-c', 'copy',
+            '-bsf:a', 'aac_adtstoasc',
+            '-movflags', '+faststart',
+            '-avoid_negative_ts', 'make_zero',
+            '-reset_timestamps', '1',
+            '-max_interleave_delta', '0',
+        ])
 
-        vcodec = video_params.get('vcodec', 'h264')
-        if vcodec in ('hevc', 'h265'):
+        vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
+        if vcodec == 'hevc':
             cmd.extend(['-bsf:v', 'hevc_metadata=aud=insert,extract_extradata', '-tag:v', 'hvc1'])
         elif vcodec == 'h264':
             cmd.extend(['-tag:v', 'avc1'])
 
         cmd.append(full_video_output_path)
-        return cmd
-
-    def _build_final_intro_body_reencode_command(
-        self,
-        full_video_output_path,
-        video_params,
-        use_concat_demuxer,
-        concat_list_path,
-        temp_intro_ts_path,
-        temp_combined_ts_path,
-    ):
-        """
-        Fallback: Intro + Hauptvideo vollständig zu H.264/avc1 neu encodieren (Browser-sicher).
-        """
-        cmd = self._build_final_intro_body_input_args(
-            use_concat_demuxer, concat_list_path, temp_intro_ts_path, temp_combined_ts_path
-        )
-        cmd.extend(['-map', '0:v:0'])
-        if video_params.get('has_audio', True):
-            cmd.extend(['-map', '0:a:0'])
-
-        cmd.extend(self._final_delivery_h264_encode_args())
-        cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
-        cmd.extend(['-movflags', '+faststart', full_video_output_path])
         return cmd
 
     @staticmethod
@@ -260,39 +254,37 @@ class VideoProcessor:
             print(f"Stream-Summary fehlgeschlagen für {video_path}: {exc}")
             return None
 
-    def _can_stream_copy_concat(self, video_params, intro_path, combined_path):
-        """Prüft, ob Intro und Hauptvideo sicher per Stream-Copy zusammengefügt werden können."""
-        vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
-        if vcodec not in ('h264', 'hevc', 'vp9', 'av1'):
-            return False
-
+    def _assert_stream_copy_compatible(self, intro_path, combined_path):
+        """Stellt sicher, dass Intro und Hauptvideo per Stream-Copy zusammenpassen."""
         if not intro_path or not os.path.exists(intro_path):
-            return False
+            raise ValueError("Intro-Datei fehlt für Stream-Copy-Zusammenführung.")
         if not combined_path or not os.path.exists(combined_path):
-            return False
+            raise ValueError("Hauptvideo fehlt für Stream-Copy-Zusammenführung.")
 
         intro = self._probe_video_stream_summary(intro_path)
         body = self._probe_video_stream_summary(combined_path)
         if not intro or not body:
-            return False
+            raise ValueError("Stream-Parameter von Intro oder Hauptvideo konnten nicht gelesen werden.")
 
         if intro['vcodec'] != body['vcodec']:
-            print(f"Stream-Copy abgelehnt: Codec-Mismatch intro={intro['vcodec']} body={body['vcodec']}")
-            return False
+            raise ValueError(
+                f"Intro-Codec ({intro['vcodec']}) passt nicht zum Hauptvideo ({body['vcodec']})."
+            )
 
         for key in ('width', 'height', 'pix_fmt', 'fps'):
             if intro.get(key) != body.get(key):
-                print(f"Stream-Copy abgelehnt: {key} intro={intro.get(key)} body={body.get(key)}")
-                return False
+                raise ValueError(
+                    f"Intro und Hauptvideo unterscheiden sich bei {key}: "
+                    f"intro={intro.get(key)}, body={body.get(key)}"
+                )
 
         if intro.get('profile') and body.get('profile') and intro['profile'] != body['profile']:
-            print(f"Stream-Copy abgelehnt: Profil intro={intro['profile']} body={body['profile']}")
-            return False
-
-        return True
+            raise ValueError(
+                f"Intro-Profil ({intro['profile']}) passt nicht zum Hauptvideo ({body['profile']})."
+            )
 
     def _validate_browser_mp4(self, output_path, video_params, expected_duration_sec=None):
-        """Validiert, ob die finale MP4 browser-tauglich muxed wurde."""
+        """Prüft Browser-taugliche MP4 nach Stream-Copy-Mux."""
         if not output_path or not os.path.exists(output_path):
             return False
 
@@ -305,7 +297,7 @@ class VideoProcessor:
             if vcodec == 'h264':
                 if stream['vcodec'] != 'h264':
                     return False
-                if stream.get('pix_fmt') != 'yuv420p':
+                if stream.get('pix_fmt') not in ('yuv420p',):
                     return False
                 vtag = stream.get('vtag') or ''
                 if vtag and vtag not in ('avc1', 'avc3'):
@@ -313,13 +305,15 @@ class VideoProcessor:
             elif vcodec == 'hevc':
                 if stream['vcodec'] != 'hevc':
                     return False
+                if stream.get('pix_fmt') not in ('yuv420p', 'yuv420p10le'):
+                    return False
                 vtag = stream.get('vtag') or ''
                 if vtag and vtag not in ('hvc1', 'hev1'):
                     return False
 
             if expected_duration_sec and expected_duration_sec > 0:
                 actual = self._get_video_duration(output_path)
-                if abs(actual - expected_duration_sec) > 2.5:
+                if abs(actual - expected_duration_sec) > 3.0:
                     print(
                         f"Browser-Validierung: Dauer abweichend "
                         f"(erwartet ~{expected_duration_sec:.1f}s, ist {actual:.1f}s)"
@@ -331,81 +325,125 @@ class VideoProcessor:
             print(f"Browser-Validierung fehlgeschlagen: {exc}")
             return False
 
+    def _prepare_final_mux_segments(
+        self, intro_path, combined_video_path, video_params, work_temp_dir
+    ):
+        """
+        Bereitet Intro + Hauptvideo für Stream-Copy-Zusammenführung vor.
+        HEVC → MPEG-TS-Concat (Browser-kompatibel), H.264 → MP4-concat.
+        Returns: dict mit mux-Parametern + Liste temporärer Dateien.
+        """
+        extra_temp_files = []
+        vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
+
+        if not video_params.get("has_audio", True):
+            self._update_status("Erzeuge stille Audiospur für Hauptvideo...")
+            temp_combined_path = os.path.join(work_temp_dir, "combined_with_silent_audio.mp4")
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", combined_video_path,
+                "-f", "lavfi", "-i",
+                f"anullsrc=channel_layout={video_params['channel_layout']}:sample_rate={video_params['sample_rate']}",
+                "-c:v", "copy",
+                "-c:a", video_params['acodec'],
+                "-shortest",
+                temp_combined_path,
+            ]
+            subprocess.run(
+                cmd, capture_output=True, text=True, check=True,
+                creationflags=SUBPROCESS_CREATE_NO_WINDOW,
+            )
+            body_path = temp_combined_path
+            extra_temp_files.append(temp_combined_path)
+        else:
+            body_path = combined_video_path
+
+        self._update_status("Normalisiere Intro- und Hauptvideo-Timestamps...")
+        intro_norm = os.path.join(work_temp_dir, "intro_norm.mp4")
+        body_norm = os.path.join(work_temp_dir, "body_norm.mp4")
+        extra_temp_files.extend([intro_norm, body_norm])
+
+        self._normalize_mp4_for_concat(intro_path, intro_norm, video_params)
+        self._normalize_mp4_for_concat(body_path, body_norm, video_params)
+
+        if vcodec == 'hevc':
+            self._update_status("HEVC: bereite MPEG-TS-Concat vor (stabile Wiedergabe)...")
+            intro_ts = os.path.join(work_temp_dir, "intro.ts")
+            body_ts = os.path.join(work_temp_dir, "body.ts")
+            extra_temp_files.extend([intro_ts, body_ts])
+            self._mp4_to_mpegts_stream_copy(intro_norm, intro_ts, vcodec, video_params)
+            self._update_status("HEVC: Hauptvideo nach MPEG-TS (Stream-Copy)...")
+            self._mp4_to_mpegts_stream_copy(body_norm, body_ts, vcodec, video_params)
+            return {
+                'method': 'ts',
+                'intro_ts_path': intro_ts,
+                'body_ts_path': body_ts,
+                'combined_body_path': body_norm,
+                'temp_files': extra_temp_files,
+            }
+
+        concat_list_path = os.path.join(work_temp_dir, "final_concat_list.txt")
+        extra_temp_files.append(concat_list_path)
+        self._update_status("Schreibe concat-Liste (Intro + Hauptvideo)...")
+        with open(concat_list_path, 'w', encoding='utf-8') as f:
+            intro_escaped = os.path.abspath(intro_norm).replace('\\', '/')
+            combined_escaped = os.path.abspath(body_norm).replace('\\', '/')
+            f.write(f"file '{intro_escaped}'\n")
+            f.write(f"file '{combined_escaped}'\n")
+
+        return {
+            'method': 'mp4_concat',
+            'concat_list_path': concat_list_path,
+            'combined_body_path': body_norm,
+            'temp_files': extra_temp_files,
+        }
+
     def _run_final_intro_body_mux(
         self,
         full_video_output_path,
         video_params,
-        use_concat_demuxer,
-        concat_list_path,
-        temp_intro_ts_path,
-        temp_combined_ts_path,
+        mux_segments,
         temp_intro_with_audio_path,
-        combined_video_path,
         intro_dauer,
         task_name="Finaler Schnitt (Intro + Video)",
         encoding_lane=0,
     ):
-        """
-        Fügt Intro + Hauptvideo zusammen: zuerst Stream-Copy (schnell), bei Bedarf Re-Encode-Fallback.
-        """
-        expected_duration = self._estimate_final_output_duration_sec(intro_dauer, combined_video_path)
-        stream_copy_eligible = self._can_stream_copy_concat(
-            video_params, temp_intro_with_audio_path, combined_video_path
-        )
-
-        if stream_copy_eligible:
-            try:
-                self._check_for_cancellation()
-                self._update_status("Füge Intro an (ohne Neuencode)...")
-                command = self._build_final_intro_body_stream_copy_command(
-                    full_video_output_path,
-                    video_params,
-                    use_concat_demuxer,
-                    concat_list_path,
-                    temp_intro_ts_path,
-                    temp_combined_ts_path,
-                )
-                self._run_ffmpeg_with_progress(
-                    command,
-                    self._estimate_stream_copy_mux_duration_sec(),
-                    task_name,
-                    task_id=None,
-                    encoding_lane=encoding_lane,
-                )
-                if self._validate_browser_mp4(full_video_output_path, video_params, expected_duration):
-                    print("✓ Finaler Schnitt per Stream-Copy erfolgreich (Browser-Validierung OK)")
-                    return
-                print("⚠ Browser-Validierung nach Stream-Copy fehlgeschlagen → Fallback Neuencode")
-            except Exception as exc:
-                if self.cancel_event.is_set():
-                    raise
-                print(f"⚠ Stream-Copy Mux fehlgeschlagen: {exc} → Fallback Neuencode")
-        else:
-            print("ℹ Stream-Copy nicht möglich (Inkompatible Streams) → direkter Neuencode")
+        """Fügt Intro + Hauptvideo ausschließlich per Stream-Copy zusammen (kein Neuencode)."""
+        combined_body_path = mux_segments['combined_body_path']
+        expected_duration = self._estimate_final_output_duration_sec(intro_dauer, combined_body_path)
 
         self._check_for_cancellation()
-        self._update_status("Optimiere Video für Browser-Wiedergabe...")
-        if os.path.exists(full_video_output_path):
-            try:
-                os.remove(full_video_output_path)
-            except OSError:
-                pass
+        self._assert_stream_copy_compatible(temp_intro_with_audio_path, combined_body_path)
 
-        command = self._build_final_intro_body_reencode_command(
-            full_video_output_path,
-            video_params,
-            use_concat_demuxer,
-            concat_list_path,
-            temp_intro_ts_path,
-            temp_combined_ts_path,
-        )
+        if mux_segments.get('method') == 'ts':
+            self._update_status("Füge Intro an (HEVC Stream-Copy via MPEG-TS)...")
+            command = self._build_final_intro_body_stream_copy_command(
+                full_video_output_path,
+                video_params,
+                intro_ts_path=mux_segments['intro_ts_path'],
+                body_ts_path=mux_segments['body_ts_path'],
+            )
+        else:
+            self._update_status("Füge Intro an (Stream-Copy, ohne Neuencode)...")
+            command = self._build_final_intro_body_stream_copy_command(
+                full_video_output_path,
+                video_params,
+                concat_list_path=mux_segments['concat_list_path'],
+            )
         self._run_ffmpeg_with_progress(
             command,
-            expected_duration,
+            self._estimate_stream_copy_mux_duration_sec(),
             task_name,
             task_id=None,
             encoding_lane=encoding_lane,
         )
+
+        if not self._validate_browser_mp4(full_video_output_path, video_params, expected_duration):
+            raise Exception(
+                "Finale MP4 ist nach Stream-Copy nicht browser-kompatibel. "
+                "Intro-Parameter stimmen vermutlich nicht mit dem Hauptvideo überein."
+            )
+        print("✓ Finaler Schnitt per Stream-Copy (Browser-Validierung OK)")
 
     def create_video_with_intro_only(self, payload):
         """Erstellt ein Verzeichnis, verarbeitet optional Videos und kopiert Fotos."""
@@ -503,116 +541,34 @@ class VideoProcessor:
                 if not os.path.exists(hintergrund_path):
                     raise FileNotFoundError("hintergrund.png fehlt im assets/ Ordner")
 
+                work_temp = self._get_work_temp_dir(combined_video_path, speicherort)
+
                 # Schritt 4: Kompatiblen Intro-Clip erstellen
                 self._check_for_cancellation()
                 self._update_progress(4, TOTAL_STEPS)
                 self._update_status("Erstelle exakt kompatiblen Intro-Clip...")
-                temp_intro_with_audio_path = os.path.join(tempfile.gettempdir(), "intro_with_silent_audio.mp4")
+                temp_intro_with_audio_path = os.path.join(work_temp, "intro_with_silent_audio.mp4")
                 temp_files.append(temp_intro_with_audio_path)
                 self._create_intro_with_silent_audio(
                     temp_intro_with_audio_path, dauer, video_params, drawtext_filter
                 )
 
-                # Schritt 5 & 6: Vorbereitung für Zusammenfügen (codec-abhängig)
+                # Schritt 5 & 6: MP4 concat-Liste (kein MPEG-TS — spart viel Plattenplatz)
                 self._check_for_cancellation()
                 self._update_progress(5, TOTAL_STEPS)
+                self._update_status("Bereite Stream-Copy-Zusammenführung vor...")
 
-                vcodec = video_params.get('vcodec', 'h264')
+                mux_segments = self._prepare_final_mux_segments(
+                    temp_intro_with_audio_path,
+                    combined_video_path,
+                    video_params,
+                    work_temp,
+                )
+                temp_files.extend(mux_segments.get('temp_files', []))
 
-                # VP9 und AV1 verwenden concat demuxer statt MPEG-TS (bessere Kompatibilität)
-                use_concat_demuxer = vcodec in ['vp9', 'av1']
-
-                # Initialisiere Variablen (werden je nach Methode gefüllt)
-                concat_list_path = None
-                temp_intro_ts_path = None
-                temp_combined_ts_path = None
-
-                if use_concat_demuxer:
-                    self._update_status("Bereite Videos für Zusammenfügen vor (concat demuxer)...")
-                    # Für VP9/AV1: Verwende concat demuxer (concat:file:...)
-                    # Keine Konvertierung nötig, verwende MP4-Dateien direkt
-                    temp_intro_path = temp_intro_with_audio_path
-                    
-                    if not video_params.get("has_audio", True):
-                        self._update_status("Erzeuge stille Audiospur für Hauptvideo...")
-                        temp_combined_path = os.path.join(tempfile.gettempdir(), "combined_with_silent_audio.mp4")
-                        temp_files.append(temp_combined_path)
-                        
-                        cmd = [
-                            "ffmpeg", "-y", 
-                            "-i", combined_video_path,
-                            "-f", "lavfi", "-i", f"anullsrc=channel_layout={video_params['channel_layout']}:sample_rate={video_params['sample_rate']}",
-                            "-c:v", "copy",
-                            "-c:a", video_params['acodec'],
-                            "-shortest",
-                            temp_combined_path
-                        ]
-                        subprocess.run(cmd, capture_output=True, text=True, check=True,
-                                      creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                        self._update_status("Stille Audiospur für Hauptvideo erstellt (concat demuxer).")
-                    else:
-                        temp_combined_path = combined_video_path
-
-                    # Erstelle concat-Liste
-                    concat_list_path = os.path.join(tempfile.gettempdir(), "final_concat_list.txt")
-                    temp_files.append(concat_list_path)
-
-                    self._update_status("Schreibe concat-Liste (Intro + Hauptvideo)...")
-                    with open(concat_list_path, 'w', encoding='utf-8') as f:
-                        # Escape Pfade für FFmpeg
-                        intro_escaped = os.path.abspath(temp_intro_path).replace('\\', '/')
-                        combined_escaped = os.path.abspath(temp_combined_path).replace('\\', '/')
-                        f.write(f"file '{intro_escaped}'\n")
-                        f.write(f"file '{combined_escaped}'\n")
-                    self._update_status("Concat-Liste erstellt.")
-                else:
-                    self._update_status("Intro: Umwandlung nach MPEG-TS (Vorbereitung Zusammenführung)...")
-                    # Für H.264/HEVC: Verwende MPEG-TS (wie bisher)
-                    bsf_map = {
-                        'h264': 'h264_mp4toannexb',
-                        'hevc': 'hevc_mp4toannexb',
-                        'h265': 'hevc_mp4toannexb',
-                    }
-                    bsf = bsf_map.get(vcodec, None)
-
-                    temp_intro_ts_path = os.path.join(tempfile.gettempdir(), "intro.ts")
-                    temp_files.append(temp_intro_ts_path)
-
-                    intro_cmd = ["ffmpeg", "-y", "-i", temp_intro_with_audio_path, "-c", "copy"]
-                    if bsf:
-                        intro_cmd.extend(["-bsf:v", bsf])
-                    intro_cmd.extend(["-f", "mpegts", temp_intro_ts_path])
-
-                    subprocess.run(intro_cmd, capture_output=True, text=True, check=True,
-                                  creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                    self._update_status("Intro nach MPEG-TS fertig. Hauptfilm: Umwandlung nach MPEG-TS...")
-
-                    # Hauptvideo nach .ts konvertieren
-                    self._check_for_cancellation()
-                    self._update_progress(6, TOTAL_STEPS)
-                    temp_combined_ts_path = os.path.join(tempfile.gettempdir(), "combined.ts")
-                    temp_files.append(temp_combined_ts_path)
-
-                    if not video_params.get("has_audio", True):
-                        self._update_status("Erzeuge stille Audiospur für Hauptvideo (MPEG-TS)...")
-                        combined_cmd = [
-                            "ffmpeg", "-y", 
-                            "-i", combined_video_path,
-                            "-f", "lavfi", "-i", f"anullsrc=channel_layout={video_params['channel_layout']}:sample_rate={video_params['sample_rate']}",
-                            "-c:v", "copy",
-                            "-c:a", video_params['acodec'],
-                            "-shortest"
-                        ]
-                    else:
-                        combined_cmd = ["ffmpeg", "-y", "-i", combined_video_path, "-c", "copy"]
-
-                    if bsf:
-                        combined_cmd.extend(["-bsf:v", bsf])
-                    combined_cmd.extend(["-f", "mpegts", temp_combined_ts_path])
-
-                    subprocess.run(combined_cmd, capture_output=True, text=True, check=True,
-                                  creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-                    self._update_status("Hauptfilm nach MPEG-TS fertig.")
+                self._assert_stream_copy_compatible(
+                    temp_intro_with_audio_path, mux_segments['combined_body_path']
+                )
 
                 self._update_progress(6, TOTAL_STEPS)
 
@@ -663,17 +619,13 @@ class VideoProcessor:
                         base_output_dir, base_filename
                     )
 
-                    # Task 1: Normale Version zusammenfügen (Stream-Copy, Fallback Neuencode)
+                    # Task 1: Normale Version zusammenfügen (nur Stream-Copy)
                     def create_normal_version_task(task_id=None):
                         self._run_final_intro_body_mux(
                             full_video_output_path,
                             video_params,
-                            use_concat_demuxer,
-                            concat_list_path,
-                            temp_intro_ts_path,
-                            temp_combined_ts_path,
+                            mux_segments,
                             temp_intro_with_audio_path,
-                            combined_video_path,
                             dauer,
                             task_name="Finaler Schnitt (Intro + Video, parallel)",
                             encoding_lane=0,
@@ -712,12 +664,8 @@ class VideoProcessor:
                         self._run_final_intro_body_mux(
                             full_video_output_path,
                             video_params,
-                            use_concat_demuxer,
-                            concat_list_path,
-                            temp_intro_ts_path,
-                            temp_combined_ts_path,
+                            mux_segments,
                             temp_intro_with_audio_path,
-                            combined_video_path,
                             dauer,
                             task_name="Finaler Schnitt (Intro + Video)",
                             encoding_lane=0,
@@ -1122,7 +1070,7 @@ class VideoProcessor:
 
         fps_int = self._parse_r_frame_rate(v_params.get('fps'))
         if vcodec in ('h264', 'hevc', 'h265'):
-            command.extend(["-g", str(fps_int), "-bf", "0"])
+            command.extend(["-g", str(fps_int), "-keyint_min", str(fps_int), "-sc_threshold", "0", "-bf", "0"])
         command.extend(["-fps_mode", "cfr"])
 
         if v_params.get('color_range'):
@@ -1151,15 +1099,20 @@ class VideoProcessor:
 
         try:
             dauer_float = float(dauer)
-            force_t = max(0.0, dauer_float - 0.04)
-            command.extend(["-force_key_frames", f"expr:gte(t,{force_t})"])
+            force_t = max(0.0, dauer_float - 0.05)
+            # Erster Frame + letzter Frame als IDR → sauberer Übergang zum Hauptvideo
+            command.extend(["-force_key_frames", f"expr:eq(n,0)+gte(t,{force_t})"])
         except (TypeError, ValueError):
             pass
 
         if encoder_name == 'libx264':
-            command.extend(["-x264-params", "repeat-headers=1:nal-hrd=none"])
+            command.extend(["-x264-params", "repeat-headers=1:nal-hrd=none:open-gop=0"])
         elif encoder_name == 'libx265':
-            command.extend(["-x265-params", "repeat-headers=1"])
+            command.extend([
+                "-x265-params",
+                f"keyint={fps_int}:min-keyint={fps_int}:scenecut=0:open-gop=0:"
+                f"repeat-headers=1:aud=1:bframes=0",
+            ])
 
         command.append(output_path)
         return command

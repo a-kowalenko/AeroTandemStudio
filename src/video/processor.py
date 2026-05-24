@@ -155,7 +155,23 @@ class VideoProcessor:
         args.extend(['-pix_fmt', 'yuv420p', '-tag:v', 'avc1'])
         return args
 
-    def _build_final_intro_body_mux_command(
+    def _build_final_intro_body_input_args(
+        self,
+        use_concat_demuxer,
+        concat_list_path,
+        temp_intro_ts_path,
+        temp_combined_ts_path,
+    ):
+        """Gemeinsame Eingabe-Argumente für Stream-Copy und Re-Encode beim Final-Mux."""
+        cmd = ['ffmpeg', '-y', '-fflags', '+genpts']
+        if use_concat_demuxer:
+            cmd.extend(['-f', 'concat', '-safe', '0', '-i', concat_list_path])
+        else:
+            concat_input = f'concat:{temp_intro_ts_path}|{temp_combined_ts_path}'
+            cmd.extend(['-i', concat_input])
+        return cmd
+
+    def _build_final_intro_body_stream_copy_command(
         self,
         full_video_output_path,
         video_params,
@@ -165,26 +181,231 @@ class VideoProcessor:
         temp_combined_ts_path,
     ):
         """
-        Baut FFmpeg für Intro + kombiniertes Hauptvideo: immer Video neu encodieren,
-        Audio per copy (TS-Eingang: aac_adtstoasc für MP4-Mux).
+        Intro + Hauptvideo per Stream-Copy zusammenfügen (schnell, Hauptvideo unverändert).
         """
-        cmd = ['ffmpeg', '-y', '-fflags', '+genpts']
-        if use_concat_demuxer:
-            cmd.extend(['-f', 'concat', '-safe', '0', '-i', concat_list_path])
-        else:
-            concat_input = f'concat:{temp_intro_ts_path}|{temp_combined_ts_path}'
-            cmd.extend(['-i', concat_input])
+        cmd = self._build_final_intro_body_input_args(
+            use_concat_demuxer, concat_list_path, temp_intro_ts_path, temp_combined_ts_path
+        )
+        cmd.extend(['-map', '0:v:0'])
+        if video_params.get('has_audio', True):
+            cmd.extend(['-map', '0:a:0'])
 
+        cmd.extend(['-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-movflags', '+faststart'])
+
+        vcodec = video_params.get('vcodec', 'h264')
+        if vcodec in ('hevc', 'h265'):
+            cmd.extend(['-bsf:v', 'hevc_metadata=aud=insert,extract_extradata', '-tag:v', 'hvc1'])
+        elif vcodec == 'h264':
+            cmd.extend(['-tag:v', 'avc1'])
+
+        cmd.append(full_video_output_path)
+        return cmd
+
+    def _build_final_intro_body_reencode_command(
+        self,
+        full_video_output_path,
+        video_params,
+        use_concat_demuxer,
+        concat_list_path,
+        temp_intro_ts_path,
+        temp_combined_ts_path,
+    ):
+        """
+        Fallback: Intro + Hauptvideo vollständig zu H.264/avc1 neu encodieren (Browser-sicher).
+        """
+        cmd = self._build_final_intro_body_input_args(
+            use_concat_demuxer, concat_list_path, temp_intro_ts_path, temp_combined_ts_path
+        )
         cmd.extend(['-map', '0:v:0'])
         if video_params.get('has_audio', True):
             cmd.extend(['-map', '0:a:0'])
 
         cmd.extend(self._final_delivery_h264_encode_args())
-
-        # AAC für zuverlässigen MP4-Mux (Kamera: AAC/PCM/etc.; kein riskanter Stream-Copy über Segmentgrenzen)
         cmd.extend(['-c:a', 'aac', '-b:a', '192k'])
         cmd.extend(['-movflags', '+faststart', full_video_output_path])
         return cmd
+
+    @staticmethod
+    def _normalize_vcodec_name(codec_name):
+        if not codec_name:
+            return 'h264'
+        name = str(codec_name).lower()
+        if name in ('hevc', 'h265'):
+            return 'hevc'
+        return name
+
+    @staticmethod
+    def _normalize_profile_name(profile):
+        if not profile:
+            return None
+        p = str(profile).lower().replace(' ', '')
+        if p == 'constrainedbaseline':
+            return 'baseline'
+        return p
+
+    def _probe_video_stream_summary(self, video_path):
+        """Liest zentrale Video-Stream-Eigenschaften für Concat-Kompatibilitätsprüfungen."""
+        try:
+            info = self._get_video_info(video_path)
+            return {
+                'width': info.get('width'),
+                'height': info.get('height'),
+                'fps': info.get('fps'),
+                'pix_fmt': info.get('pix_fmt'),
+                'vcodec': self._normalize_vcodec_name(info.get('vcodec')),
+                'vtag': (info.get('vtag') or '').lower(),
+                'profile': self._normalize_profile_name(info.get('profile')),
+            }
+        except Exception as exc:
+            print(f"Stream-Summary fehlgeschlagen für {video_path}: {exc}")
+            return None
+
+    def _can_stream_copy_concat(self, video_params, intro_path, combined_path):
+        """Prüft, ob Intro und Hauptvideo sicher per Stream-Copy zusammengefügt werden können."""
+        vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
+        if vcodec not in ('h264', 'hevc', 'vp9', 'av1'):
+            return False
+
+        if not intro_path or not os.path.exists(intro_path):
+            return False
+        if not combined_path or not os.path.exists(combined_path):
+            return False
+
+        intro = self._probe_video_stream_summary(intro_path)
+        body = self._probe_video_stream_summary(combined_path)
+        if not intro or not body:
+            return False
+
+        if intro['vcodec'] != body['vcodec']:
+            print(f"Stream-Copy abgelehnt: Codec-Mismatch intro={intro['vcodec']} body={body['vcodec']}")
+            return False
+
+        for key in ('width', 'height', 'pix_fmt', 'fps'):
+            if intro.get(key) != body.get(key):
+                print(f"Stream-Copy abgelehnt: {key} intro={intro.get(key)} body={body.get(key)}")
+                return False
+
+        if intro.get('profile') and body.get('profile') and intro['profile'] != body['profile']:
+            print(f"Stream-Copy abgelehnt: Profil intro={intro['profile']} body={body['profile']}")
+            return False
+
+        return True
+
+    def _validate_browser_mp4(self, output_path, video_params, expected_duration_sec=None):
+        """Validiert, ob die finale MP4 browser-tauglich muxed wurde."""
+        if not output_path or not os.path.exists(output_path):
+            return False
+
+        try:
+            stream = self._probe_video_stream_summary(output_path)
+            if not stream:
+                return False
+
+            vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
+            if vcodec == 'h264':
+                if stream['vcodec'] != 'h264':
+                    return False
+                if stream.get('pix_fmt') != 'yuv420p':
+                    return False
+                vtag = stream.get('vtag') or ''
+                if vtag and vtag not in ('avc1', 'avc3'):
+                    return False
+            elif vcodec == 'hevc':
+                if stream['vcodec'] != 'hevc':
+                    return False
+                vtag = stream.get('vtag') or ''
+                if vtag and vtag not in ('hvc1', 'hev1'):
+                    return False
+
+            if expected_duration_sec and expected_duration_sec > 0:
+                actual = self._get_video_duration(output_path)
+                if abs(actual - expected_duration_sec) > 2.5:
+                    print(
+                        f"Browser-Validierung: Dauer abweichend "
+                        f"(erwartet ~{expected_duration_sec:.1f}s, ist {actual:.1f}s)"
+                    )
+                    return False
+
+            return True
+        except Exception as exc:
+            print(f"Browser-Validierung fehlgeschlagen: {exc}")
+            return False
+
+    def _run_final_intro_body_mux(
+        self,
+        full_video_output_path,
+        video_params,
+        use_concat_demuxer,
+        concat_list_path,
+        temp_intro_ts_path,
+        temp_combined_ts_path,
+        temp_intro_with_audio_path,
+        combined_video_path,
+        intro_dauer,
+        task_name="Finaler Schnitt (Intro + Video)",
+        encoding_lane=0,
+    ):
+        """
+        Fügt Intro + Hauptvideo zusammen: zuerst Stream-Copy (schnell), bei Bedarf Re-Encode-Fallback.
+        """
+        expected_duration = self._estimate_final_output_duration_sec(intro_dauer, combined_video_path)
+        stream_copy_eligible = self._can_stream_copy_concat(
+            video_params, temp_intro_with_audio_path, combined_video_path
+        )
+
+        if stream_copy_eligible:
+            try:
+                self._check_for_cancellation()
+                self._update_status("Füge Intro an (ohne Neuencode)...")
+                command = self._build_final_intro_body_stream_copy_command(
+                    full_video_output_path,
+                    video_params,
+                    use_concat_demuxer,
+                    concat_list_path,
+                    temp_intro_ts_path,
+                    temp_combined_ts_path,
+                )
+                self._run_ffmpeg_with_progress(
+                    command,
+                    self._estimate_stream_copy_mux_duration_sec(),
+                    task_name,
+                    task_id=None,
+                    encoding_lane=encoding_lane,
+                )
+                if self._validate_browser_mp4(full_video_output_path, video_params, expected_duration):
+                    print("✓ Finaler Schnitt per Stream-Copy erfolgreich (Browser-Validierung OK)")
+                    return
+                print("⚠ Browser-Validierung nach Stream-Copy fehlgeschlagen → Fallback Neuencode")
+            except Exception as exc:
+                if self.cancel_event.is_set():
+                    raise
+                print(f"⚠ Stream-Copy Mux fehlgeschlagen: {exc} → Fallback Neuencode")
+        else:
+            print("ℹ Stream-Copy nicht möglich (Inkompatible Streams) → direkter Neuencode")
+
+        self._check_for_cancellation()
+        self._update_status("Optimiere Video für Browser-Wiedergabe...")
+        if os.path.exists(full_video_output_path):
+            try:
+                os.remove(full_video_output_path)
+            except OSError:
+                pass
+
+        command = self._build_final_intro_body_reencode_command(
+            full_video_output_path,
+            video_params,
+            use_concat_demuxer,
+            concat_list_path,
+            temp_intro_ts_path,
+            temp_combined_ts_path,
+        )
+        self._run_ffmpeg_with_progress(
+            command,
+            expected_duration,
+            task_name,
+            task_id=None,
+            encoding_lane=encoding_lane,
+        )
 
     def create_video_with_intro_only(self, payload):
         """Erstellt ein Verzeichnis, verarbeitet optional Videos und kopiert Fotos."""
@@ -268,7 +489,6 @@ class VideoProcessor:
                 self._update_progress(2, TOTAL_STEPS)
                 self._update_status("Ermittle detaillierte Videoinformationen...")
                 video_params = self._get_video_info(combined_video_path)
-                final_mux_duration = self._estimate_final_mux_duration_sec(dauer, combined_video_path)
 
                 # Schritt 3: Textinhalte vorbereiten
                 self._check_for_cancellation()
@@ -443,21 +663,19 @@ class VideoProcessor:
                         base_output_dir, base_filename
                     )
 
-                    # Task 1: Normale Version zusammenfügen (Video immer neu encodieren → einheitliche Browser-MP4)
+                    # Task 1: Normale Version zusammenfügen (Stream-Copy, Fallback Neuencode)
                     def create_normal_version_task(task_id=None):
-                        command = self._build_final_intro_body_mux_command(
+                        self._run_final_intro_body_mux(
                             full_video_output_path,
                             video_params,
                             use_concat_demuxer,
                             concat_list_path,
                             temp_intro_ts_path,
                             temp_combined_ts_path,
-                        )
-                        self._run_ffmpeg_with_progress(
-                            command,
-                            final_mux_duration,
-                            "Finaler Schnitt (Intro + Video, parallel)",
-                            task_id=None,
+                            temp_intro_with_audio_path,
+                            combined_video_path,
+                            dauer,
+                            task_name="Finaler Schnitt (Intro + Video, parallel)",
                             encoding_lane=0,
                         )
 
@@ -491,21 +709,17 @@ class VideoProcessor:
                     if full_video_output_path:
                         self._check_for_cancellation()
                         self._update_progress(9, TOTAL_STEPS)
-                        self._update_status("Füge Videos final zusammen (Neuencodierung für Browser-Kompatibilität)...")
-
-                        command = self._build_final_intro_body_mux_command(
+                        self._run_final_intro_body_mux(
                             full_video_output_path,
                             video_params,
                             use_concat_demuxer,
                             concat_list_path,
                             temp_intro_ts_path,
                             temp_combined_ts_path,
-                        )
-                        self._run_ffmpeg_with_progress(
-                            command,
-                            final_mux_duration,
-                            "Finaler Schnitt (Intro + Video)",
-                            task_id=None,
+                            temp_intro_with_audio_path,
+                            combined_video_path,
+                            dauer,
+                            task_name="Finaler Schnitt (Intro + Video)",
                             encoding_lane=0,
                         )
                     else:
@@ -797,22 +1011,55 @@ class VideoProcessor:
             command, total_duration, task_name, task_id=None, encoding_lane=encoding_lane
         )
 
-    def _create_intro_with_silent_audio(self, output_path, dauer, v_params, drawtext_filter):
-        """
-        Erstellt den Intro-Clip inklusive einer passenden stillen Audiospur in einem einzigen Befehl.
-        NEU: Nutzt erweiterte Parameter für maximale Kompatibilität und Hardware-Beschleunigung.
-        NEU: Behält Aspect-Ratio des Hintergrunds bei und fügt schwarze Balken hinzu statt zu strecken.
-        """
-        self._check_for_cancellation()
-        print(
-            "Intro-Quellreferenz (combined preview): "
-            f"profile={v_params.get('profile')} level={v_params.get('level')} "
-            f"pix_fmt={v_params.get('pix_fmt')} has_b_frames={v_params.get('has_b_frames')} "
-            f"fps={v_params.get('fps')} vcodec={v_params.get('vcodec')}"
-        )
-        print(f"Erstelle Intro mit erweiterten Parametern: {v_params}")
+    @staticmethod
+    def _ffmpeg_level_string(vcodec, level_value):
+        """Wandelt ffprobe-level in FFmpeg -level:v (H.264: /10, HEVC: /30)."""
+        try:
+            level_num = float(level_value)
+        except (ValueError, TypeError):
+            return str(level_value)
+        if VideoProcessor._normalize_vcodec_name(vcodec) == 'hevc':
+            return str(level_num / 30.0)
+        return str(level_num / 10.0)
 
-        # Aspect-Ratio-Preservation: scale + pad für schwarze Balken
+    @staticmethod
+    def _is_10bit_pix_fmt(pix_fmt):
+        return '10' in str(pix_fmt or '')
+
+    def _intro_requires_software_encoder(self, v_params, encoder_name):
+        """
+        Intro nutzt drawtext/PNG-Filter — Intel QSV HEVC 10-bit/Main10 scheitert oft.
+        """
+        profile = self._normalize_profile_name(v_params.get('profile'))
+        pix_fmt = v_params.get('pix_fmt', 'yuv420p')
+        vcodec = self._normalize_vcodec_name(v_params.get('vcodec', 'h264'))
+
+        if self._is_10bit_pix_fmt(pix_fmt) or profile == 'main10':
+            return True
+        if encoder_name == 'hevc_qsv' and vcodec == 'hevc':
+            return True
+        return False
+
+    def _get_intro_encoding_params(self, v_params):
+        """Encoding-Parameter für Intro: SW bei 10-bit/HEVC-QSV, sonst HW wenn aktiv."""
+        vcodec = v_params.get('vcodec', 'h264')
+        if self.hw_accel_enabled:
+            hw_params = self._get_encoding_params(vcodec)
+            encoder_name = hw_params.get('encoder') or 'libx264'
+            if self._intro_requires_software_encoder(v_params, encoder_name):
+                print(
+                    f"ℹ Intro: Software-Encoder für {vcodec} "
+                    f"(pix_fmt={v_params.get('pix_fmt')}, profile={v_params.get('profile')})"
+                )
+                sw = self.hw_detector._get_software_params(
+                    'hevc' if vcodec in ('hevc', 'h265') else vcodec
+                )
+                return sw, False
+            return hw_params, True
+        return self._get_encoding_params(vcodec), False
+
+    def _build_intro_ffmpeg_command(self, output_path, dauer, v_params, drawtext_filter, force_software=False):
+        """Baut den FFmpeg-Befehl für die Intro-Erstellung."""
         video_filters = (
             f"scale={v_params['width']}:{v_params['height']}:force_original_aspect_ratio=decrease,"
             f"pad={v_params['width']}:{v_params['height']}:(ow-iw)/2:(oh-ih)/2:black,"
@@ -820,25 +1067,24 @@ class VideoProcessor:
         )
 
         vcodec = v_params.get('vcodec', 'h264')
-        encoding_params = self._get_encoding_params(vcodec)
+        if force_software:
+            sw_codec = 'hevc' if vcodec in ('hevc', 'h265') else vcodec
+            encoding_params = self.hw_detector._get_software_params(sw_codec)
+            use_hw_tuning = False
+        else:
+            encoding_params, use_hw_tuning = self._get_intro_encoding_params(v_params)
+
         encoder_name = encoding_params.get('encoder') or 'libx264'
+        use_hw_tuning = use_hw_tuning and self.hw_accel_enabled and not force_software
 
         command = ["ffmpeg", "-y"]
-
-        # Inputs
         command.extend([
             "-loop", "1", "-i", self.hintergrund_path,
             "-f", "lavfi", "-i",
             f"anullsrc=channel_layout={v_params['channel_layout']}:sample_rate={v_params['sample_rate']}"
         ])
-
-        # Video-Filter
         command.extend(["-vf", video_filters])
-
-        # Encoding-Parameter (Hardware oder Software)
         command.extend(encoding_params['output_params'])
-
-        # Zusätzliche Parameter für Kompatibilität
         command.extend([
             "-pix_fmt", v_params['pix_fmt'],
             "-r", v_params['fps'],
@@ -850,51 +1096,35 @@ class VideoProcessor:
             "-map", "1:a:0"
         ])
 
-        # Preset und CRF nur bei Software-Encoding (codec-spezifisch)
-        if not self.hw_accel_enabled:
+        if not use_hw_tuning:
             if encoder_name == 'libx264':
                 command.extend(["-preset", "fast", "-crf", "18"])
             elif encoder_name == 'libx265':
                 command.extend(["-preset", "fast", "-crf", "20"])
             elif encoder_name == 'libvpx-vp9':
-                command.extend([
-                    "-deadline", "good",
-                    "-cpu-used", "2",
-                    "-crf", "23",
-                    "-b:v", "0"
-                ])
+                command.extend(["-deadline", "good", "-cpu-used", "2", "-crf", "23", "-b:v", "0"])
             elif encoder_name in ('libaom-av1', 'libsvtav1'):
-                command.extend([
-                    "-cpu-used", "6",
-                    "-crf", "28",
-                    "-b:v", "0"
-                ])
+                command.extend(["-cpu-used", "6", "-crf", "28", "-b:v", "0"])
         else:
-            # HW: stabile Qualität + GOP (Annäherung an typische Kamera-Streams für Stream-Copy-Concat)
             if encoder_name.endswith('_nvenc'):
-                command.extend([
-                    "-rc", "constqp", "-qp", "18", "-preset", "p4", "-no-scenecut", "1"
-                ])
+                command.extend(["-rc", "constqp", "-qp", "18", "-preset", "p4", "-no-scenecut", "1"])
             elif encoder_name.endswith('_qsv'):
-                command.extend([
-                    "-global_quality", "18", "-look_ahead", "0", "-forced_idr", "1"
-                ])
+                if vcodec in ('hevc', 'h265'):
+                    command.extend(["-global_quality", "18"])
+                else:
+                    command.extend(["-global_quality", "18", "-look_ahead", "0", "-forced_idr", "1"])
             elif encoder_name.endswith('_amf'):
-                command.extend([
-                    "-quality", "balanced", "-rc", "cqp", "-qp_i", "18", "-qp_p", "18"
-                ])
+                command.extend(["-quality", "balanced", "-rc", "cqp", "-qp_i", "18", "-qp_p", "18"])
             elif encoder_name.endswith('_videotoolbox'):
                 command.extend(["-q:v", "50"])
             elif encoder_name.endswith('_vaapi'):
                 command.extend(["-qp", "18"])
 
-        # CFR + 1s-GOP bei H.264/HEVC (Intro ↔ Hauptvideo)
         fps_int = self._parse_r_frame_rate(v_params.get('fps'))
         if vcodec in ('h264', 'hevc', 'h265'):
             command.extend(["-g", str(fps_int), "-bf", "0"])
-        command.extend(["-vsync", "cfr"])
+        command.extend(["-fps_mode", "cfr"])
 
-        # Color Space Parameter
         if v_params.get('color_range'):
             command.extend(["-color_range", v_params['color_range']])
         if v_params.get('colorspace'):
@@ -904,39 +1134,81 @@ class VideoProcessor:
         if v_params.get('color_trc'):
             command.extend(["-color_trc", v_params['color_trc']])
 
-        # Profile auch bei HW setzen (reduziert SPS/PPS-Drift gegenüber nur-Intro-avcC in Browsern)
         if v_params.get('profile') and vcodec in ('h264', 'hevc', 'h265'):
-            profile_str = str(v_params['profile']).lower().replace(" ", "")
+            profile_str = self._normalize_profile_name(v_params['profile'])
             if profile_str == 'constrainedbaseline':
                 profile_str = 'baseline'
             if vcodec in ('hevc', 'h265') and profile_str not in ('main', 'main10'):
                 profile_str = 'main'
             command.extend(["-profile:v", profile_str])
 
-        # Level nur bei Software-Encoding (HW: Encoder wählt passendes Level)
-        if v_params.get('level') and vcodec in ('h264', 'hevc', 'h265') and not self.hw_accel_enabled:
-            try:
-                level_str = str(float(v_params['level']) / 10.0)
-                command.extend(["-level:v", level_str])
-            except (ValueError, TypeError):
-                command.extend(["-level:v", str(v_params['level'])])
+        if v_params.get('level') and vcodec in ('h264', 'hevc', 'h265'):
+            command.extend(["-level:v", self._ffmpeg_level_string(vcodec, v_params['level'])])
+
+        vtag = v_params.get('vtag')
+        if vtag and vcodec in ('h264', 'hevc', 'h265', 'vp9', 'av1'):
+            command.extend(["-tag:v", vtag])
+
+        try:
+            dauer_float = float(dauer)
+            force_t = max(0.0, dauer_float - 0.04)
+            command.extend(["-force_key_frames", f"expr:gte(t,{force_t})"])
+        except (TypeError, ValueError):
+            pass
+
+        if encoder_name == 'libx264':
+            command.extend(["-x264-params", "repeat-headers=1:nal-hrd=none"])
+        elif encoder_name == 'libx265':
+            command.extend(["-x265-params", "repeat-headers=1"])
 
         command.append(output_path)
+        return command
 
-        # Konvertiere dauer zu float für Fortschrittsberechnung
+    def _create_intro_with_silent_audio(self, output_path, dauer, v_params, drawtext_filter):
+        """
+        Erstellt den Intro-Clip inklusive einer passenden stillen Audiospur.
+        Bei HEVC Main 10 / 10-bit oder HW-Fehler: automatischer Software-Fallback.
+        """
+        self._check_for_cancellation()
+        print(
+            "Intro-Quellreferenz (combined preview): "
+            f"profile={v_params.get('profile')} level={v_params.get('level')} "
+            f"pix_fmt={v_params.get('pix_fmt')} has_b_frames={v_params.get('has_b_frames')} "
+            f"fps={v_params.get('fps')} vcodec={v_params.get('vcodec')}"
+        )
+        print(f"Erstelle Intro mit erweiterten Parametern: {v_params}")
+
         try:
             duration_float = float(dauer)
-        except:
+        except (TypeError, ValueError):
             duration_float = None
 
-        # Verwende neue Methode mit Live-Fortschritt
-        try:
-            self._run_ffmpeg_with_progress(command, duration_float, "Intro-Erstellung", encoding_lane=0)
-        except subprocess.CalledProcessError as e:
-            if self.cancel_event.is_set():
-                raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
-            print(f"Fehler bei Intro-Erstellung: {e.stderr if hasattr(e, 'stderr') else str(e)}")
-            raise
+        last_error = None
+        for attempt, force_sw in enumerate((False, True)):
+            if attempt == 1:
+                print("⚠ Intro-Encoding fehlgeschlagen → Retry mit Software-Encoder")
+                if os.path.exists(output_path):
+                    try:
+                        os.remove(output_path)
+                    except OSError:
+                        pass
+            command = self._build_intro_ffmpeg_command(
+                output_path, dauer, v_params, drawtext_filter, force_software=force_sw
+            )
+            try:
+                self._run_ffmpeg_with_progress(
+                    command, duration_float, "Intro-Erstellung", encoding_lane=0
+                )
+                return
+            except subprocess.CalledProcessError as exc:
+                if self.cancel_event.is_set():
+                    raise CancellationError("Videoerstellung vom Benutzer abgebrochen.")
+                last_error = exc
+                if force_sw:
+                    break
+
+        print(f"Fehler bei Intro-Erstellung: {last_error.stderr if last_error and hasattr(last_error, 'stderr') else last_error}")
+        raise last_error
 
     def _get_photo_capture_dt(self, photo_path):
         """Gleiche Zeitbasis wie Video/Foto-Tabelle (EXIF, ffprobe, Import-Snapshot, Dateisystem)."""
@@ -1591,11 +1863,13 @@ class VideoProcessor:
         if self.status_callback:
             self.status_callback("update", message)
 
-    def _estimate_final_mux_duration_sec(self, intro_dauer_str, combined_video_path):
-        """
-        Schätzt die Gesamtdauer Intro + kombiniertes Hauptvideo für FFmpeg-Fortschritt
-        beim finalen Neuencode (Intro + Body in einem Durchgang).
-        """
+    @staticmethod
+    def _estimate_stream_copy_mux_duration_sec():
+        """Geschätzte Dauer für schnelles Remux (Stream-Copy) beim Final-Schnitt."""
+        return 5.0
+
+    def _estimate_final_output_duration_sec(self, intro_dauer_str, combined_video_path):
+        """Schätzt Intro + Hauptvideo für Validierung und Re-Encode-Fortschritt."""
         try:
             intro_sec = float(intro_dauer_str)
         except (TypeError, ValueError, AttributeError):
@@ -1608,6 +1882,10 @@ class VideoProcessor:
                 body_sec = 0.0
         total = intro_sec + body_sec
         return total if total > 0.1 else None
+
+    def _estimate_final_mux_duration_sec(self, intro_dauer_str, combined_video_path):
+        """Alias für Re-Encode-Fortschritt (Abwärtskompatibilität)."""
+        return self._estimate_final_output_duration_sec(intro_dauer_str, combined_video_path)
 
     def _cleanup_temp_files(self, temp_files):
         for temp_file in temp_files:

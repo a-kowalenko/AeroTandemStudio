@@ -960,6 +960,14 @@ class VideoGeneratorApp:
         separaten Thread oder setzt das Formular zurück, wenn keine Videos vorhanden sind.
         NEU: run_qr_check steuert, ob die QR-Analyse durchgeführt werden soll.
         """
+        if threading.current_thread() is not threading.main_thread():
+            paths_copy = video_paths.copy()
+            self.root.after(
+                0,
+                lambda: self.update_video_preview(paths_copy, run_qr_check=run_qr_check),
+            )
+            return
+
         if not video_paths:
             # --- NEU: Anforderung des Users umsetzen ---
             # Wenn alle Videos gelöscht wurden, setze das Formular
@@ -1029,6 +1037,39 @@ class VideoGeneratorApp:
     def _qr_cancel_check(self) -> bool:
         return hasattr(self, "_qr_cancel_event") and self._qr_cancel_event.is_set()
 
+    def _qr_video_scan_kwargs(self) -> dict:
+        settings = self.config.get_settings() if self.config else {}
+        try:
+            scan_seconds = float(settings.get("qr_video_scan_seconds", 5))
+        except (TypeError, ValueError):
+            scan_seconds = 5.0
+        try:
+            frame_step = int(settings.get("qr_video_frame_step", 10))
+        except (TypeError, ValueError):
+            frame_step = 10
+        parallel_enabled = bool(settings.get("qr_video_parallel_enabled", False))
+        try:
+            parallel_workers = int(settings.get("qr_video_parallel_workers", 2))
+        except (TypeError, ValueError):
+            parallel_workers = 2
+        scan_all_clips = bool(settings.get("qr_video_scan_all_clips", True))
+        return {
+            "scan_seconds": max(0.5, scan_seconds),
+            "frame_step": max(1, frame_step),
+            "scan_all_clips": scan_all_clips,
+            "parallel_enabled": parallel_enabled and scan_all_clips,
+            "parallel_workers": max(1, min(4, parallel_workers)),
+        }
+
+    def _video_paths_for_qr_scan(self, video_paths: list[str]) -> list[str]:
+        """Gibt die zu scannenden Clip-Pfade gemäß Einstellung zurück."""
+        if not video_paths:
+            return []
+        scan_opts = self._qr_video_scan_kwargs()
+        if scan_opts.get("scan_all_clips", True):
+            return video_paths
+        return video_paths[:1]
+
     def run_qr_analysis(self, video_paths: list[str]):
         """
         Startet QR-Code-Analyse in separatem Thread.
@@ -1037,26 +1078,39 @@ class VideoGeneratorApp:
         if not video_paths:
             return
 
+        if threading.current_thread() is not threading.main_thread():
+            paths_copy = video_paths.copy()
+            self.root.after(0, lambda: self.run_qr_analysis(paths_copy))
+            return
+
         self._reset_qr_cancel_event()
-        total = len(video_paths)
-        loading_text = (
-            f"Suche QR-Code in Clips (1/{total})...\n{os.path.basename(video_paths[0])}"
-            if total > 1
-            else "Analysiere QR-Code im Clip..."
-        )
+        paths_to_scan = self._video_paths_for_qr_scan(video_paths)
+        total = len(paths_to_scan)
         self.loading_window = LoadingWindow(
             self.root,
-            text=loading_text,
             on_cancel=self._request_qr_cancel,
+            detail_mode=True,
         )
+        self._update_video_qr_progress(
+            1,
+            total,
+            os.path.basename(paths_to_scan[0]),
+            phase="scanning",
+        )
+        try:
+            self.loading_window.lift()
+            self.loading_window.focus_force()
+        except tk.TclError:
+            pass
 
         self.analysis_queue = queue.Queue()
 
-        print(f"QR-Analyse: {total} Clip(s)")
+        scope = "alle" if total == len(video_paths) else "nur erster"
+        print(f"QR-Analyse: {total} Clip(s) ({scope})")
 
         analysis_thread = threading.Thread(
             target=self._run_analysis_thread,
-            args=(video_paths.copy(), self.analysis_queue),
+            args=(paths_to_scan.copy(), self.analysis_queue),
             daemon=True,
         )
         analysis_thread.start()
@@ -1080,6 +1134,17 @@ class VideoGeneratorApp:
         Durchsucht Fotos nach einem QR-Code (Abbruch beim ersten gültigen Treffer).
         """
         if not photo_paths:
+            return
+
+        if threading.current_thread() is not threading.main_thread():
+            paths_copy = photo_paths.copy()
+            self.root.after(
+                0,
+                lambda: self.run_photo_batch_qr_analysis(
+                    paths_copy,
+                    single_photo=single_photo,
+                ),
+            )
             return
 
         if (
@@ -1117,10 +1182,46 @@ class VideoGeneratorApp:
             )
 
     def _update_video_qr_loading_text(self, current: int, total: int, basename: str):
-        if self.loading_window and hasattr(self.loading_window, "update_text"):
-            self.loading_window.update_text(
-                f"Suche QR-Code in Clips ({current}/{total})...\n{basename}"
+        self._update_video_qr_progress(current, total, basename, phase="scanning")
+
+    def _update_video_qr_progress(
+        self,
+        clip_index: int,
+        total: int,
+        basename: str,
+        *,
+        phase: str = "scanning",
+        active_basenames: Optional[List[str]] = None,
+    ):
+        if not self.loading_window:
+            return
+
+        active = list(active_basenames or [])
+        if phase == "parallel" and active:
+            status = "Prüfe Videos auf QR-Code (parallel)"
+            if total > 1:
+                progress_text = f"Clip 2–{total} von {total}"
+            else:
+                progress_text = f"Clip {clip_index} von {total}"
+            primary = active[0] if active else basename
+        else:
+            status = "Prüfe Video auf QR-Code"
+            progress_text = f"Clip {clip_index} von {total}"
+            primary = basename
+            active = []
+
+        if hasattr(self.loading_window, "update_qr_progress"):
+            self.loading_window.update_qr_progress(
+                status,
+                progress_text,
+                primary,
+                active if phase == "parallel" else None,
             )
+        elif hasattr(self.loading_window, "update_text"):
+            lines = [status, progress_text, primary]
+            if active:
+                lines.extend(active[1:])
+            self.loading_window.update_text("\n".join(line for line in lines if line))
 
     def _run_analysis_thread(self, video_paths: list[str], result_queue: queue.Queue):
         """Durchsucht Clips nach QR-Code (Abbruch beim ersten Treffer oder per Button)."""
@@ -1128,24 +1229,56 @@ class VideoGeneratorApp:
             from src.video.qr_analyser import (
                 analysiere_ersten_clip,
                 analysiere_videos_bis_erster_treffer,
+                analysiere_videos_hybrid_bis_erster_treffer,
             )
 
             cancel_check = self._qr_cancel_check
+            scan_opts = self._qr_video_scan_kwargs()
+            scan_kwargs = {
+                "scan_seconds": scan_opts["scan_seconds"],
+                "frame_step": scan_opts["frame_step"],
+            }
+            use_hybrid = (
+                scan_opts.get("parallel_enabled")
+                and len(video_paths) >= 2
+            )
 
-            def _progress(current: int, total: int, basename: str):
+            def _progress(
+                current: int,
+                total: int,
+                basename: str,
+                *,
+                phase: str = "scanning",
+                active_basenames=None,
+            ):
                 if self.loading_window:
-                    self.root.after(
-                        0,
-                        self._update_video_qr_loading_text,
-                        current,
-                        total,
-                        basename,
-                    )
+                    active = list(active_basenames or [])
+
+                    def _apply(
+                        c=current,
+                        t=total,
+                        bn=basename,
+                        ph=phase,
+                        act=active,
+                    ):
+                        self._update_video_qr_progress(
+                            c,
+                            t,
+                            bn,
+                            phase=ph,
+                            active_basenames=act,
+                        )
+
+                    self.root.after(0, _apply)
 
             if len(video_paths) == 1:
                 kunde, qr_scan_success = analysiere_ersten_clip(
                     video_paths[0],
                     cancel_check=cancel_check,
+                    clip_index=1,
+                    total_clips=1,
+                    progress_callback=_progress,
+                    **scan_kwargs,
                 )
                 if cancel_check():
                     result_queue.put(("cancelled", None))
@@ -1153,18 +1286,35 @@ class VideoGeneratorApp:
                 result_queue.put(("success", (kunde, qr_scan_success)))
                 return
 
-            kunde, qr_scan_success, _source_path, cancelled = analysiere_videos_bis_erster_treffer(
-                video_paths,
-                progress_callback=_progress,
-                cancel_check=cancel_check,
-            )
+            if use_hybrid:
+                kunde, qr_scan_success, _source_path, cancelled = (
+                    analysiere_videos_hybrid_bis_erster_treffer(
+                        video_paths,
+                        progress_callback=_progress,
+                        cancel_check=cancel_check,
+                        parallel_workers=scan_opts["parallel_workers"],
+                        **scan_kwargs,
+                    )
+                )
+            else:
+                kunde, qr_scan_success, _source_path, cancelled = (
+                    analysiere_videos_bis_erster_treffer(
+                        video_paths,
+                        progress_callback=_progress,
+                        cancel_check=cancel_check,
+                        **scan_kwargs,
+                    )
+                )
             if cancelled:
                 result_queue.put(("cancelled", None))
             else:
                 result_queue.put(("success", (kunde, qr_scan_success)))
 
         except Exception as e:
+            import traceback
+
             print(f"Fehler im Analyse-Thread: {e}")
+            traceback.print_exc()
             result_queue.put(("error", e))
 
     def _run_photo_analysis_thread(self, photo_path: str, result_queue: queue.Queue):
@@ -2929,7 +3079,8 @@ class VideoGeneratorApp:
                         print("Starte QR-Analyse für erstes importiertes Video")
                         video_paths = self.drag_drop.get_video_paths()
                         if video_paths:
-                            self.run_qr_analysis(video_paths)
+                            paths_copy = video_paths.copy()
+                            self.root.after(0, lambda: self.run_qr_analysis(paths_copy))
 
                 if photo_qr_check_was_enabled and hasattr(self.drag_drop, 'photo_qr_check_enabled'):
                     print("Foto-QR-Prüfung wieder aktiviert nach Auto-Import")

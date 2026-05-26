@@ -33,6 +33,16 @@ class ConfigManager:
                         settings["sd_pc_name"] = ""
                     if "gast_name" not in settings:
                         settings["gast_name"] = ""
+                    if "qr_video_scan_seconds" not in settings:
+                        settings["qr_video_scan_seconds"] = 5
+                    if "qr_video_frame_step" not in settings:
+                        settings["qr_video_frame_step"] = 10
+                    if "qr_video_parallel_enabled" not in settings:
+                        settings["qr_video_parallel_enabled"] = False
+                    if "qr_video_parallel_workers" not in settings:
+                        settings["qr_video_parallel_workers"] = 2
+                    if "qr_video_scan_all_clips" not in settings:
+                        settings["qr_video_scan_all_clips"] = True
                     return settings
             except (json.JSONDecodeError, FileNotFoundError):
                 return self.get_default_settings()
@@ -54,6 +64,11 @@ class ConfigManager:
             "server_url": "smb://169.254.169.254/aktuell",  # Neue Standard-URL
             "qr_check_enabled": False,  # QR-Code Prüfung standardmäßig aus
             "photo_qr_check_enabled": False,  # QR-Code in Fotos standardmäßig aus
+            "qr_video_scan_seconds": 5,  # Zeitfenster pro Clip für QR-Suche (Sekunden)
+            "qr_video_frame_step": 10,  # Nur jeden N-ten Frame scannen (~3/s bei 30 fps)
+            "qr_video_parallel_enabled": False,  # Hybrid: Clip 1 solo, Rest parallel
+            "qr_video_parallel_workers": 2,  # Parallele Worker für Clips 2..N
+            "qr_video_scan_all_clips": True,  # False = nur erster Clip, True = alle bis Treffer
             # SD-Karten Backup Einstellungen
             "sd_backup_folder": "",
             "sd_auto_backup": False,

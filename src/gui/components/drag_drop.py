@@ -1077,7 +1077,7 @@ class DragDropFrame:
             self._auto_select_longest_video()
 
         if new_videos_added:
-            self._update_app_preview()
+            self.parent.after(0, self._update_app_preview)
 
         if new_photos_added:
             self._update_photo_preview(pil_photo_cache)

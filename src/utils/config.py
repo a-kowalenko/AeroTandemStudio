@@ -53,6 +53,7 @@ class ConfigManager:
             "upload_to_server": False,
             "server_url": "smb://169.254.169.254/aktuell",  # Neue Standard-URL
             "qr_check_enabled": False,  # QR-Code Prüfung standardmäßig aus
+            "photo_qr_check_enabled": False,  # QR-Code in Fotos standardmäßig aus
             # SD-Karten Backup Einstellungen
             "sd_backup_folder": "",
             "sd_auto_backup": False,

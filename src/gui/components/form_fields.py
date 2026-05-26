@@ -107,6 +107,10 @@ class FormFields:
         self.handcam_frame = None
         self.outside_frame = None
 
+    def has_qr_kunde_layout(self) -> bool:
+        """True, wenn das Formular bereits durch einen erfolgreichen QR-Scan befüllt ist."""
+        return self.form_mode == 'kunde'
+
     def update_form_layout(self, qr_success, kunde=None):
         """
         Aktualisiert das Formular-Layout basierend auf dem QR-Scan-Ergebnis.

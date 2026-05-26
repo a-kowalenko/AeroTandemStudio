@@ -1018,30 +1018,49 @@ class VideoGeneratorApp:
             if self.video_preview:
                 self.video_preview.update_preview(video_paths)
 
+    def _reset_qr_cancel_event(self):
+        self._qr_cancel_event = threading.Event()
+
+    def _request_qr_cancel(self):
+        if hasattr(self, "_qr_cancel_event"):
+            self._qr_cancel_event.set()
+        print("QR-Analyse: Abbruch angefordert...")
+
+    def _qr_cancel_check(self) -> bool:
+        return hasattr(self, "_qr_cancel_event") and self._qr_cancel_event.is_set()
+
     def run_qr_analysis(self, video_paths: list[str]):
         """
         Startet QR-Code-Analyse in separatem Thread.
-        NEU: Ändert Button-Status NICHT mehr, da Preview parallel läuft!
+        Durchsucht alle Clips (Abbruch beim ersten gültigen Treffer oder per Button).
         """
-        # Ladefenster anzeigen
-        self.loading_window = LoadingWindow(self.root, text="Analysiere QR-Code im Video...")
+        if not video_paths:
+            return
 
-        # Queue erstellen für Ergebnis-Kommunikation
+        self._reset_qr_cancel_event()
+        total = len(video_paths)
+        loading_text = (
+            f"Suche QR-Code in Clips (1/{total})...\n{os.path.basename(video_paths[0])}"
+            if total > 1
+            else "Analysiere QR-Code im Clip..."
+        )
+        self.loading_window = LoadingWindow(
+            self.root,
+            text=loading_text,
+            on_cancel=self._request_qr_cancel,
+        )
+
         self.analysis_queue = queue.Queue()
 
-        # video_paths enthält nach dem ersten update_preview bereits Working-Folder-Pfade!
-        first_video_path = video_paths[0]
-        print(f"QR-Analyse: {os.path.basename(first_video_path)}")
+        print(f"QR-Analyse: {total} Clip(s)")
 
-        # Analyse-Thread starten
         analysis_thread = threading.Thread(
             target=self._run_analysis_thread,
-            args=(first_video_path, self.analysis_queue),
-            daemon=True
+            args=(video_paths.copy(), self.analysis_queue),
+            daemon=True,
         )
         analysis_thread.start()
 
-        # Polling-Funktion starten
         self.root.after(100, self._check_analysis_result, video_paths)
 
     def run_photo_qr_analysis(self, photo_path: str):
@@ -1049,35 +1068,100 @@ class VideoGeneratorApp:
         Startet QR-Code-Analyse für ein Foto in separatem Thread.
         Verwendet das gleiche Loading Window wie bei Videos.
         """
-        # Ladefenster anzeigen
-        self.loading_window = LoadingWindow(self.root, text="Analysiere QR-Code im Foto...")
+        self.run_photo_batch_qr_analysis([photo_path], single_photo=True)
 
-        # Queue erstellen für Ergebnis-Kommunikation
+    def run_photo_batch_qr_analysis(
+        self,
+        photo_paths: list[str],
+        *,
+        single_photo: bool = False,
+    ):
+        """
+        Durchsucht Fotos nach einem QR-Code (Abbruch beim ersten gültigen Treffer).
+        """
+        if not photo_paths:
+            return
+
+        if (
+            not single_photo
+            and self.form_fields
+            and self.form_fields.has_qr_kunde_layout()
+        ):
+            print("Foto-QR-Suche übersprungen: Formular bereits durch QR-Scan befüllt.")
+            return
+
+        self._reset_qr_cancel_event()
+        self.loading_window = LoadingWindow(
+            self.root,
+            text="Suche QR-Code in Fotos...",
+            on_cancel=self._request_qr_cancel,
+        )
         self.analysis_queue = queue.Queue()
+        self._photo_qr_batch_mode = not single_photo
 
-        print(f"QR-Analyse Foto: {os.path.basename(photo_path)}")
+        print(f"QR-Analyse Fotos: {len(photo_paths)} Datei(en)")
 
-        # Analyse-Thread starten
         analysis_thread = threading.Thread(
-            target=self._run_photo_analysis_thread,
-            args=(photo_path, self.analysis_queue),
-            daemon=True
+            target=self._run_photo_batch_analysis_thread,
+            args=(photo_paths.copy(), self.analysis_queue),
+            daemon=True,
         )
         analysis_thread.start()
 
-        # Polling-Funktion starten
-        self.root.after(100, self._check_photo_analysis_result, photo_path)
+        self.root.after(100, self._check_photo_batch_analysis_result)
 
-    def _run_analysis_thread(self, video_path: str, result_queue: queue.Queue):
-        """
-        Diese Funktion läuft im separaten Thread.
-        Sie führt die blockierende Analyse aus und legt das Ergebnis in die Queue.
-        """
+    def _update_photo_qr_loading_text(self, current: int, total: int, basename: str):
+        if self.loading_window and hasattr(self.loading_window, "update_text"):
+            self.loading_window.update_text(
+                f"Suche QR-Code in Fotos ({current}/{total})...\n{basename}"
+            )
+
+    def _update_video_qr_loading_text(self, current: int, total: int, basename: str):
+        if self.loading_window and hasattr(self.loading_window, "update_text"):
+            self.loading_window.update_text(
+                f"Suche QR-Code in Clips ({current}/{total})...\n{basename}"
+            )
+
+    def _run_analysis_thread(self, video_paths: list[str], result_queue: queue.Queue):
+        """Durchsucht Clips nach QR-Code (Abbruch beim ersten Treffer oder per Button)."""
         try:
-            from src.video.qr_analyser import analysiere_ersten_clip
+            from src.video.qr_analyser import (
+                analysiere_ersten_clip,
+                analysiere_videos_bis_erster_treffer,
+            )
 
-            kunde, qr_scan_success = analysiere_ersten_clip(video_path)
-            result_queue.put(("success", (kunde, qr_scan_success)))
+            cancel_check = self._qr_cancel_check
+
+            def _progress(current: int, total: int, basename: str):
+                if self.loading_window:
+                    self.root.after(
+                        0,
+                        self._update_video_qr_loading_text,
+                        current,
+                        total,
+                        basename,
+                    )
+
+            if len(video_paths) == 1:
+                kunde, qr_scan_success = analysiere_ersten_clip(
+                    video_paths[0],
+                    cancel_check=cancel_check,
+                )
+                if cancel_check():
+                    result_queue.put(("cancelled", None))
+                    return
+                result_queue.put(("success", (kunde, qr_scan_success)))
+                return
+
+            kunde, qr_scan_success, _source_path, cancelled = analysiere_videos_bis_erster_treffer(
+                video_paths,
+                progress_callback=_progress,
+                cancel_check=cancel_check,
+            )
+            if cancelled:
+                result_queue.put(("cancelled", None))
+            else:
+                result_queue.put(("success", (kunde, qr_scan_success)))
 
         except Exception as e:
             print(f"Fehler im Analyse-Thread: {e}")
@@ -1096,6 +1180,51 @@ class VideoGeneratorApp:
 
         except Exception as e:
             print(f"Fehler im Foto-Analyse-Thread: {e}")
+            result_queue.put(("error", e))
+
+    def _run_photo_batch_analysis_thread(self, photo_paths: list[str], result_queue: queue.Queue):
+        """Durchsucht mehrere Fotos nach QR-Code (Abbruch beim ersten Treffer)."""
+        try:
+            from src.video.qr_analyser import analysiere_fotos_bis_erster_treffer
+
+            def _progress(current: int, total: int, basename: str):
+                if self.loading_window:
+                    self.root.after(
+                        0,
+                        self._update_photo_qr_loading_text,
+                        current,
+                        total,
+                        basename,
+                    )
+
+            cancel_check = self._qr_cancel_check
+
+            if len(photo_paths) == 1:
+                from src.video.qr_analyser import analysiere_foto
+
+                photo_path = photo_paths[0]
+                if cancel_check():
+                    result_queue.put(("cancelled", None))
+                    return
+                kunde, qr_scan_success = analysiere_foto(photo_path)
+                if cancel_check():
+                    result_queue.put(("cancelled", None))
+                    return
+                result_queue.put(("success", (kunde, qr_scan_success, photo_path)))
+                return
+
+            kunde, qr_scan_success, source_path, cancelled = analysiere_fotos_bis_erster_treffer(
+                photo_paths,
+                progress_callback=_progress,
+                cancel_check=cancel_check,
+            )
+            if cancelled:
+                result_queue.put(("cancelled", None))
+            else:
+                result_queue.put(("success", (kunde, qr_scan_success, source_path)))
+
+        except Exception as e:
+            print(f"Fehler im Foto-Batch-Analyse-Thread: {e}")
             result_queue.put(("error", e))
 
     def _check_analysis_result(self, video_paths: List[str]):
@@ -1118,6 +1247,8 @@ class VideoGeneratorApp:
             if status == "success":
                 kunde, qr_scan_success = result
                 self._process_analysis_result(kunde, qr_scan_success, video_paths)
+            elif status == "cancelled":
+                print("QR-Analyse in Clips vom Benutzer abgebrochen.")
             elif status == "error":
                 messagebox.showerror("Analyse-Fehler",
                                      f"Ein unerwarteter Fehler bei der Videoanalyse ist aufgetreten:\n{result}")
@@ -1139,41 +1270,51 @@ class VideoGeneratorApp:
             self.form_fields.update_form_layout(False, None)
 
     def _check_photo_analysis_result(self, photo_path: str):
-        """
-        Überprüft alle 100ms, ob ein Ergebnis der Foto-QR-Analyse in der Queue liegt.
-        Diese Funktion läuft im Haupt-Thread und kann die GUI sicher aktualisieren.
-        """
+        """Legacy-Polling für Einzelfoto-QR (wird nicht mehr direkt aufgerufen)."""
+        self._check_photo_batch_analysis_result()
+
+    def _check_photo_batch_analysis_result(self):
+        """Überprüft alle 100ms, ob ein Ergebnis der Foto-QR-Analyse in der Queue liegt."""
         try:
-            # Versuchen, ein Ergebnis zu holen, ohne zu blockieren
             status, result = self.analysis_queue.get_nowait()
 
-            # --- Ergebnis ist da ---
-
-            # 1. Ladefenster schließen
             if self.loading_window:
                 self.loading_window.destroy()
                 self.loading_window = None
 
-            # 2. Ergebnis verarbeiten
+            batch_mode = getattr(self, "_photo_qr_batch_mode", False)
+            self._photo_qr_batch_mode = False
+
             if status == "success":
                 kunde, qr_scan_success, source_path = result
-                self._process_photo_analysis_result(kunde, qr_scan_success, source_path)
+                self._process_photo_analysis_result(
+                    kunde,
+                    qr_scan_success,
+                    source_path,
+                    batch_scan=batch_mode,
+                )
+            elif status == "cancelled":
+                print("Foto-QR-Suche vom Benutzer abgebrochen.")
             elif status == "error":
-                messagebox.showerror("Analyse-Fehler",
-                                     f"Ein unerwarteter Fehler bei der Foto-Analyse ist aufgetreten:\n{result}")
-                self.form_fields.update_form_layout(False, None)
+                messagebox.showerror(
+                    "Analyse-Fehler",
+                    f"Ein unerwarteter Fehler bei der Foto-Analyse ist aufgetreten:\n{result}",
+                )
+                if not batch_mode:
+                    self.form_fields.update_form_layout(False, None)
 
         except queue.Empty:
-            # Wenn die Queue leer ist, erneut in 100ms prüfen
-            self.root.after(100, self._check_photo_analysis_result, photo_path)
+            self.root.after(100, self._check_photo_batch_analysis_result)
 
         except Exception as e:
-            # Allgemeiner Fehler beim Abrufen
             if self.loading_window:
                 self.loading_window.destroy()
                 self.loading_window = None
-            messagebox.showerror("Fehler", f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}")
-            self.form_fields.update_form_layout(False, None)
+            self._photo_qr_batch_mode = False
+            messagebox.showerror(
+                "Fehler",
+                f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}",
+            )
 
     def _process_analysis_result(self, kunde, qr_scan_success, video_paths):
         """
@@ -1208,7 +1349,15 @@ class VideoGeneratorApp:
 
             else:
                 # Dialog entfernt - Wechsel zu manueller Eingabe erfolgt automatisch
-                print("Kein QR-Code im ersten Video gefunden. Wechsle zu manueller Eingabe.")
+                print("Kein QR-Code in den Clips gefunden. Wechsle zu manueller Eingabe.")
+                if (
+                    self.drag_drop
+                    and hasattr(self.drag_drop, "photo_qr_check_enabled")
+                    and self.drag_drop.photo_qr_check_enabled.get()
+                    and self.drag_drop.photo_paths
+                ):
+                    print("Starte Foto-QR-Suche nach fehlgeschlagener Video-QR-Analyse...")
+                    self.run_photo_batch_qr_analysis(self.drag_drop.photo_paths.copy())
 
             # Formular-Layout aktualisieren
             self.form_fields.update_form_layout(qr_scan_success, kunde)
@@ -1224,7 +1373,14 @@ class VideoGeneratorApp:
                 self._restore_button_state()
             self.form_fields.update_form_layout(False, None)
 
-    def _process_photo_analysis_result(self, kunde, qr_scan_success, photo_path):
+    def _process_photo_analysis_result(
+        self,
+        kunde,
+        qr_scan_success,
+        photo_path,
+        *,
+        batch_scan: bool = False,
+    ):
         """
         Verarbeitet das erfolgreiche Foto-QR-Code-Analyseergebnis (im Haupt-Thread).
         """
@@ -1234,24 +1390,31 @@ class VideoGeneratorApp:
                       f"Booking ID Hash {kunde.booking_id_hash}, Email: {kunde.email}, "
                       f"Name: {kunde.vorname} {kunde.nachname}")
 
-                # Formular automatisch füllen
                 self.form_fields.update_form_layout(qr_scan_success, kunde)
 
             elif qr_scan_success and not kunde:
-                messagebox.showwarning("Ungültiger QR-Code",
-                                      f"Ein QR-Code wurde im Foto erkannt, aber die Daten sind ungültig.")
-                self.form_fields.update_form_layout(False, None)
+                messagebox.showwarning(
+                    "Ungültiger QR-Code",
+                    "Ein QR-Code wurde im Foto erkannt, aber die Daten sind ungültig.",
+                )
+                if not batch_scan:
+                    self.form_fields.update_form_layout(False, None)
 
             else:
-                messagebox.showwarning(
-                    "Kein QR-Code gefunden",
-                    f"Kein gültiger QR-Code im Foto gefunden:\n{os.path.basename(photo_path)}"
-                )
-                self.form_fields.update_form_layout(False, None)
+                if batch_scan:
+                    print("Kein gültiger QR-Code in den importierten Fotos gefunden.")
+                else:
+                    basename = os.path.basename(photo_path) if photo_path else "?"
+                    messagebox.showwarning(
+                        "Kein QR-Code gefunden",
+                        f"Kein gültiger QR-Code im Foto gefunden:\n{basename}",
+                    )
+                    self.form_fields.update_form_layout(False, None)
 
         except Exception as e:
             print(f"Fehler in _process_photo_analysis_result: {e}")
-            self.form_fields.update_form_layout(False, None)
+            if not batch_scan:
+                self.form_fields.update_form_layout(False, None)
 
     def erstelle_video(self):
         """Bereitet die Videoerstellung mit Intro vor"""
@@ -2590,14 +2753,21 @@ class VideoGeneratorApp:
 
         # QR-Check Status merken und temporär deaktivieren
         qr_check_was_enabled = False
+        photo_qr_check_was_enabled = False
         if self.drag_drop and hasattr(self.drag_drop, 'qr_check_enabled'):
             qr_check_was_enabled = self.drag_drop.qr_check_enabled.get()
             if qr_check_was_enabled:
                 print("QR-Code-Prüfung temporär deaktiviert für Auto-Import")
                 self.drag_drop.qr_check_enabled.set(False)
+        if self.drag_drop and hasattr(self.drag_drop, 'photo_qr_check_enabled'):
+            photo_qr_check_was_enabled = self.drag_drop.photo_qr_check_enabled.get()
+            if photo_qr_check_was_enabled:
+                print("Foto-QR-Prüfung temporär deaktiviert für Auto-Import")
+                self.drag_drop.photo_qr_check_enabled.set(False)
 
         # Flag für finally-Block
         videos_imported = False
+        photos_imported = False
 
         try:
             # Sammle alle Dateien aus dem Backup-Ordner
@@ -2682,6 +2852,8 @@ class VideoGeneratorApp:
 
                 if video_files:
                     videos_imported = True
+                if photo_files:
+                    photos_imported = True
 
                 # Füge zur Historie hinzu wenn Option aktiviert
                 if skip_processed:
@@ -2748,16 +2920,24 @@ class VideoGeneratorApp:
         finally:
             _notify_import_active(False)
             # QR-Check Status wiederherstellen
-            if qr_check_was_enabled and self.drag_drop and hasattr(self.drag_drop, 'qr_check_enabled'):
-                print("QR-Code-Prüfung wieder aktiviert nach Auto-Import")
-                self.drag_drop.qr_check_enabled.set(True)
+            if self.drag_drop:
+                if qr_check_was_enabled and hasattr(self.drag_drop, 'qr_check_enabled'):
+                    print("QR-Code-Prüfung wieder aktiviert nach Auto-Import")
+                    self.drag_drop.qr_check_enabled.set(True)
 
-                # Trigger QR-Analyse für erstes importiertes Video
-                if videos_imported:
-                    print("Starte QR-Analyse für erstes importiertes Video")
-                    video_paths = self.drag_drop.get_video_paths()
-                    if video_paths:
-                        self.run_qr_analysis(video_paths)
+                    if videos_imported:
+                        print("Starte QR-Analyse für erstes importiertes Video")
+                        video_paths = self.drag_drop.get_video_paths()
+                        if video_paths:
+                            self.run_qr_analysis(video_paths)
+
+                if photo_qr_check_was_enabled and hasattr(self.drag_drop, 'photo_qr_check_enabled'):
+                    print("Foto-QR-Prüfung wieder aktiviert nach Auto-Import")
+                    self.drag_drop.photo_qr_check_enabled.set(True)
+
+                    if photos_imported and not (videos_imported and qr_check_was_enabled):
+                        print("Starte Foto-QR-Suche nach Auto-Import")
+                        self.drag_drop._maybe_run_photo_qr_search()
 
     def _switch_to_predominant_tab(self, video_count: int, photo_count: int):
         """

@@ -1,8 +1,12 @@
 import json
+import os
+from typing import Callable, Optional, Tuple
+
 from pyzbar.pyzbar import decode
-from typing import Optional, Tuple
 
 from src.model.kunde import Kunde
+
+_MAX_QR_DECODE_WIDTH = 1920
 
 try:
     import cv2
@@ -64,7 +68,15 @@ def _parse_kunde_aus_qr_string(qr_daten_str: str) -> Kunde:
     )
 
 
-def analysiere_ersten_clip(video_pfad: str) -> Tuple[Optional[Kunde], bool]:
+def _is_cancelled(cancel_check: Optional[Callable[[], bool]]) -> bool:
+    return cancel_check is not None and cancel_check()
+
+
+def analysiere_ersten_clip(
+    video_pfad: str,
+    *,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Tuple[Optional[Kunde], bool]:
     """
     Analysiert die ersten 5 Sekunden eines Videoclips auf einen QR-Code,
     parst diesen in das Kunde-Modell und gibt das Modell sowie einen Erfolgsstatus zurück.
@@ -100,6 +112,11 @@ def analysiere_ersten_clip(video_pfad: str) -> Tuple[Optional[Kunde], bool]:
         frame_zaehler = 0
 
         while frame_zaehler < frames_limit:
+            if _is_cancelled(cancel_check):
+                print("QR-Analyse des Clips vom Benutzer abgebrochen.")
+                cap.release()
+                return None, False
+
             erfolg, frame = cap.read()
 
             # Wenn kein Frame mehr gelesen werden kann (z.B. Video kürzer als 5 Sek.)
@@ -146,6 +163,43 @@ def analysiere_ersten_clip(video_pfad: str) -> Tuple[Optional[Kunde], bool]:
     return None, False
 
 
+def _load_image_for_qr(foto_pfad: str):
+    """Lädt ein Foto und verkleinert es für die QR-Erkennung bei Bedarf."""
+    if cv2 is None:
+        return None
+
+    image = cv2.imread(foto_pfad)
+    if image is None:
+        return None
+
+    height, width = image.shape[:2]
+    if width > _MAX_QR_DECODE_WIDTH:
+        scale = _MAX_QR_DECODE_WIDTH / width
+        new_width = _MAX_QR_DECODE_WIDTH
+        new_height = max(1, int(height * scale))
+        image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+
+    return image
+
+
+def _decode_kunde_from_image(image) -> Tuple[Optional[Kunde], bool]:
+    """Dekodiert QR-Codes in einem OpenCV-Bild und parst den ersten gültigen Kunden."""
+    gefundene_codes = decode(image)
+    if not gefundene_codes:
+        return None, False
+
+    for code in gefundene_codes:
+        try:
+            qr_daten_str = code.data.decode('utf-8')
+            kunden_obj = _parse_kunde_aus_qr_string(qr_daten_str)
+            return kunden_obj, True
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            print(f"QR-Code gefunden, aber Parsing fehlgeschlagen: {e}")
+            continue
+
+    return None, False
+
+
 def analysiere_foto(foto_pfad: str) -> Tuple[Optional[Kunde], bool]:
     """
     Analysiert ein Foto auf einen QR-Code, parst diesen in das Kunde-Modell
@@ -164,42 +218,112 @@ def analysiere_foto(foto_pfad: str) -> Tuple[Optional[Kunde], bool]:
             print("Fehler: OpenCV (cv2) ist nicht installiert. Bitte 'opencv-python' installieren.")
             return None, False
 
-        # Lade das Bild mit OpenCV
-        image = cv2.imread(foto_pfad)
-
+        image = _load_image_for_qr(foto_pfad)
         if image is None:
             print(f"Fehler: Foto konnte nicht geladen werden: {foto_pfad}")
             return None, False
 
-        # Finde und dekodiere QR-Codes im Bild
-        gefundene_codes = decode(image)
+        kunde, ok = _decode_kunde_from_image(image)
+        if ok and kunde:
+            print(f"QR-Code im Foto gefunden und erfolgreich geparst: {foto_pfad}")
+            return kunde, True
 
-        if not gefundene_codes:
+        if not decode(image):
             print(f"Kein QR-Code im Foto gefunden: {foto_pfad}")
-            return None, False
-
-        # Versuche den ersten gefundenen Code zu parsen
-        for code in gefundene_codes:
-            try:
-                # Dekodiere die Daten (sind Bytes) in einen String
-                qr_daten_str = code.data.decode('utf-8')
-                kunden_obj = _parse_kunde_aus_qr_string(qr_daten_str)
-
-                # Erfolgreich gefunden UND geparst!
-                print(f"QR-Code im Foto gefunden und erfolgreich geparst: {foto_pfad}")
-                return kunden_obj, True
-
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-                # Der QR-Code wurde gefunden, aber die Daten waren ungültig
-                print(f"QR-Code im Foto gefunden, aber Parsing fehlgeschlagen: {e}")
-                # Versuche nächsten Code falls mehrere vorhanden
-                continue
-
-        # Alle gefundenen Codes waren ungültig
-        print(f"QR-Code(s) gefunden, aber keine gültigen Kundendaten im Foto: {foto_pfad}")
+        else:
+            print(f"QR-Code(s) gefunden, aber keine gültigen Kundendaten im Foto: {foto_pfad}")
         return None, False
 
     except Exception as e:
         print(f"Ein unerwarteter Fehler beim Analysieren des Fotos ist aufgetreten: {e}")
         return None, False
+
+
+def analysiere_fotos_bis_erster_treffer(
+    foto_pfade: list[str],
+    *,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Tuple[Optional[Kunde], bool, Optional[str], bool]:
+    """
+    Durchsucht Fotos der Reihe nach auf einen gültigen QR-Code.
+    Bricht beim ersten erfolgreichen Treffer ab.
+
+    Returns:
+        (Kunde oder None, Erfolg, Pfad des Treffer-Fotos oder None)
+    """
+    if cv2 is None:
+        print("Fehler: OpenCV (cv2) ist nicht installiert. Bitte 'opencv-python' installieren.")
+        return None, False, None, False
+
+    total = len(foto_pfade)
+    for index, foto_pfad in enumerate(foto_pfade, start=1):
+        if _is_cancelled(cancel_check):
+            print("Foto-QR-Suche vom Benutzer abgebrochen.")
+            return None, False, None, True
+
+        if progress_callback:
+            progress_callback(index, total, os.path.basename(foto_pfad))
+
+        image = _load_image_for_qr(foto_pfad)
+        if image is None:
+            print(f"Fehler: Foto konnte nicht geladen werden: {foto_pfad}")
+            continue
+
+        if _is_cancelled(cancel_check):
+            print("Foto-QR-Suche vom Benutzer abgebrochen.")
+            return None, False, None, True
+
+        kunde, ok = _decode_kunde_from_image(image)
+        if ok and kunde:
+            print(
+                f"QR-Code in Foto {index}/{total} gefunden und geparst: "
+                f"{os.path.basename(foto_pfad)}"
+            )
+            return kunde, True, foto_pfad, False
+
+    print(f"Kein gültiger QR-Code in {total} Foto(s) gefunden.")
+    return None, False, None, False
+
+
+def analysiere_videos_bis_erster_treffer(
+    video_pfade: list[str],
+    *,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Tuple[Optional[Kunde], bool, Optional[str], bool]:
+    """
+    Durchsucht Videoclips der Reihe nach (je erste 5 s) auf einen gültigen QR-Code.
+    Bricht beim ersten erfolgreichen Treffer oder bei Benutzer-Abbruch ab.
+
+    Returns:
+        (Kunde oder None, Erfolg, Pfad des Treffer-Clips oder None, vom Benutzer abgebrochen)
+    """
+    if cv2 is None:
+        print("Fehler: OpenCV (cv2) ist nicht installiert. Bitte 'opencv-python' installieren.")
+        return None, False, None, False
+
+    total = len(video_pfade)
+    for index, video_pfad in enumerate(video_pfade, start=1):
+        if _is_cancelled(cancel_check):
+            print("Video-QR-Suche vom Benutzer abgebrochen.")
+            return None, False, None, True
+
+        if progress_callback:
+            progress_callback(index, total, os.path.basename(video_pfad))
+
+        kunde, ok = analysiere_ersten_clip(video_pfad, cancel_check=cancel_check)
+        if _is_cancelled(cancel_check):
+            print("Video-QR-Suche vom Benutzer abgebrochen.")
+            return None, False, None, True
+
+        if ok and kunde:
+            print(
+                f"QR-Code in Clip {index}/{total} gefunden und geparst: "
+                f"{os.path.basename(video_pfad)}"
+            )
+            return kunde, True, video_pfad, False
+
+    print(f"Kein gültiger QR-Code in {total} Clip(s) gefunden.")
+    return None, False, None, False
 

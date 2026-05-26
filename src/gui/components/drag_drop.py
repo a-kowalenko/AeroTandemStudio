@@ -135,8 +135,11 @@ class DragDropFrame:
         self.last_first_video = None  # NEU: Speichert den ersten Clip für Vergleich
 
         # Lade QR-Check-Status aus Config (Standard: False)
-        qr_check_initial = self.app.config.get_settings().get("qr_check_enabled", False)
-        self.qr_check_enabled = tk.BooleanVar(value=qr_check_initial)  # NEU: Checkbox-Variable für QR-Prüfung
+        settings = self.app.config.get_settings()
+        qr_check_initial = settings.get("qr_check_enabled", False)
+        photo_qr_check_initial = settings.get("photo_qr_check_enabled", False)
+        self.qr_check_enabled = tk.BooleanVar(value=qr_check_initial)
+        self.photo_qr_check_enabled = tk.BooleanVar(value=photo_qr_check_initial)
 
         self.watermark_clip_index = None  # NEU: Index des Clips für Wasserzeichen
         self.watermark_photo_indices = []  # NEU: Liste für Foto-Mehrfachauswahl
@@ -160,15 +163,29 @@ class DragDropFrame:
         top_frame = tk.Frame(self.frame)
         top_frame.pack(pady=0, fill="x")
 
-        # Checkbox für QR-Code-Prüfung (rechts)
+        # QR-Optionen (rechts, untereinander)
+        qr_options_frame = tk.Frame(top_frame)
+        qr_options_frame.pack(side=tk.RIGHT)
+
         self.qr_check_checkbox = tk.Checkbutton(
-            top_frame,
-            text="Auf QR-Code im ersten Clip prüfen",
+            qr_options_frame,
+            text="Auf QR-Code in Clips prüfen",
             variable=self.qr_check_enabled,
-            command=self._on_qr_checkbox_toggled,  # Führe QR-Prüfung aus beim Anklicken
-            font=("Arial", 10)
+            command=self._on_qr_checkbox_toggled,
+            font=("Arial", 10),
+            anchor="w",
         )
-        self.qr_check_checkbox.pack(side=tk.RIGHT)
+        self.qr_check_checkbox.pack(anchor="w")
+
+        self.photo_qr_check_checkbox = tk.Checkbutton(
+            qr_options_frame,
+            text="Auf QR-Code in Fotos prüfen",
+            variable=self.photo_qr_check_enabled,
+            command=self._on_photo_qr_checkbox_toggled,
+            font=("Arial", 10),
+            anchor="w",
+        )
+        self.photo_qr_check_checkbox.pack(anchor="w")
 
         # Haupt-Label (links)
         self.drop_label = tk.Label(top_frame,
@@ -1064,6 +1081,9 @@ class DragDropFrame:
 
         if new_photos_added:
             self._update_photo_preview(pil_photo_cache)
+            # Foto-QR nur direkt starten, wenn kein Video-QR parallel läuft
+            if not (new_videos_added and self.qr_check_enabled.get()):
+                self._maybe_run_photo_qr_search()
 
         if (new_videos_added or new_photos_added) and self.app and hasattr(self.app, 'form_fields'):
             self.app.form_fields.auto_check_products(new_videos_added, new_photos_added)
@@ -1183,6 +1203,28 @@ class DragDropFrame:
                 self.app.run_qr_analysis(self.video_paths.copy())
         elif not qr_check_status:
             print("QR-Code-Prüfung wurde deaktiviert")
+
+    def _on_photo_qr_checkbox_toggled(self):
+        """Speichert Foto-QR-Status und startet Suche bei Aktivierung."""
+        photo_qr_status = self.photo_qr_check_enabled.get()
+        settings = self.app.config.get_settings()
+        settings["photo_qr_check_enabled"] = photo_qr_status
+        self.app.config.save_settings(settings)
+
+        if photo_qr_status and self.photo_paths:
+            print("Foto-QR-Prüfung wurde aktiviert - führe Suche durch...")
+            self._maybe_run_photo_qr_search()
+        elif not photo_qr_status:
+            print("Foto-QR-Prüfung wurde deaktiviert")
+
+    def _maybe_run_photo_qr_search(self):
+        """Startet Batch-QR-Suche in allen geladenen Fotos, wenn Option aktiv ist."""
+        if not self.photo_qr_check_enabled.get():
+            return
+        if not self.photo_paths:
+            return
+        if self.app and hasattr(self.app, "run_photo_batch_qr_analysis"):
+            self.app.run_photo_batch_qr_analysis(self.photo_paths.copy())
 
     def get_source_import_epoch(self, copy_path: str) -> Optional[float]:
         """Unix-Zeit der Quelldatei beim Kopieren ins Working-Verzeichnis (falls erfasst)."""

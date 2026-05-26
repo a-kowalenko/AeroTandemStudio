@@ -141,6 +141,24 @@ class VideoProcessor:
                 continue
         return tempfile.gettempdir()
 
+    @staticmethod
+    def _mp4_has_faststart(file_path, scan_bytes=4 * 1024 * 1024):
+        """
+        True wenn der moov-Atom vor mdat liegt (typisch nach -movflags +faststart).
+        """
+        try:
+            with open(file_path, 'rb') as handle:
+                header = handle.read(scan_bytes)
+        except OSError:
+            return False
+        moov_pos = header.find(b'moov')
+        if moov_pos < 0:
+            return False
+        mdat_pos = header.find(b'mdat')
+        if mdat_pos < 0:
+            return True
+        return moov_pos < mdat_pos
+
     def _normalize_mp4_for_concat(self, input_path, output_path, video_params):
         """Remux nur Video+Audio mit sauberen Timestamps (Stream-Copy, kein Neuencode)."""
         cmd = ['ffmpeg', '-y', '-fflags', '+genpts', '-i', input_path, '-map', '0:v:0']
@@ -326,11 +344,17 @@ class VideoProcessor:
             return False
 
     def _prepare_final_mux_segments(
-        self, intro_path, combined_video_path, video_params, work_temp_dir
+        self,
+        intro_path,
+        combined_video_path,
+        video_params,
+        work_temp_dir,
+        force_normalize=False,
     ):
         """
         Bereitet Intro + Hauptvideo für Stream-Copy-Zusammenführung vor.
         HEVC → MPEG-TS-Concat (Browser-kompatibel), H.264 → MP4-concat.
+        Schnellpfad: ohne body_norm/intro_norm wenn moov vor mdat (Vorschau-Concat).
         Returns: dict mit mux-Parametern + Liste temporärer Dateien.
         """
         extra_temp_files = []
@@ -347,6 +371,7 @@ class VideoProcessor:
                 "-c:v", "copy",
                 "-c:a", video_params['acodec'],
                 "-shortest",
+                "-movflags", "+faststart",
                 temp_combined_path,
             ]
             subprocess.run(
@@ -358,45 +383,82 @@ class VideoProcessor:
         else:
             body_path = combined_video_path
 
-        self._update_status("Normalisiere Intro- und Hauptvideo-Timestamps...")
-        intro_norm = os.path.join(work_temp_dir, "intro_norm.mp4")
-        body_norm = os.path.join(work_temp_dir, "body_norm.mp4")
-        extra_temp_files.extend([intro_norm, body_norm])
+        skip_norm = (
+            not force_normalize
+            and self._mp4_has_faststart(intro_path)
+            and self._mp4_has_faststart(body_path)
+        )
 
-        self._normalize_mp4_for_concat(intro_path, intro_norm, video_params)
-        self._normalize_mp4_for_concat(body_path, body_norm, video_params)
+        if skip_norm:
+            self._update_status("Bereite Stream-Copy-Zusammenführung vor (Schnellpfad)...")
+            intro_mux = intro_path
+            body_mux = body_path
+        else:
+            self._update_status("Normalisiere Intro- und Hauptvideo-Timestamps...")
+            intro_norm = os.path.join(work_temp_dir, "intro_norm.mp4")
+            body_norm = os.path.join(work_temp_dir, "body_norm.mp4")
+            extra_temp_files.extend([intro_norm, body_norm])
+            self._normalize_mp4_for_concat(intro_path, intro_norm, video_params)
+            self._normalize_mp4_for_concat(body_path, body_norm, video_params)
+            intro_mux = intro_norm
+            body_mux = body_norm
 
         if vcodec == 'hevc':
             self._update_status("HEVC: bereite MPEG-TS-Concat vor (stabile Wiedergabe)...")
             intro_ts = os.path.join(work_temp_dir, "intro.ts")
             body_ts = os.path.join(work_temp_dir, "body.ts")
             extra_temp_files.extend([intro_ts, body_ts])
-            self._mp4_to_mpegts_stream_copy(intro_norm, intro_ts, vcodec, video_params)
+            self._mp4_to_mpegts_stream_copy(intro_mux, intro_ts, vcodec, video_params)
             self._update_status("HEVC: Hauptvideo nach MPEG-TS (Stream-Copy)...")
-            self._mp4_to_mpegts_stream_copy(body_norm, body_ts, vcodec, video_params)
+            self._mp4_to_mpegts_stream_copy(body_mux, body_ts, vcodec, video_params)
             return {
                 'method': 'ts',
                 'intro_ts_path': intro_ts,
                 'body_ts_path': body_ts,
-                'combined_body_path': body_norm,
+                'combined_body_path': body_mux,
                 'temp_files': extra_temp_files,
+                'used_fast_path': skip_norm,
+                'intro_source': intro_path,
+                'combined_video_path': combined_video_path,
+                'work_temp_dir': work_temp_dir,
             }
 
         concat_list_path = os.path.join(work_temp_dir, "final_concat_list.txt")
         extra_temp_files.append(concat_list_path)
         self._update_status("Schreibe concat-Liste (Intro + Hauptvideo)...")
         with open(concat_list_path, 'w', encoding='utf-8') as f:
-            intro_escaped = os.path.abspath(intro_norm).replace('\\', '/')
-            combined_escaped = os.path.abspath(body_norm).replace('\\', '/')
+            intro_escaped = os.path.abspath(intro_mux).replace('\\', '/')
+            combined_escaped = os.path.abspath(body_mux).replace('\\', '/')
             f.write(f"file '{intro_escaped}'\n")
             f.write(f"file '{combined_escaped}'\n")
 
         return {
             'method': 'mp4_concat',
             'concat_list_path': concat_list_path,
-            'combined_body_path': body_norm,
+            'combined_body_path': body_mux,
             'temp_files': extra_temp_files,
+            'used_fast_path': skip_norm,
+            'intro_source': intro_path,
+            'combined_video_path': combined_video_path,
+            'work_temp_dir': work_temp_dir,
         }
+
+    def _execute_final_mux_command(self, full_video_output_path, video_params, mux_segments):
+        """Baut den FFmpeg-Befehl für den Stream-Copy-Mux (MP4-concat oder HEVC-TS-concat)."""
+        if mux_segments.get('method') == 'ts':
+            self._update_status("Füge Intro an (HEVC Stream-Copy via MPEG-TS)...")
+            return self._build_final_intro_body_stream_copy_command(
+                full_video_output_path,
+                video_params,
+                intro_ts_path=mux_segments['intro_ts_path'],
+                body_ts_path=mux_segments['body_ts_path'],
+            )
+        self._update_status("Füge Intro an (Stream-Copy, ohne Neuencode)...")
+        return self._build_final_intro_body_stream_copy_command(
+            full_video_output_path,
+            video_params,
+            concat_list_path=mux_segments['concat_list_path'],
+        )
 
     def _run_final_intro_body_mux(
         self,
@@ -407,43 +469,73 @@ class VideoProcessor:
         intro_dauer,
         task_name="Finaler Schnitt (Intro + Video)",
         encoding_lane=0,
+        extra_temp_files=None,
     ):
         """Fügt Intro + Hauptvideo ausschließlich per Stream-Copy zusammen (kein Neuencode)."""
         combined_body_path = mux_segments['combined_body_path']
         expected_duration = self._estimate_final_output_duration_sec(intro_dauer, combined_body_path)
+        mux_progress_duration = self._estimate_stream_copy_mux_duration_sec(
+            intro_dauer, combined_body_path, mux_segments
+        )
 
         self._check_for_cancellation()
         self._assert_stream_copy_compatible(temp_intro_with_audio_path, combined_body_path)
 
-        if mux_segments.get('method') == 'ts':
-            self._update_status("Füge Intro an (HEVC Stream-Copy via MPEG-TS)...")
-            command = self._build_final_intro_body_stream_copy_command(
-                full_video_output_path,
-                video_params,
-                intro_ts_path=mux_segments['intro_ts_path'],
-                body_ts_path=mux_segments['body_ts_path'],
-            )
-        else:
-            self._update_status("Füge Intro an (Stream-Copy, ohne Neuencode)...")
-            command = self._build_final_intro_body_stream_copy_command(
-                full_video_output_path,
-                video_params,
-                concat_list_path=mux_segments['concat_list_path'],
-            )
+        command = self._execute_final_mux_command(full_video_output_path, video_params, mux_segments)
         self._run_ffmpeg_with_progress(
             command,
-            self._estimate_stream_copy_mux_duration_sec(),
+            mux_progress_duration,
             task_name,
             task_id=None,
             encoding_lane=encoding_lane,
         )
 
-        if not self._validate_browser_mp4(full_video_output_path, video_params, expected_duration):
-            raise Exception(
-                "Finale MP4 ist nach Stream-Copy nicht browser-kompatibel. "
-                "Intro-Parameter stimmen vermutlich nicht mit dem Hauptvideo überein."
+        if self._validate_browser_mp4(full_video_output_path, video_params, expected_duration):
+            print("✓ Finaler Schnitt per Stream-Copy (Browser-Validierung OK)")
+            return
+
+        if mux_segments.get('used_fast_path'):
+            print("⚠ Schnellpfad: Browser-Validierung fehlgeschlagen → Remux mit Normalisierung")
+            if os.path.exists(full_video_output_path):
+                try:
+                    os.remove(full_video_output_path)
+                except OSError:
+                    pass
+            self._update_status("Schnellpfad fehlgeschlagen – normalisiere Timestamps...")
+            fallback_segments = self._prepare_final_mux_segments(
+                mux_segments['intro_source'],
+                mux_segments['combined_video_path'],
+                video_params,
+                mux_segments['work_temp_dir'],
+                force_normalize=True,
             )
-        print("✓ Finaler Schnitt per Stream-Copy (Browser-Validierung OK)")
+            if extra_temp_files is not None:
+                extra_temp_files.extend(fallback_segments.get('temp_files', []))
+
+            self._assert_stream_copy_compatible(
+                temp_intro_with_audio_path, fallback_segments['combined_body_path']
+            )
+            fallback_command = self._execute_final_mux_command(
+                full_video_output_path, video_params, fallback_segments
+            )
+            fallback_progress = self._estimate_stream_copy_mux_duration_sec(
+                intro_dauer, fallback_segments['combined_body_path'], fallback_segments
+            )
+            self._run_ffmpeg_with_progress(
+                fallback_command,
+                fallback_progress,
+                task_name,
+                task_id=None,
+                encoding_lane=encoding_lane,
+            )
+            if self._validate_browser_mp4(full_video_output_path, video_params, expected_duration):
+                print("✓ Finaler Schnitt per Stream-Copy (Fallback-Normalisierung OK)")
+                return
+
+        raise Exception(
+            "Finale MP4 ist nach Stream-Copy nicht browser-kompatibel. "
+            "Intro-Parameter stimmen vermutlich nicht mit dem Hauptvideo überein."
+        )
 
     def create_video_with_intro_only(self, payload):
         """Erstellt ein Verzeichnis, verarbeitet optional Videos und kopiert Fotos."""
@@ -607,57 +699,8 @@ class VideoProcessor:
                     full_video_output_path = None
                     self._update_status("Überspringe normale Video-Erstellung (kein Produkt gewählt)...")
 
-                # Schritt 8-10: Video-Erstellung (mit oder ohne Wasserzeichen)
-                # Mit paralleler Verarbeitung: Normale Version UND Wasserzeichen-Version gleichzeitig
-                if self.parallel_processor and full_video_output_path and create_watermark_version and longest_clip_path:
-                    # Beide Versionen parallel erstellen
-                    self._check_for_cancellation()
-                    self._update_progress(9, TOTAL_STEPS)
-                    self._update_status("Erstelle normale Version und Wasserzeichen-Version (parallel)...")
-
-                    watermark_video_output_path = self._generate_watermark_video_path(
-                        base_output_dir, base_filename
-                    )
-
-                    # Task 1: Normale Version zusammenfügen (nur Stream-Copy)
-                    def create_normal_version_task(task_id=None):
-                        self._run_final_intro_body_mux(
-                            full_video_output_path,
-                            video_params,
-                            mux_segments,
-                            temp_intro_with_audio_path,
-                            dauer,
-                            task_name="Finaler Schnitt (Intro + Video, parallel)",
-                            encoding_lane=0,
-                        )
-
-                    # Task 2: Wasserzeichen-Version erstellen
-                    def create_watermark_version_task(task_id=None):
-                        self._create_video_with_watermark(
-                            longest_clip_path,
-                            watermark_video_output_path,
-                            video_params,
-                            task_id=task_id,
-                            encoding_lane=1,
-                        )
-
-                    # Beide Tasks parallel ausführen
-                    tasks = [
-                        (create_normal_version_task, (), {}),
-                        (create_watermark_version_task, (), {})
-                    ]
-
-                    results = self.parallel_processor.process_videos_parallel(tasks, self.cancel_event)
-
-                    # Prüfe auf Fehler
-                    for task_index, result, error in results:
-                        if error:
-                            raise error
-
-                    self._update_progress(10, TOTAL_STEPS)
-
-                elif full_video_output_path or (create_watermark_version and longest_clip_path):
-                    # Sequenzielle Verarbeitung (wie bisher)
+                # Schritt 8-10: Video-Erstellung (sequenziell: Final-Mux zuerst, dann Wasserzeichen)
+                if full_video_output_path or (create_watermark_version and longest_clip_path):
                     if full_video_output_path:
                         self._check_for_cancellation()
                         self._update_progress(9, TOTAL_STEPS)
@@ -669,12 +712,12 @@ class VideoProcessor:
                             dauer,
                             task_name="Finaler Schnitt (Intro + Video)",
                             encoding_lane=0,
+                            extra_temp_files=temp_files,
                         )
                     else:
                         self._update_progress(9, TOTAL_STEPS)
                         self._update_status("Überspringe normale Video-Erstellung...")
 
-                    # Wasserzeichen-Version erstellen (falls gewünscht)
                     if create_watermark_version and longest_clip_path:
                         self._check_for_cancellation()
                         self._update_progress(10, TOTAL_STEPS)
@@ -684,7 +727,6 @@ class VideoProcessor:
                             base_output_dir, base_filename
                         )
 
-                        # Wasserzeichen direkt auf finalen Pfad anwenden
                         self._create_video_with_watermark(
                             longest_clip_path,
                             watermark_video_output_path,
@@ -1046,16 +1088,16 @@ class VideoProcessor:
 
         if not use_hw_tuning:
             if encoder_name == 'libx264':
-                command.extend(["-preset", "fast", "-crf", "18"])
+                command.extend(["-preset", "veryfast", "-crf", "18"])
             elif encoder_name == 'libx265':
-                command.extend(["-preset", "fast", "-crf", "20"])
+                command.extend(["-preset", "veryfast", "-crf", "20"])
             elif encoder_name == 'libvpx-vp9':
                 command.extend(["-deadline", "good", "-cpu-used", "2", "-crf", "23", "-b:v", "0"])
             elif encoder_name in ('libaom-av1', 'libsvtav1'):
                 command.extend(["-cpu-used", "6", "-crf", "28", "-b:v", "0"])
         else:
             if encoder_name.endswith('_nvenc'):
-                command.extend(["-rc", "constqp", "-qp", "18", "-preset", "p4", "-no-scenecut", "1"])
+                command.extend(["-rc", "constqp", "-qp", "18", "-preset", "p2", "-no-scenecut", "1"])
             elif encoder_name.endswith('_qsv'):
                 if vcodec in ('hevc', 'h265'):
                     command.extend(["-global_quality", "18"])
@@ -1114,6 +1156,7 @@ class VideoProcessor:
                 f"repeat-headers=1:aud=1:bframes=0",
             ])
 
+        command.extend(["-movflags", "+faststart"])
         command.append(output_path)
         return command
 
@@ -1816,10 +1859,35 @@ class VideoProcessor:
         if self.status_callback:
             self.status_callback("update", message)
 
-    @staticmethod
-    def _estimate_stream_copy_mux_duration_sec():
-        """Geschätzte Dauer für schnelles Remux (Stream-Copy) beim Final-Schnitt."""
-        return 5.0
+    def _estimate_stream_copy_mux_duration_sec(self, intro_dauer_str, combined_body_path, mux_segments=None):
+        """
+        Geschätzte Dauer für Stream-Copy-Remux beim Final-Schnitt (Fortschrittsbalken).
+        Berücksichtigt Body-Länge und ob Normalisierung/TS-Konvertierung ansteht.
+        """
+        try:
+            intro_sec = float(intro_dauer_str)
+        except (TypeError, ValueError, AttributeError):
+            intro_sec = 8.0
+        body_sec = 0.0
+        if combined_body_path and os.path.exists(combined_body_path):
+            try:
+                body_sec = float(self._get_video_duration(combined_body_path))
+            except Exception:
+                body_sec = 0.0
+
+        if body_sec <= 0:
+            return max(5.0, intro_sec + 2.0)
+
+        # Grobe I/O-Schätzung: ~0,35× Videodauer pro Voll-Durchlauf (Lesen+Schreiben)
+        passes = 1.0
+        if mux_segments:
+            if mux_segments.get('method') == 'ts':
+                passes = 2.0 if mux_segments.get('used_fast_path') else 3.0
+            elif not mux_segments.get('used_fast_path'):
+                passes = 2.0
+
+        estimate = (intro_sec + body_sec) * 0.35 * passes
+        return max(5.0, min(estimate, body_sec * 3.0 + 30.0))
 
     def _estimate_final_output_duration_sec(self, intro_dauer_str, combined_video_path):
         """Schätzt Intro + Hauptvideo für Validierung und Re-Encode-Fortschritt."""

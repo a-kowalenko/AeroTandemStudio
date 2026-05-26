@@ -1,22 +1,26 @@
 import os
 import socket
+import threading
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
 import webbrowser
 
 from src.utils.constants import APP_VERSION, PAYPAL_LOGO_PATH
 from src.gui.components.circular_spinner import CircularSpinner
+from src.gui.components.warning_dialog import WarningDialog
 
 
 class SettingsDialog:
     """Einstellungs-Dialog für Server- und App-Konfiguration"""
 
-    def __init__(self, parent, config, on_settings_saved=None):
+    def __init__(self, parent, config, on_settings_saved=None, app=None):
         self.parent = parent
         self.config = config
+        self.app = app
         self.dialog = None
         self.APP_VERSION = APP_VERSION
         self.on_settings_saved = on_settings_saved  # Callback für nach dem Speichern
+        self._cache_clear_in_progress = False
 
     def show(self):
         """Zeigt den Einstellungs-Dialog"""
@@ -61,6 +65,7 @@ class SettingsDialog:
         self.qr_video_scan_scope_var = tk.StringVar(value="all")
         self.qr_video_parallel_enabled_var = tk.BooleanVar()
         self.qr_video_parallel_workers_var = tk.StringVar(value="2")
+        self.clear_hw_cache_var = tk.BooleanVar(value=False)
 
         self.create_widgets()
         self.load_settings()
@@ -703,20 +708,11 @@ class SettingsDialog:
         qr_frame.pack(fill="x", pady=(0, 10))
         qr_frame.grid_columnconfigure(1, weight=1)
 
-        tk.Label(
-            qr_frame,
-            text="Einstellungen für die automatische QR-Suche in Videoclips.",
-            font=("Arial", 10),
-            fg="gray",
-            wraplength=650,
-            justify="left",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 10))
-
         tk.Label(qr_frame, text="Zu prüfende Clips:", font=("Arial", 10)).grid(
-            row=1, column=0, sticky="nw", padx=5, pady=5,
+            row=0, column=0, sticky="nw", padx=5, pady=5,
         )
         scope_frame = tk.Frame(qr_frame)
-        scope_frame.grid(row=1, column=1, sticky="w", padx=5, pady=5)
+        scope_frame.grid(row=0, column=1, sticky="w", padx=5, pady=5)
         tk.Radiobutton(
             scope_frame,
             text="Nur erster Clip",
@@ -733,47 +729,40 @@ class SettingsDialog:
             font=("Arial", 10),
             command=self._on_qr_scan_scope_changed,
         ).pack(anchor="w")
-        tk.Label(
-            qr_frame,
-            text="„Alle Clips“ entspricht dem bisherigen Verhalten bei mehreren Videos.",
-            font=("Arial", 9),
-            fg="gray",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 8))
-
         tk.Label(qr_frame, text="Scan-Dauer pro Clip (Sek.):", font=("Arial", 10)).grid(
-            row=3, column=0, sticky="w", padx=5, pady=5,
+            row=1, column=0, sticky="w", padx=5, pady=5,
         )
         tk.Entry(
             qr_frame,
             textvariable=self.qr_video_scan_seconds_var,
             font=("Arial", 10),
             width=8,
-        ).grid(row=3, column=1, sticky="w", padx=5, pady=5)
+        ).grid(row=1, column=1, sticky="w", padx=5, pady=5)
         tk.Label(
             qr_frame,
             text="Wie viele Sekunden ab Clip-Anfang geprüft werden (z. B. 3–5).",
             font=("Arial", 9),
             fg="gray",
-        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 8))
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 8))
 
         tk.Label(qr_frame, text="Frame-Abstand:", font=("Arial", 10)).grid(
-            row=5, column=0, sticky="w", padx=5, pady=5,
+            row=3, column=0, sticky="w", padx=5, pady=5,
         )
         tk.Entry(
             qr_frame,
             textvariable=self.qr_video_frame_step_var,
             font=("Arial", 10),
             width=8,
-        ).grid(row=5, column=1, sticky="w", padx=5, pady=5)
+        ).grid(row=3, column=1, sticky="w", padx=5, pady=5)
         tk.Label(
             qr_frame,
             text="Nur jeden N-ten Frame prüfen (10 ≈ 3×/s bei 30 fps). Höher = schneller.",
             font=("Arial", 9),
             fg="gray",
-        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 12))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 12))
 
         separator = ttk.Separator(qr_frame, orient="horizontal")
-        separator.grid(row=7, column=0, columnspan=2, sticky="ew", pady=8)
+        separator.grid(row=5, column=0, columnspan=2, sticky="ew", pady=8)
 
         self.qr_parallel_checkbox = tk.Checkbutton(
             qr_frame,
@@ -782,7 +771,7 @@ class SettingsDialog:
             font=("Arial", 10, "bold"),
             command=self._on_qr_parallel_toggle,
         )
-        self.qr_parallel_checkbox.grid(row=8, column=0, columnspan=2, sticky="w", padx=5, pady=5)
+        self.qr_parallel_checkbox.grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=5)
 
         tk.Label(
             qr_frame,
@@ -791,10 +780,10 @@ class SettingsDialog:
             font=("Arial", 9),
             fg="gray",
             justify="left",
-        ).grid(row=9, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 8))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 8))
 
         self.qr_workers_frame = tk.Frame(qr_frame)
-        self.qr_workers_frame.grid(row=10, column=0, columnspan=2, sticky="w", padx=20, pady=2)
+        self.qr_workers_frame.grid(row=8, column=0, columnspan=2, sticky="w", padx=20, pady=2)
         tk.Label(self.qr_workers_frame, text="Parallele Worker:", font=("Arial", 10)).pack(
             side="left", padx=(0, 8),
         )
@@ -811,6 +800,128 @@ class SettingsDialog:
             font=("Arial", 9),
             fg="gray",
         ).pack(side="left", padx=(8, 0))
+
+        cache_frame = ttk.LabelFrame(
+            self.tab_erweitert,
+            text="Speicher & Cache",
+            padding=(10, 10),
+        )
+        cache_frame.pack(fill="x", pady=(10, 0))
+
+        tk.Label(
+            cache_frame,
+            text=(
+                "Entfernt temporäre Vorschau-Ordner, kombinierte Preview-Dateien und "
+                "Encode-Arbeitsordner (.aerotandem_work) am konfigurierten Speicherort.\n"
+                "Importierte Videos und Fotos in der aktuellen Sitzung werden verworfen. "
+                "Formular-Eingaben und Einstellungen bleiben erhalten."
+            ),
+            font=("Arial", 9),
+            fg="gray",
+            wraplength=650,
+            justify="left",
+        ).pack(anchor="w", padx=5, pady=(0, 8))
+
+        tk.Checkbutton(
+            cache_frame,
+            text="Hardware-Erkennung neu laden (hw_cache.json)",
+            variable=self.clear_hw_cache_var,
+            font=("Arial", 10),
+        ).pack(anchor="w", padx=5, pady=(0, 8))
+
+        self.clear_cache_button = tk.Button(
+            cache_frame,
+            text="Cache löschen…",
+            font=("Arial", 10, "bold"),
+            command=self._on_clear_cache_clicked,
+            bg="#9E9E9E",
+            fg="white",
+            width=18,
+            cursor="hand2",
+        )
+        self.clear_cache_button.pack(anchor="w", padx=5, pady=(0, 4))
+
+    def _on_clear_cache_clicked(self):
+        if not self.app:
+            messagebox.showerror(
+                "Fehler",
+                "Cache-Löschen ist nicht verfügbar (App-Referenz fehlt).",
+                parent=self.dialog,
+            )
+            return
+        if self._cache_clear_in_progress:
+            return
+
+        blocked, reason = self.app._is_session_reset_blocked()
+        if blocked:
+            messagebox.showwarning("Cache löschen nicht möglich", reason, parent=self.dialog)
+            return
+
+        warning = WarningDialog(
+            self.dialog,
+            title="Cache löschen bestätigen",
+            message=(
+                "Alle importierten Videos und Fotos sowie temporäre Vorschau-Dateien "
+                "werden gelöscht.\n\n"
+                "Formular-Eingaben und gespeicherte Einstellungen bleiben unverändert.\n\n"
+                "Fortfahren?"
+            ),
+            confirm_text="Cache löschen",
+            cancel_text="Abbrechen",
+        )
+        if not warning.result:
+            return
+
+        blocked, reason = self.app._is_session_reset_blocked()
+        if blocked:
+            messagebox.showwarning("Cache löschen nicht möglich", reason, parent=self.dialog)
+            return
+
+        self._cache_clear_in_progress = True
+        self.clear_cache_button.config(state=tk.DISABLED)
+        include_hw = self.clear_hw_cache_var.get()
+
+        def run_cleanup():
+            try:
+                result = self.app.clear_application_cache(include_hw_cache=include_hw)
+            except Exception as exc:
+                self.dialog.after(
+                    0,
+                    lambda: self._on_cache_clear_finished(None, str(exc)),
+                )
+                return
+            self.dialog.after(
+                0,
+                lambda: self._on_cache_clear_finished(result, None),
+            )
+
+        threading.Thread(target=run_cleanup, daemon=True).start()
+
+    def _on_cache_clear_finished(self, result, error_message):
+        self._cache_clear_in_progress = False
+        self.clear_cache_button.config(state=tk.NORMAL)
+        if error_message:
+            messagebox.showerror(
+                "Fehler",
+                f"Cache konnte nicht vollständig gelöscht werden:\n{error_message}",
+                parent=self.dialog,
+            )
+            return
+        if result is None:
+            return
+
+        message = result.summary_message()
+        if result.errors:
+            detail = "\n".join(result.errors[:5])
+            if len(result.errors) > 5:
+                detail += f"\n… und {len(result.errors) - 5} weitere"
+            message += f"\n\nDetails:\n{detail}"
+            messagebox.showwarning("Cache teilweise gelöscht", message, parent=self.dialog)
+        else:
+            messagebox.showinfo("Cache gelöscht", message, parent=self.dialog)
+
+        if self.clear_hw_cache_var.get() and self.on_settings_saved:
+            self.on_settings_saved()
 
     def _on_qr_scan_scope_changed(self):
         """Deaktiviert Hybrid-Parallelisierung, wenn nur der erste Clip geprüft wird."""

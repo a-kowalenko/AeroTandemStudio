@@ -1909,10 +1909,24 @@ class VideoProcessor:
         return self._estimate_final_output_duration_sec(intro_dauer_str, combined_video_path)
 
     def _cleanup_temp_files(self, temp_files):
+        work_dirs = set()
         for temp_file in temp_files:
             try:
                 if os.path.exists(temp_file):
                     os.remove(temp_file)
+            except Exception:
+                pass
+            abs_path = os.path.abspath(temp_file)
+            parent = os.path.dirname(abs_path)
+            while parent and parent != os.path.dirname(parent):
+                if os.path.basename(parent) == ".aerotandem_work":
+                    work_dirs.add(parent)
+                    break
+                parent = os.path.dirname(parent)
+        for work_dir in work_dirs:
+            try:
+                if os.path.isdir(work_dir) and not os.listdir(work_dir):
+                    shutil.rmtree(work_dir, ignore_errors=True)
             except Exception:
                 pass
 

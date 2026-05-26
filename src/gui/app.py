@@ -35,6 +35,7 @@ from ..installer.ffmpeg_installer import ensure_ffmpeg_installed
 from ..utils.file_utils import test_server_connection
 from ..installer.updater import initialize_updater
 from ..utils.constants import APP_VERSION
+from ..utils.cache_cleanup import CacheCleanupService
 
 
 def _truthy_session_keep_flag(value) -> bool:
@@ -411,6 +412,9 @@ class VideoGeneratorApp:
         # SD-Monitor verzögert starten (800ms nach Splash-Schließung)
         self.root.after(800, self._delayed_sd_monitor_start)
 
+        # Verwaiste Vorschau-Temp-Ordner im Hintergrund entfernen
+        self.root.after(1200, self._startup_cache_sweep)
+
     def _delayed_sd_monitor_start(self):
         """Startet SD-Monitor verzögert nach UI-Initialisierung"""
         try:
@@ -695,7 +699,8 @@ class VideoGeneratorApp:
         SettingsDialog(
             self.root,
             self.config,
-            on_settings_saved=self.on_settings_saved
+            on_settings_saved=self.on_settings_saved,
+            app=self,
         ).show()
 
     def on_settings_saved(self):
@@ -1849,6 +1854,49 @@ class VideoGeneratorApp:
         except Exception as e:
             print(f"⚠️ Fehler beim Auto-Clear: {e}")
 
+    def _startup_cache_sweep(self):
+        """Entfernt verwaiste Preview-Temp-Ordner nach App-Start (ohne aktive Session)."""
+        exclude = None
+        if getattr(self, "video_preview", None) and self.video_preview.temp_dir:
+            exclude = self.video_preview.temp_dir
+
+        def run():
+            result = CacheCleanupService.cleanup_orphans_only(exclude_temp_dir=exclude)
+            if result.deleted_dirs or result.deleted_files:
+                print(
+                    f"Startup-Cache-Sweep: {len(result.deleted_dirs)} Ordner, "
+                    f"{len(result.deleted_files)} Dateien entfernt."
+                )
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def clear_application_cache(self, include_hw_cache: bool = False):
+        """
+        Leert Medien/Vorschau der aktuellen Session und löscht temporäre App-Dateien.
+        """
+        settings = self.config.get_settings()
+        speicherort = settings.get("speicherort")
+        import_paths = []
+        if self.drag_drop:
+            import_paths = list(self.drag_drop.get_video_paths()) + list(
+                self.drag_drop.get_photo_paths()
+            )
+        base_paths = CacheCleanupService.collect_work_base_paths(
+            speicherort=speicherort,
+            import_paths=import_paths,
+        )
+
+        if hasattr(self, "video_preview") and self.video_preview:
+            self.video_preview.cancel_creation()
+            self.video_preview.clear_preview()
+
+        if self.drag_drop:
+            self.drag_drop.clear_all()
+        return CacheCleanupService.cleanup_all(
+            base_paths_for_work=base_paths,
+            include_hw_cache=include_hw_cache,
+        )
+
     def _is_session_reset_blocked(self):
         """True wenn Zurücksetzen nicht angeboten werden soll (laufende Erstellung / Analyse)."""
         if getattr(self, "loading_window", None):
@@ -2570,9 +2618,9 @@ class VideoGeneratorApp:
         if self.sd_card_monitor:
             self.sd_card_monitor.stop_monitoring()
 
-        # 3. Temporäre Vorschau-Kopien löschen
+        # 3. Vorschau und temporäre Kopien vollständig löschen (inkl. combined MP4)
         if self.video_preview:
-            self.video_preview._cleanup_temp_copies()  # Zugriff auf private Methode für Cleanup
+            self.video_preview.clear_preview()
 
         # 4. Root-Fenster zerstören
         self.root.destroy()

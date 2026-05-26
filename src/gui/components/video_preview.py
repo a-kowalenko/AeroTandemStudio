@@ -2767,10 +2767,27 @@ class VideoPreview:
         """Entfernt einen bestimmten Pfad aus Cache und Map (basierend auf file-identity)."""
         file_identity = self._get_file_identity(original_path)
         if file_identity:
+            copy_path = self.video_copies_map.get(file_identity)
+            if copy_path:
+                self._delete_working_copy_file(copy_path)
             if file_identity in self.video_copies_map:
                 del self.video_copies_map[file_identity]
             if file_identity in self.metadata_cache:
                 del self.metadata_cache[file_identity]
+
+    def _delete_working_copy_file(self, copy_path: str) -> None:
+        """Löscht eine Working-Copy-Datei inkl. Re-Encode-Temp-Geschwister."""
+        if not copy_path:
+            return
+        paths_to_try = [copy_path]
+        base, ext = os.path.splitext(copy_path)
+        paths_to_try.append(f"{base}.__temp_reencode__{ext}")
+        for path in paths_to_try:
+            if path and os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
     def get_all_copy_paths(self):
         """

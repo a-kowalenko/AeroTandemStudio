@@ -1,6 +1,8 @@
 ﻿import platform
 import re
+import traceback
 import tkinter as tk
+from datetime import datetime
 from tkinter import ttk, messagebox
 from tkinterdnd2 import DND_FILES
 import os
@@ -8,9 +10,10 @@ import subprocess
 import time
 import threading
 import shutil
-from typing import Optional
+from typing import List, Optional
 
-from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
+from src.gui.components.error_dialog import ErrorDialog
+from src.utils.constants import LOG_FILE, SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.media_history import MediaHistoryStore
 from src.utils.natural_sort import natural_sort_key, sort_paths_by_basename
 from src.utils.file_times import (
@@ -33,6 +36,8 @@ _DND_PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp")
 _DROP_ZONE_HELP_TEXT = (
     "Videos (.mp4) und Fotos (.jpg, .png) oder Ordner (eine Ebene) hierher ziehen"
 )
+_TEMP_DIR_WAIT_TIMEOUT_SEC = 10.0
+_TEMP_DIR_POLL_INTERVAL_SEC = 0.1
 
 def _norm_import_path(path: str) -> str:
     """Einheitliche Normalisierung für Import-Quell-Pfade (Deduplizierung)."""
@@ -385,19 +390,7 @@ class DragDropFrame:
                 needs_reencoding_info = self._check_if_reencoding_needed(valid_videos)
 
             self.add_files(valid_videos, valid_photos)
-            video_count = len(valid_videos)
-            photo_count = len(valid_photos)
-
-            status_text = ""
-            if video_count > 0:
-                status_text += f"{video_count} Video(s)"
-            if photo_count > 0:
-                if status_text:
-                    status_text += " und "
-                status_text += f"{photo_count} Foto(s)"
-            status_text += " hinzugefügt"
-
-            self.drop_label.config(text=status_text, fg="green")
+            self.drop_label.config(text="Importiere Dateien...", fg="#b8860b")
 
             # Info: Re-Encoding-Info wird in der Konsole ausgegeben
             if needs_reencoding_info and not needs_reencoding_info["compatible"]:
@@ -522,6 +515,67 @@ class DragDropFrame:
 
         return cleaned_paths
 
+    @staticmethod
+    def _log_import_message(message: str, exc: Optional[BaseException] = None) -> None:
+        """Schreibt Import-Fehler in die App-Logdatei und auf die Konsole."""
+        line = f"[{datetime.now().isoformat(timespec='seconds')}] {message}"
+        if exc is not None:
+            line += f"\n{traceback.format_exc()}"
+        print(line)
+        try:
+            os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+            with open(LOG_FILE, "a", encoding="utf-8") as log_file:
+                log_file.write(line + "\n")
+        except OSError:
+            pass
+
+    def _ensure_working_temp_dir(self, timeout_sec: float = _TEMP_DIR_WAIT_TIMEOUT_SEC) -> Optional[str]:
+        """
+        Stellt sicher, dass video_preview.temp_dir existiert (UI-Thread erstellt, Worker wartet).
+        """
+        if not self.app or not hasattr(self.app, "video_preview"):
+            return None
+        video_preview = self.app.video_preview
+        temp_dir = video_preview.temp_dir
+        if temp_dir and os.path.isdir(temp_dir):
+            return temp_dir
+        self.parent.after(0, video_preview._create_temp_directory)
+        deadline = time.time() + timeout_sec
+        while time.time() < deadline:
+            temp_dir = video_preview.temp_dir
+            if temp_dir and os.path.isdir(temp_dir):
+                return temp_dir
+            time.sleep(_TEMP_DIR_POLL_INTERVAL_SEC)
+        return video_preview.temp_dir if video_preview.temp_dir and os.path.isdir(video_preview.temp_dir) else None
+
+    def _schedule_import_finished(
+        self,
+        dialog,
+        *,
+        new_videos_added: bool,
+        new_photos_added: bool,
+        cancelled: bool,
+        pil_photo_cache=None,
+        error_message: Optional[str] = None,
+        unreadable_paths: Optional[List[str]] = None,
+        videos_imported: int = 0,
+        photos_imported: int = 0,
+    ) -> None:
+        self.parent.after(
+            0,
+            lambda: self._on_import_finished(
+                new_videos_added,
+                new_photos_added,
+                dialog,
+                cancelled,
+                pil_photo_cache,
+                error_message=error_message,
+                unreadable_paths=unreadable_paths or [],
+                videos_imported=videos_imported,
+                photos_imported=photos_imported,
+            ),
+        )
+
     def add_files(self, new_videos, new_photos):
         """
         Importiert neue Videos und Fotos.
@@ -542,6 +596,7 @@ class DragDropFrame:
         imported_history_hashes = []
         photo_batch_paths = []
         pil_photo_cache = {}
+        unreadable_paths: List[str] = []
 
         try:
             new_videos = sort_paths_by_basename(list(new_videos)) if new_videos else []
@@ -554,11 +609,14 @@ class DragDropFrame:
             total_bytes = 0
             files_to_process = []
 
-            # Gemeinsamer Arbeitsordner (temp_dir) für Video- und Foto-Kopien
-            if (new_videos or new_photos) and self.app and hasattr(self.app, 'video_preview'):
-                if not self.app.video_preview.temp_dir:
-                    self.parent.after(0, self.app.video_preview._create_temp_directory)
-                    time.sleep(0.5)
+            if new_videos or new_photos:
+                temp_dir = self._ensure_working_temp_dir()
+                if not temp_dir:
+                    raise RuntimeError(
+                        "Der Arbeitsordner für den Import konnte nicht erstellt werden. "
+                        "Bitte Schreibrechte für den Windows-Temp-Ordner prüfen "
+                        f"({os.environ.get('TEMP', '%TEMP%')})."
+                    )
 
             # Prepare videos
             if new_videos:
@@ -571,9 +629,10 @@ class DragDropFrame:
                     try:
                         total_bytes += os.path.getsize(path)
                         files_to_process.append(('video', path))
-                    except:
-                        pass
-            
+                    except OSError as e:
+                        unreadable_paths.append(path)
+                        self._log_import_message(f"Import: Datei nicht lesbar: {path}", e)
+
             # Prepare photos
             if new_photos:
                 for path in new_photos:
@@ -585,8 +644,22 @@ class DragDropFrame:
                     try:
                         total_bytes += os.path.getsize(path)
                         files_to_process.append(('photo', path))
-                    except:
-                        pass
+                    except OSError as e:
+                        unreadable_paths.append(path)
+                        self._log_import_message(f"Import: Datei nicht lesbar: {path}", e)
+
+            if not files_to_process and (new_videos or new_photos):
+                if unreadable_paths:
+                    names = ", ".join(os.path.basename(p) for p in unreadable_paths[:5])
+                    extra = f" (+{len(unreadable_paths) - 5} weitere)" if len(unreadable_paths) > 5 else ""
+                    raise RuntimeError(
+                        f"Keine der Dateien konnte gelesen werden: {names}{extra}"
+                    )
+                if skip_processed and skip_processed_manual:
+                    raise RuntimeError(
+                        "Alle ausgewählten Dateien wurden bereits importiert "
+                        "(Einstellung „Bereits verarbeitete überspringen“)."
+                    )
 
             copied_bytes = 0
 
@@ -601,7 +674,12 @@ class DragDropFrame:
                 file_size = os.path.getsize(source_path)
                 
                 if ftype == 'video':
-                    temp_dir = self.app.video_preview.temp_dir
+                    temp_dir = self._ensure_working_temp_dir()
+                    if not temp_dir:
+                        raise RuntimeError(
+                            "Arbeitsordner für Video-Import nicht verfügbar. "
+                            "Bitte Temp-Ordner und Schreibrechte prüfen."
+                        )
                     safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
                     dest_path = os.path.join(temp_dir, safe_filename)
                     if os.path.exists(dest_path):
@@ -690,10 +768,12 @@ class DragDropFrame:
                 elif ftype == 'photo':
                     if not self.app or not hasattr(self.app, 'video_preview'):
                         continue
-                    temp_dir = self.app.video_preview.temp_dir
+                    temp_dir = self._ensure_working_temp_dir()
                     if not temp_dir:
-                        print("  ⚠️ Working-Folder nicht verfügbar — Foto übersprungen")
-                        continue
+                        raise RuntimeError(
+                            "Arbeitsordner für Foto-Import nicht verfügbar. "
+                            "Bitte Temp-Ordner und Schreibrechte prüfen."
+                        )
 
                     src_key = _norm_import_path(source_path)
                     if src_key in self._active_imported_photo_sources:
@@ -864,67 +944,159 @@ class DragDropFrame:
             cancelled = dialog.cancel_requested.is_set()
             cache_snapshot = pil_photo_cache if not cancelled else {}
 
-            self.parent.after(0, lambda nva=new_videos_added, npa=new_photos_added, d=dialog,
-                               c=cancelled, cs=cache_snapshot: self._on_import_finished(
-                                   nva, npa, d, c, cs))
+            self._schedule_import_finished(
+                dialog,
+                new_videos_added=new_videos_added,
+                new_photos_added=new_photos_added,
+                cancelled=cancelled,
+                pil_photo_cache=cache_snapshot,
+                unreadable_paths=unreadable_paths,
+                videos_imported=len(imported_paths) if not cancelled else 0,
+                photos_imported=len(photo_batch_paths) if not cancelled else 0,
+            )
 
         except Exception as e:
-            print(f"Error during async import: {e}")
-            self.parent.after(0, dialog.destroy)
+            self._log_import_message("Error during async import", e)
+            self._schedule_import_finished(
+                dialog,
+                new_videos_added=False,
+                new_photos_added=False,
+                cancelled=False,
+                error_message=str(e),
+                unreadable_paths=unreadable_paths,
+            )
 
-    def _on_import_finished(self, new_videos_added, new_photos_added, dialog, cancelled, pil_photo_cache=None):
+    def _update_drop_label_after_import(
+        self,
+        *,
+        new_videos_added: bool,
+        new_photos_added: bool,
+        cancelled: bool,
+        error_message: Optional[str],
+        videos_imported: int,
+        photos_imported: int,
+    ) -> None:
+        if error_message:
+            self.drop_label.config(text="Import fehlgeschlagen", fg="red")
+            return
+        if cancelled:
+            self.drop_label.config(text=_DROP_ZONE_HELP_TEXT, fg="black")
+            return
+        if videos_imported or photos_imported:
+            parts = []
+            if videos_imported:
+                parts.append(f"{videos_imported} Video(s)")
+            if photos_imported:
+                parts.append(f"{photos_imported} Foto(s)")
+            self.drop_label.config(text=" und ".join(parts) + " hinzugefügt", fg="green")
+            return
+        self.drop_label.config(text="Keine Dateien importiert", fg="red")
+
+    def _on_import_finished(
+        self,
+        new_videos_added,
+        new_photos_added,
+        dialog,
+        cancelled,
+        pil_photo_cache=None,
+        *,
+        error_message: Optional[str] = None,
+        unreadable_paths: Optional[List[str]] = None,
+        videos_imported: int = 0,
+        photos_imported: int = 0,
+    ):
         dialog.destroy()
-        
+        unreadable_paths = unreadable_paths or []
+
+        self._update_drop_label_after_import(
+            new_videos_added=new_videos_added,
+            new_photos_added=new_photos_added,
+            cancelled=cancelled,
+            error_message=error_message,
+            videos_imported=videos_imported,
+            photos_imported=photos_imported,
+        )
+
+        if error_message:
+            details = []
+            if unreadable_paths:
+                details.append("Nicht lesbare Dateien:")
+                details.extend(os.path.basename(p) for p in unreadable_paths[:10])
+                if len(unreadable_paths) > 10:
+                    details.append(f"... und {len(unreadable_paths) - 10} weitere")
+            try:
+                ErrorDialog(
+                    self.parent,
+                    "Import fehlgeschlagen",
+                    error_message,
+                    details=details or None,
+                )
+            except Exception as dialog_err:
+                self._log_import_message("Import-Fehlerdialog konnte nicht geöffnet werden", dialog_err)
+                messagebox.showerror("Import fehlgeschlagen", error_message, parent=self.parent)
+            return
+
         if cancelled:
             # Revert photo paths that were appended during the run
             # For a proper rollback we should probably rebuild or reload but we will leave this simple logic as we didn't store old photo_paths.
             # In a real scenario we'd do a deep copy before. 
             pass
-        else:
-            self._update_video_table()
-            self._update_photo_table()
+            return
 
-            if new_videos_added and self.show_watermark_column and self.watermark_clip_index is None:
-                self._auto_select_longest_video()
+        if not new_videos_added and not new_photos_added:
+            if unreadable_paths:
+                names = ", ".join(os.path.basename(p) for p in unreadable_paths[:5])
+                messagebox.showwarning(
+                    "Import",
+                    f"Es konnten keine Dateien importiert werden.\nNicht lesbar: {names}",
+                    parent=self.parent,
+                )
+            return
 
-            if new_videos_added:
-                self._update_app_preview()
+        self._update_video_table()
+        self._update_photo_table()
 
-            if new_photos_added:
-                self._update_photo_preview(pil_photo_cache)
+        if new_videos_added and self.show_watermark_column and self.watermark_clip_index is None:
+            self._auto_select_longest_video()
 
-            if (new_videos_added or new_photos_added) and self.app and hasattr(self.app, 'form_fields'):
-                self.app.form_fields.auto_check_products(new_videos_added, new_photos_added)
-                if hasattr(self.app, 'update_watermark_column_visibility'):
-                    self.app.update_watermark_column_visibility()
+        if new_videos_added:
+            self._update_app_preview()
 
-            # Wenn ausschließlich Fotos hinzugefügt wurden, automatisch
-            # auf Foto-Tab (links) und Foto Vorschau (rechts) wechseln.
-            if new_photos_added and not new_videos_added:
-                try:
-                    self.notebook.select(self.photo_tab)
-                except Exception as e:
-                    print(f"⚠️ Fehler beim Wechsel auf Foto-Tab: {e}")
+        if new_photos_added:
+            self._update_photo_preview(pil_photo_cache)
 
-                try:
-                    if self.app and hasattr(self.app, 'preview_notebook') and hasattr(self.app, 'foto_tab'):
-                        self.app.preview_notebook.select(self.app.foto_tab)
-                except Exception as e:
-                    print(f"⚠️ Fehler beim Wechsel auf Foto Vorschau-Tab: {e}")
+        if (new_videos_added or new_photos_added) and self.app and hasattr(self.app, 'form_fields'):
+            self.app.form_fields.auto_check_products(new_videos_added, new_photos_added)
+            if hasattr(self.app, 'update_watermark_column_visibility'):
+                self.app.update_watermark_column_visibility()
 
-            # Wenn ausschließlich Videos hinzugefügt wurden, automatisch
-            # auf Video-Tab (links) und Video Vorschau (rechts) wechseln.
-            if new_videos_added and not new_photos_added:
-                try:
-                    self.notebook.select(self.video_tab)
-                except Exception as e:
-                    print(f"⚠️ Fehler beim Wechsel auf Video-Tab: {e}")
+        # Wenn ausschließlich Fotos hinzugefügt wurden, automatisch
+        # auf Foto-Tab (links) und Foto Vorschau (rechts) wechseln.
+        if new_photos_added and not new_videos_added:
+            try:
+                self.notebook.select(self.photo_tab)
+            except Exception as e:
+                print(f"⚠️ Fehler beim Wechsel auf Foto-Tab: {e}")
 
-                try:
-                    if self.app and hasattr(self.app, 'preview_notebook') and hasattr(self.app, 'video_tab'):
-                        self.app.preview_notebook.select(self.app.video_tab)
-                except Exception as e:
-                    print(f"⚠️ Fehler beim Wechsel auf Video Vorschau-Tab: {e}")
+            try:
+                if self.app and hasattr(self.app, 'preview_notebook') and hasattr(self.app, 'foto_tab'):
+                    self.app.preview_notebook.select(self.app.foto_tab)
+            except Exception as e:
+                print(f"⚠️ Fehler beim Wechsel auf Foto Vorschau-Tab: {e}")
+
+        # Wenn ausschließlich Videos hinzugefügt wurden, automatisch
+        # auf Video-Tab (links) und Video Vorschau (rechts) wechseln.
+        if new_videos_added and not new_photos_added:
+            try:
+                self.notebook.select(self.video_tab)
+            except Exception as e:
+                print(f"⚠️ Fehler beim Wechsel auf Video-Tab: {e}")
+
+            try:
+                if self.app and hasattr(self.app, 'preview_notebook') and hasattr(self.app, 'video_tab'):
+                    self.app.preview_notebook.select(self.app.video_tab)
+            except Exception as e:
+                print(f"⚠️ Fehler beim Wechsel auf Video Vorschau-Tab: {e}")
 
     def _import_video(self, source_path):
         """

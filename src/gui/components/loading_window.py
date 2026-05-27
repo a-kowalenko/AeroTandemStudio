@@ -39,9 +39,10 @@ class LoadingWindow(tk.Toplevel):
         )
 
         if detail_mode:
+            initial_status = text if text else "Prüfe auf QR-Code"
             self.status_label = tk.Label(
                 self,
-                text="Prüfe Video auf QR-Code",
+                text=initial_status,
                 padx=20,
                 pady=2,
                 font=("Helvetica", 10),
@@ -85,9 +86,22 @@ class LoadingWindow(tk.Toplevel):
             self.label.pack(pady=(10, 0))
 
         bar_width = 460 if detail_mode else 260
-        self.progress = ttk.Progressbar(self, mode="indeterminate", length=bar_width)
+        if detail_mode:
+            self.progress = ttk.Progressbar(
+                self,
+                mode="determinate",
+                length=bar_width,
+                maximum=100,
+            )
+        else:
+            self.progress = ttk.Progressbar(
+                self,
+                mode="indeterminate",
+                length=bar_width,
+            )
         self.progress.pack(pady=10, padx=20, fill="x")
-        self.progress.start(15)
+        if not detail_mode:
+            self.progress.start(15)
 
         if on_cancel is not None:
             self.cancel_button = tk.Button(
@@ -99,13 +113,13 @@ class LoadingWindow(tk.Toplevel):
             self.cancel_button.pack(pady=(0, 10))
 
         if detail_mode:
-            primary = ""
-            if text:
-                primary = text.split("\n")[-1] if "\n" in text else text
+            initial_status = text if text else "Prüfe auf QR-Code"
             self.update_qr_progress(
-                "Prüfe Video auf QR-Code",
-                "Clip 1 von 1",
-                primary or "—",
+                initial_status,
+                "",
+                "—",
+                completed_count=0,
+                total=1,
             )
 
         self.update_idletasks()
@@ -134,6 +148,9 @@ class LoadingWindow(tk.Toplevel):
         progress_text: str,
         primary_file: str,
         active_files: Optional[List[str]] = None,
+        *,
+        completed_count: Optional[int] = None,
+        total: Optional[int] = None,
     ):
         """Detail-Anzeige für QR-Suche (aktueller Clip / parallele Clips)."""
         if not self._detail_mode:
@@ -147,6 +164,11 @@ class LoadingWindow(tk.Toplevel):
 
         self.status_label.config(text=status)
         self.progress_label.config(text=progress_text)
+
+        if completed_count is not None and total is not None and total > 0:
+            percent = min(100.0, max(0.0, (completed_count / total) * 100))
+            self.progress.config(mode="determinate", maximum=100)
+            self.progress["value"] = percent
 
         active = [f for f in (active_files or []) if f]
         if len(active) > 1:

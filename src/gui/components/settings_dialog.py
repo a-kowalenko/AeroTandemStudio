@@ -69,6 +69,7 @@ class SettingsDialog:
         self.qr_video_scan_scope_var = tk.StringVar(value="all")
         self.qr_video_parallel_enabled_var = tk.BooleanVar()
         self.qr_video_parallel_workers_var = tk.StringVar(value="2")
+        self.qr_photo_parallel_enabled_var = tk.BooleanVar()
         self.clear_hw_cache_var = tk.BooleanVar(value=False)
         self.oldschool_mode_var = tk.BooleanVar(value=False)
 
@@ -1001,19 +1002,60 @@ class SettingsDialog:
         threading.Thread(target=detect_cpu_info_async, daemon=True).start()
 
     def create_erweitert_tab(self):
-        """Erstellt den Tab 'Erweitert' (Video-QR-Analyse)."""
-        qr_frame = ttk.LabelFrame(
+        """Erstellt den Tab 'Erweitert' (QR-Code-Analyse)."""
+        qr_root_frame = ttk.LabelFrame(
             self.tab_erweitert,
-            text="Video-QR-Code Analyse",
+            text="QR-Code Analyse",
             padding=(10, 10),
         )
-        qr_frame.pack(fill="x", pady=(0, 10))
-        qr_frame.grid_columnconfigure(1, weight=1)
+        qr_root_frame.pack(fill="x", pady=(0, 10))
+        qr_root_frame.grid_columnconfigure(1, weight=1)
 
-        tk.Label(qr_frame, text="Zu prüfende Clips:", font=("Arial", 10)).grid(
+        tk.Label(
+            qr_root_frame,
+            text="Parallele Worker:",
+            font=("Arial", 10),
+        ).grid(row=0, column=0, sticky="w", padx=5, pady=(0, 5))
+        workers_frame = tk.Frame(qr_root_frame)
+        workers_frame.grid(row=0, column=1, sticky="w", padx=5, pady=(0, 5))
+        self.qr_workers_entry = tk.Entry(
+            workers_frame,
+            textvariable=self.qr_video_parallel_workers_var,
+            font=("Arial", 10),
+            width=5,
+        )
+        self.qr_workers_entry.pack(side="left")
+        tk.Label(
+            workers_frame,
+            text="(1–4, Standard: 2)",
+            font=("Arial", 9),
+            fg="gray",
+        ).pack(side="left", padx=(8, 0))
+        tk.Label(
+            qr_root_frame,
+            text="Gilt für Video- und Foto-Parallelmodus. Ab 2 Workern startet ein Worker "
+                 "am Ende der Liste, die übrigen am Anfang.",
+            font=("Arial", 9),
+            fg="gray",
+            justify="left",
+            wraplength=620,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 10))
+
+        qr_separator = ttk.Separator(qr_root_frame, orient="horizontal")
+        qr_separator.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+
+        video_qr_frame = ttk.LabelFrame(
+            qr_root_frame,
+            text="Videos",
+            padding=(8, 8),
+        )
+        video_qr_frame.grid(row=3, column=0, columnspan=2, sticky="ew", padx=2, pady=(0, 8))
+        video_qr_frame.grid_columnconfigure(1, weight=1)
+
+        tk.Label(video_qr_frame, text="Zu prüfende Clips:", font=("Arial", 10)).grid(
             row=0, column=0, sticky="nw", padx=5, pady=5,
         )
-        scope_frame = tk.Frame(qr_frame)
+        scope_frame = tk.Frame(video_qr_frame)
         scope_frame.grid(row=0, column=1, sticky="w", padx=5, pady=5)
         tk.Radiobutton(
             scope_frame,
@@ -1031,77 +1073,78 @@ class SettingsDialog:
             font=("Arial", 10),
             command=self._on_qr_scan_scope_changed,
         ).pack(anchor="w")
-        tk.Label(qr_frame, text="Scan-Dauer pro Clip (Sek.):", font=("Arial", 10)).grid(
+
+        tk.Label(video_qr_frame, text="Scan-Dauer pro Clip (Sek.):", font=("Arial", 10)).grid(
             row=1, column=0, sticky="w", padx=5, pady=5,
         )
         tk.Entry(
-            qr_frame,
+            video_qr_frame,
             textvariable=self.qr_video_scan_seconds_var,
             font=("Arial", 10),
             width=8,
         ).grid(row=1, column=1, sticky="w", padx=5, pady=5)
         tk.Label(
-            qr_frame,
+            video_qr_frame,
             text="Wie viele Sekunden ab Clip-Anfang geprüft werden (z. B. 3–5).",
             font=("Arial", 9),
             fg="gray",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 8))
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 6))
 
-        tk.Label(qr_frame, text="Frame-Abstand:", font=("Arial", 10)).grid(
+        tk.Label(video_qr_frame, text="Frame-Abstand:", font=("Arial", 10)).grid(
             row=3, column=0, sticky="w", padx=5, pady=5,
         )
         tk.Entry(
-            qr_frame,
+            video_qr_frame,
             textvariable=self.qr_video_frame_step_var,
             font=("Arial", 10),
             width=8,
         ).grid(row=3, column=1, sticky="w", padx=5, pady=5)
         tk.Label(
-            qr_frame,
+            video_qr_frame,
             text="Nur jeden N-ten Frame prüfen (10 ≈ 3×/s bei 30 fps). Höher = schneller.",
             font=("Arial", 9),
             fg="gray",
-        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 12))
-
-        separator = ttk.Separator(qr_frame, orient="horizontal")
-        separator.grid(row=5, column=0, columnspan=2, sticky="ew", pady=8)
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 8))
 
         self.qr_parallel_checkbox = tk.Checkbutton(
-            qr_frame,
+            video_qr_frame,
             text="Parallele Clip-Prüfung (Hybrid)",
             variable=self.qr_video_parallel_enabled_var,
             font=("Arial", 10, "bold"),
-            command=self._on_qr_parallel_toggle,
         )
-        self.qr_parallel_checkbox.grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=5)
-
+        self.qr_parallel_checkbox.grid(row=5, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 4))
         tk.Label(
-            qr_frame,
-            text="Clip 1 wird zuerst allein geprüft. Nur wenn dort kein QR gefunden wird,\n"
-                 "werden die übrigen Clips parallel durchsucht (nur bei „Alle Clips“).",
+            video_qr_frame,
+            text="Clip 1 wird zuerst allein geprüft. Danach werden die übrigen Clips parallel "
+                 "durchsucht (nur bei „Alle Clips“).",
             font=("Arial", 9),
             fg="gray",
             justify="left",
-        ).grid(row=7, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 8))
+            wraplength=580,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 4))
 
-        self.qr_workers_frame = tk.Frame(qr_frame)
-        self.qr_workers_frame.grid(row=8, column=0, columnspan=2, sticky="w", padx=20, pady=2)
-        tk.Label(self.qr_workers_frame, text="Parallele Worker:", font=("Arial", 10)).pack(
-            side="left", padx=(0, 8),
+        photo_qr_frame = ttk.LabelFrame(
+            qr_root_frame,
+            text="Fotos",
+            padding=(8, 8),
         )
-        self.qr_workers_entry = tk.Entry(
-            self.qr_workers_frame,
-            textvariable=self.qr_video_parallel_workers_var,
-            font=("Arial", 10),
-            width=5,
+        photo_qr_frame.grid(row=4, column=0, columnspan=2, sticky="ew", padx=2, pady=(0, 2))
+
+        self.qr_photo_parallel_checkbox = tk.Checkbutton(
+            photo_qr_frame,
+            text="Parallele Foto-Prüfung (bidirektional)",
+            variable=self.qr_photo_parallel_enabled_var,
+            font=("Arial", 10, "bold"),
         )
-        self.qr_workers_entry.pack(side="left")
+        self.qr_photo_parallel_checkbox.pack(anchor="w", padx=5, pady=(0, 4))
         tk.Label(
-            self.qr_workers_frame,
-            text="(1–4, Standard: 2)",
+            photo_qr_frame,
+            text="Alle Fotos werden parallel durchsucht (Abbruch beim ersten Treffer).",
             font=("Arial", 9),
             fg="gray",
-        ).pack(side="left", padx=(8, 0))
+            justify="left",
+            wraplength=580,
+        ).pack(anchor="w", padx=20, pady=(0, 4))
 
         cache_frame = ttk.LabelFrame(
             self.tab_erweitert,
@@ -1226,21 +1269,12 @@ class SettingsDialog:
             self.on_settings_saved()
 
     def _on_qr_scan_scope_changed(self):
-        """Deaktiviert Hybrid-Parallelisierung, wenn nur der erste Clip geprüft wird."""
+        """Deaktiviert Video-Parallelisierung, wenn nur der erste Clip geprüft wird."""
         first_only = self.qr_video_scan_scope_var.get() == "first"
         parallel_state = tk.DISABLED if first_only else tk.NORMAL
         self.qr_parallel_checkbox.config(state=parallel_state)
         if first_only:
             self.qr_video_parallel_enabled_var.set(False)
-        self._on_qr_parallel_toggle()
-
-    def _on_qr_parallel_toggle(self):
-        """Aktiviert/deaktiviert die Worker-Eingabe."""
-        if self.qr_video_scan_scope_var.get() == "first":
-            self.qr_workers_entry.config(state=tk.DISABLED)
-            return
-        state = tk.NORMAL if self.qr_video_parallel_enabled_var.get() else tk.DISABLED
-        self.qr_workers_entry.config(state=state)
 
     def create_extras_tab(self):
         """Erstellt den Tab 'Version'"""
@@ -1609,6 +1643,7 @@ class SettingsDialog:
         self.qr_video_frame_step_var.set(str(settings.get("qr_video_frame_step", 10)))
         self.qr_video_parallel_enabled_var.set(settings.get("qr_video_parallel_enabled", False))
         self.qr_video_parallel_workers_var.set(str(settings.get("qr_video_parallel_workers", 2)))
+        self.qr_photo_parallel_enabled_var.set(settings.get("qr_photo_parallel_enabled", False))
         self._on_qr_scan_scope_changed()
 
         # Trigger checkbox visibility based on auto_backup setting
@@ -1694,6 +1729,7 @@ class SettingsDialog:
             return
 
         qr_video_parallel_enabled = self.qr_video_parallel_enabled_var.get()
+        qr_photo_parallel_enabled = self.qr_photo_parallel_enabled_var.get()
         try:
             qr_video_parallel_workers = int(self.qr_video_parallel_workers_var.get().strip())
             if qr_video_parallel_workers < 1 or qr_video_parallel_workers > 4:
@@ -1766,6 +1802,7 @@ class SettingsDialog:
             current_settings["qr_video_frame_step"] = qr_video_frame_step
             current_settings["qr_video_parallel_enabled"] = qr_video_parallel_enabled
             current_settings["qr_video_parallel_workers"] = qr_video_parallel_workers
+            current_settings["qr_photo_parallel_enabled"] = qr_photo_parallel_enabled
 
             # Speichern
             self.config.save_settings(current_settings)

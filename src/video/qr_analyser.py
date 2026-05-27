@@ -7,6 +7,7 @@ from typing import Callable, List, Optional, Tuple
 from pyzbar.pyzbar import decode
 
 from src.model.kunde import Kunde
+from src.video.qr_parallel_allocator import BidirectionalIndexAllocator
 
 _MAX_QR_DECODE_WIDTH = 1920
 _MAX_QR_VIDEO_DECODE_WIDTH = 1280
@@ -77,68 +78,195 @@ def _is_cancelled(cancel_check: Optional[Callable[[], bool]]) -> bool:
     return cancel_check is not None and cancel_check()
 
 
-def _emit_video_qr_progress(
+def _combined_stop_check(
+    cancel_check: Optional[Callable[[], bool]],
+    stop_event: Optional[threading.Event] = None,
+) -> Callable[[], bool]:
+    """Kombiniert Benutzer-Abbruch und frühzeitigen Stopp (z. B. nach QR-Treffer)."""
+
+    def check() -> bool:
+        if stop_event is not None and stop_event.is_set():
+            return True
+        return _is_cancelled(cancel_check)
+
+    return check
+
+
+def _emit_qr_progress(
     progress_callback: Optional[Callable[..., None]],
-    clip_index: int,
+    item_index: int,
     total: int,
     basename: str,
     *,
     phase: str = "scanning",
     active_basenames: Optional[List[str]] = None,
+    completed_count: Optional[int] = None,
 ) -> None:
     if progress_callback is None:
         return
     progress_callback(
-        clip_index,
+        item_index,
         total,
         basename,
         phase=phase,
         active_basenames=active_basenames or [],
+        completed_count=completed_count,
     )
 
 
-class _ParallelClipProgressTracker:
-    """Thread-sichere Liste der gerade parallel geprüften Clips."""
+class _ParallelProgressTracker:
+    """Thread-sichere Liste der gerade parallel geprüften Dateien."""
 
     def __init__(
         self,
         progress_callback: Optional[Callable[..., None]],
         total: int,
+        *,
+        initial_completed: int = 0,
     ):
         self._progress_callback = progress_callback
         self._total = total
+        self._completed = initial_completed
         self._lock = threading.Lock()
         self._active: dict[str, int] = {}
 
-    def clip_started(self, clip_index: int, basename: str) -> None:
-        with self._lock:
-            self._active[basename] = clip_index
-            active = sorted(self._active.keys())
-        _emit_video_qr_progress(
+    def _emit(self, item_index: int, basename: str, active: List[str]) -> None:
+        _emit_qr_progress(
             self._progress_callback,
-            clip_index,
+            item_index,
             self._total,
             basename,
             phase="parallel",
             active_basenames=active,
+            completed_count=self._completed,
         )
 
-    def clip_finished(self, clip_index: int, basename: str) -> None:
+    def item_started(self, item_index: int, basename: str) -> None:
+        with self._lock:
+            self._active[basename] = item_index
+            active = sorted(self._active.keys())
+        self._emit(item_index, basename, active)
+
+    def item_finished(self, item_index: int, basename: str) -> None:
         with self._lock:
             self._active.pop(basename, None)
+            self._completed += 1
+            completed = self._completed
             active = sorted(self._active.keys())
-        if not active:
-            return
-        first_name = active[0]
-        first_index = self._active.get(first_name, clip_index)
-        _emit_video_qr_progress(
-            self._progress_callback,
-            first_index,
-            self._total,
-            first_name,
-            phase="parallel",
-            active_basenames=active,
-        )
+            if active:
+                first_name = active[0]
+                first_index = self._active.get(first_name, item_index)
+            else:
+                first_name = basename
+                first_index = item_index
+
+        if active:
+            self._emit(first_index, first_name, active)
+        else:
+            _emit_qr_progress(
+                self._progress_callback,
+                item_index,
+                self._total,
+                basename,
+                phase="parallel",
+                active_basenames=[],
+                completed_count=completed,
+            )
+
+
+def _run_parallel_bidirectional_scan(
+    items: List[str],
+    *,
+    index_offset: int,
+    total: int,
+    scan_one: Callable[
+        [str, int, int, Optional[Callable[[], bool]]],
+        Tuple[Optional[Kunde], bool],
+    ],
+    parallel_workers: int,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable[..., None]] = None,
+    log_label: str = "Item",
+    initial_completed: int = 0,
+) -> Tuple[Optional[Kunde], bool, Optional[str], bool]:
+    """
+    Parallele bidirektionale Suche über items (0-basiert).
+    index_offset: 1-basierter Index von items[0] in der Gesamtliste.
+    """
+    if not items:
+        return None, False, None, False
+
+    workers = max(1, min(int(parallel_workers), len(items)))
+    allocator = BidirectionalIndexAllocator(0, len(items) - 1)
+    parallel_tracker = _ParallelProgressTracker(
+        progress_callback,
+        total,
+        initial_completed=initial_completed,
+    )
+    stop_event = threading.Event()
+    stop_check = _combined_stop_check(cancel_check, stop_event)
+
+    def _worker(direction: str) -> Tuple[Optional[Kunde], bool, Optional[str]]:
+        while True:
+            if stop_check():
+                return None, False, None
+
+            list_index = (
+                allocator.next_backward()
+                if direction == "backward"
+                else allocator.next_forward()
+            )
+            if list_index is None:
+                return None, False, None
+
+            item_path = items[list_index]
+            item_index = index_offset + list_index
+            basename = os.path.basename(item_path)
+
+            parallel_tracker.item_started(item_index, basename)
+            try:
+                kunde, ok = scan_one(item_path, item_index, total, stop_check)
+                if ok and kunde:
+                    stop_event.set()
+                    return kunde, True, item_path
+            finally:
+                if not stop_event.is_set():
+                    parallel_tracker.item_finished(item_index, basename)
+
+        return None, False, None
+
+    executor = ThreadPoolExecutor(max_workers=workers)
+    futures = []
+    try:
+        if workers >= 2:
+            futures.append(executor.submit(_worker, "backward"))
+            for _ in range(workers - 1):
+                futures.append(executor.submit(_worker, "forward"))
+        else:
+            futures.append(executor.submit(_worker, "forward"))
+
+        for future in as_completed(futures):
+            if _is_cancelled(cancel_check):
+                stop_event.set()
+                for pending in futures:
+                    pending.cancel()
+                return None, False, None, True
+
+            try:
+                kunde, ok, source_path = future.result()
+            except Exception as e:
+                print(f"Fehler bei paralleler QR-Analyse ({log_label}): {e}")
+                continue
+
+            if ok and kunde and source_path:
+                stop_event.set()
+                for pending in futures:
+                    pending.cancel()
+                return kunde, True, source_path, False
+    finally:
+        executor.shutdown(wait=not stop_event.is_set(), cancel_futures=True)
+
+    return None, False, None, False
 
 
 def _prepare_frame_for_qr(frame):
@@ -257,6 +385,7 @@ def analysiere_ersten_clip(
     clip_index: Optional[int] = None,
     total_clips: Optional[int] = None,
     progress_callback: Optional[Callable[..., None]] = None,
+    progress_phase: str = "scanning",
 ) -> Tuple[Optional[Kunde], bool]:
     """
     Analysiert die ersten scan_seconds Sekunden eines Videoclips auf einen QR-Code.
@@ -281,12 +410,13 @@ def analysiere_ersten_clip(
 
     basename = os.path.basename(video_pfad)
     if progress_callback and clip_index is not None and total_clips is not None:
-        _emit_video_qr_progress(
+        _emit_qr_progress(
             progress_callback,
             clip_index,
             total_clips,
             basename,
-            phase="scanning",
+            phase=progress_phase,
+            completed_count=clip_index - 1,
         )
 
     cap = cv2.VideoCapture(video_pfad)
@@ -432,7 +562,13 @@ def analysiere_fotos_bis_erster_treffer(
             return None, False, None, True
 
         if progress_callback:
-            progress_callback(index, total, os.path.basename(foto_pfad))
+            progress_callback(
+                index,
+                total,
+                os.path.basename(foto_pfad),
+                phase="scanning",
+                completed_count=index - 1,
+            )
 
         image = _load_image_for_qr(foto_pfad)
         if image is None:
@@ -450,6 +586,15 @@ def analysiere_fotos_bis_erster_treffer(
                 f"{os.path.basename(foto_pfad)}"
             )
             return kunde, True, foto_pfad, False
+
+        if progress_callback:
+            progress_callback(
+                index,
+                total,
+                os.path.basename(foto_pfad),
+                phase="scanning",
+                completed_count=index,
+            )
 
     print(f"Kein gültiger QR-Code in {total} Foto(s) gefunden.")
     return None, False, None, False
@@ -500,50 +645,70 @@ def analysiere_videos_bis_erster_treffer(
             )
             return kunde, True, video_pfad, False
 
+        if progress_callback:
+            _emit_qr_progress(
+                progress_callback,
+                index,
+                total,
+                os.path.basename(video_pfad),
+                phase="scanning",
+                completed_count=index,
+            )
+
     print(f"Kein gültiger QR-Code in {total} Clip(s) gefunden.")
     return None, False, None, False
 
 
-def _scan_clip_for_kunde(
+def _scan_video_for_kunde(
     video_pfad: str,
-    clip_index: int,
+    item_index: int,
     total: int,
+    cancel_check: Optional[Callable[[], bool]],
     *,
-    cancel_check: Optional[Callable[[], bool]] = None,
     scan_seconds: float = DEFAULT_QR_VIDEO_SCAN_SECONDS,
     frame_step: int = DEFAULT_QR_VIDEO_FRAME_STEP,
-    parallel_tracker: Optional[_ParallelClipProgressTracker] = None,
-) -> Tuple[int, Optional[Kunde], bool, str]:
-    """Hilfsfunktion für parallele Clip-Suche."""
-    basename = os.path.basename(video_pfad)
-    if parallel_tracker:
-        parallel_tracker.clip_started(clip_index, basename)
-    try:
-        kunde, ok = analysiere_ersten_clip(
-            video_pfad,
-            cancel_check=cancel_check,
-            scan_seconds=scan_seconds,
-            frame_step=frame_step,
-            clip_index=clip_index,
-            total_clips=total,
-        )
-        return clip_index, kunde, ok, video_pfad
-    finally:
-        if parallel_tracker:
-            parallel_tracker.clip_finished(clip_index, basename)
+) -> Tuple[Optional[Kunde], bool]:
+    """Scannt einen Videoclip ohne Progress-Callback (für parallele Phase)."""
+    return analysiere_ersten_clip(
+        video_pfad,
+        cancel_check=cancel_check,
+        scan_seconds=scan_seconds,
+        frame_step=frame_step,
+    )
+
+
+def _scan_foto_for_kunde(
+    foto_pfad: str,
+    item_index: int,
+    total: int,
+    cancel_check: Optional[Callable[[], bool]],
+) -> Tuple[Optional[Kunde], bool]:
+    """Scannt ein Foto ohne Progress-Callback (für parallele Phase)."""
+    if _is_cancelled(cancel_check):
+        return None, False
+
+    image = _load_image_for_qr(foto_pfad)
+    if image is None:
+        print(f"Fehler: Foto konnte nicht geladen werden: {foto_pfad}")
+        return None, False
+
+    if _is_cancelled(cancel_check):
+        return None, False
+
+    return _decode_kunde_from_image(image)
 
 
 def analysiere_videos_hybrid_bis_erster_treffer(
     video_pfade: list[str],
     *,
-    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    progress_callback: Optional[Callable[..., None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     scan_seconds: float = DEFAULT_QR_VIDEO_SCAN_SECONDS,
     frame_step: int = DEFAULT_QR_VIDEO_FRAME_STEP,
     parallel_workers: int = 2,
 ) -> Tuple[Optional[Kunde], bool, Optional[str], bool]:
     """
-    Hybrid B: Clip 1 sequentiell, Clips 2..N parallel (ThreadPool).
+    Hybrid: Clip 1 sequentiell, Clips 2..N parallel bidirektional.
     Bricht beim ersten gültigen Treffer oder bei Benutzer-Abbruch ab.
     """
     if cv2 is None:
@@ -554,6 +719,7 @@ def analysiere_videos_hybrid_bis_erster_treffer(
         return None, False, None, False
 
     total = len(video_pfade)
+    progress_phase = "hybrid_first" if total > 1 else "scanning"
 
     kunde, ok = analysiere_ersten_clip(
         video_pfade[0],
@@ -563,6 +729,7 @@ def analysiere_videos_hybrid_bis_erster_treffer(
         clip_index=1,
         total_clips=total,
         progress_callback=progress_callback,
+        progress_phase=progress_phase,
     )
     if _is_cancelled(cancel_check):
         print("Video-QR-Suche vom Benutzer abgebrochen.")
@@ -582,50 +749,121 @@ def analysiere_videos_hybrid_bis_erster_treffer(
     rest_paths = video_pfade[1:]
     workers = max(1, min(int(parallel_workers), len(rest_paths)))
 
-    print(f"QR-Hybrid: Clips 2–{total} mit {workers} parallelen Worker(n)")
+    print(
+        f"QR-Hybrid: Clips 2–{total} mit {workers} parallelen Worker(n) "
+        "(bidirektional)"
+    )
 
-    parallel_tracker = _ParallelClipProgressTracker(progress_callback, total)
+    if progress_callback:
+        _emit_qr_progress(
+            progress_callback,
+            1,
+            total,
+            os.path.basename(video_pfade[0]),
+            phase="parallel",
+            completed_count=1,
+        )
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {}
-        for offset, video_pfad in enumerate(rest_paths, start=2):
-            if _is_cancelled(cancel_check):
-                print("Video-QR-Suche vom Benutzer abgebrochen.")
-                return None, False, None, True
+    def _scan_one(
+        path: str,
+        item_index: int,
+        item_total: int,
+        check: Optional[Callable[[], bool]],
+    ) -> Tuple[Optional[Kunde], bool]:
+        return _scan_video_for_kunde(
+            path,
+            item_index,
+            item_total,
+            check,
+            scan_seconds=scan_seconds,
+            frame_step=frame_step,
+        )
 
-            future = executor.submit(
-                _scan_clip_for_kunde,
-                video_pfad,
-                offset,
-                total,
-                cancel_check=cancel_check,
-                scan_seconds=scan_seconds,
-                frame_step=frame_step,
-                parallel_tracker=parallel_tracker,
-            )
-            futures[future] = video_pfad
+    kunde, ok, source_path, cancelled = _run_parallel_bidirectional_scan(
+        rest_paths,
+        index_offset=2,
+        total=total,
+        scan_one=_scan_one,
+        parallel_workers=workers,
+        cancel_check=cancel_check,
+        progress_callback=progress_callback,
+        log_label="Clip",
+        initial_completed=1,
+    )
+    if cancelled:
+        print("Video-QR-Suche vom Benutzer abgebrochen.")
+        return None, False, None, True
 
-        for future in as_completed(futures):
-            if _is_cancelled(cancel_check):
-                for pending in futures:
-                    pending.cancel()
-                print("Video-QR-Suche vom Benutzer abgebrochen.")
-                return None, False, None, True
-
-            try:
-                clip_index, kunde, ok, source_path = future.result()
-            except Exception as e:
-                print(f"Fehler bei paralleler Clip-QR-Analyse: {e}")
-                continue
-
-            if ok and kunde:
-                for pending in futures:
-                    pending.cancel()
-                print(
-                    f"QR-Code in Clip {clip_index}/{total} gefunden und geparst: "
-                    f"{os.path.basename(source_path)}"
-                )
-                return kunde, True, source_path, False
+    if ok and kunde and source_path:
+        clip_index = video_pfade.index(source_path) + 1
+        print(
+            f"QR-Code in Clip {clip_index}/{total} gefunden und geparst: "
+            f"{os.path.basename(source_path)}"
+        )
+        return kunde, True, source_path, False
 
     print(f"Kein gültiger QR-Code in {total} Clip(s) gefunden.")
+    return None, False, None, False
+
+
+def analysiere_fotos_hybrid_bis_erster_treffer(
+    foto_pfade: list[str],
+    *,
+    progress_callback: Optional[Callable[..., None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    parallel_workers: int = 2,
+) -> Tuple[Optional[Kunde], bool, Optional[str], bool]:
+    """
+    Parallele bidirektionale Foto-Suche über die gesamte Liste.
+    Ab 2 Workern: ein Worker startet am Ende, die übrigen am Anfang.
+    Bricht beim ersten gültigen Treffer oder bei Benutzer-Abbruch ab.
+    """
+    if cv2 is None:
+        print("Fehler: OpenCV (cv2) ist nicht installiert. Bitte 'opencv-python' installieren.")
+        return None, False, None, False
+
+    if not foto_pfade:
+        return None, False, None, False
+
+    total = len(foto_pfade)
+    workers = max(1, min(int(parallel_workers), total))
+
+    print(
+        f"QR-Parallel: {total} Foto(s) mit {workers} Worker(n) (bidirektional)"
+    )
+
+    if progress_callback:
+        _emit_qr_progress(
+            progress_callback,
+            1,
+            total,
+            os.path.basename(foto_pfade[0]),
+            phase="parallel",
+            completed_count=0,
+        )
+
+    kunde, ok, source_path, cancelled = _run_parallel_bidirectional_scan(
+        foto_pfade,
+        index_offset=1,
+        total=total,
+        scan_one=_scan_foto_for_kunde,
+        parallel_workers=workers,
+        cancel_check=cancel_check,
+        progress_callback=progress_callback,
+        log_label="Foto",
+        initial_completed=0,
+    )
+    if cancelled:
+        print("Foto-QR-Suche vom Benutzer abgebrochen.")
+        return None, False, None, True
+
+    if ok and kunde and source_path:
+        foto_index = foto_pfade.index(source_path) + 1
+        print(
+            f"QR-Code in Foto {foto_index}/{total} gefunden und geparst: "
+            f"{os.path.basename(source_path)}"
+        )
+        return kunde, True, source_path, False
+
+    print(f"Kein gültiger QR-Code in {total} Foto(s) gefunden.")
     return None, False, None, False

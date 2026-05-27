@@ -43,6 +43,8 @@ class ConfigManager:
                         settings["qr_video_parallel_workers"] = 2
                     if "qr_video_scan_all_clips" not in settings:
                         settings["qr_video_scan_all_clips"] = True
+                    if "oldschool_mode" not in settings:
+                        settings["oldschool_mode"] = False
                     return settings
             except (json.JSONDecodeError, FileNotFoundError):
                 return self.get_default_settings()
@@ -58,6 +60,7 @@ class ConfigManager:
             "gast_name": "",
             "tandemmaster": "",
             "videospringer": "",
+            "oldschool_mode": False,
             "keep_tandemmaster_on_session_reset": False,
             "keep_videospringer_on_session_reset": False,
             "upload_to_server": False,

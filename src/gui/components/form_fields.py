@@ -25,6 +25,8 @@ class FormFields:
         self.booking_id_var = tk.StringVar()
         self.vorname_var = tk.StringVar()  # NEU
         self.nachname_var = tk.StringVar()  # NEU
+        self.email_var = tk.StringVar()
+        self.telefon_var = tk.StringVar()
 
         # Produkt-Checkboxen
         self.handcam_foto_var = tk.BooleanVar()
@@ -56,6 +58,8 @@ class FormFields:
         self.entry_booking_id = None
         self.entry_vorname = None  # NEU
         self.entry_nachname = None  # NEU
+        self.entry_email = None
+        self.entry_telefon = None
         self.is_valid = True
 
         self.entry_gast_name = None
@@ -79,6 +83,8 @@ class FormFields:
         self.form_mode = 'manual'  # Startet im manuellen Modus
         self._suspend_trace_callbacks = False
         self._last_layout_signature = None
+        self._last_qr_success = False
+        self._last_kunde = None
 
         # Lade Einstellungen und baue initiales Formular
         self.load_initial_settings()
@@ -96,6 +102,8 @@ class FormFields:
         self.entry_booking_id = None
         self.entry_vorname = None
         self.entry_nachname = None
+        self.entry_email = None
+        self.entry_telefon = None
 
         self.entry_gast_name = None
         self.entry_tandemmaster = None
@@ -115,6 +123,8 @@ class FormFields:
         """
         Aktualisiert das Formular-Layout basierend auf dem QR-Scan-Ergebnis.
         """
+        self._last_qr_success = bool(qr_success)
+        self._last_kunde = kunde
         layout_signature = self._build_layout_signature(qr_success, kunde)
         if layout_signature == self._last_layout_signature:
             return
@@ -137,11 +147,18 @@ class FormFields:
         self._last_layout_signature = layout_signature
         self._notify_watermark_visibility_update()
 
+    def reload_current_layout(self):
+        """Rendert das aktuelle Layout erneut (z. B. nach Settings-Änderung)."""
+        self._last_layout_signature = None
+        self.update_form_layout(self._last_qr_success, self._last_kunde)
+
     def _build_layout_signature(self, qr_success, kunde):
         """Erstellt eine Signatur zur Erkennung unveränderter Layout-Zustände."""
+        oldschool_mode = bool(self.config.get_settings().get("oldschool_mode", False))
         if qr_success and kunde:
             return (
                 "kunde",
+                oldschool_mode,
                 kunde.kunden_id_hash or "",
                 kunde.booking_id_hash or "",
                 kunde.vorname or "",
@@ -155,7 +172,7 @@ class FormFields:
                 bool(kunde.ist_bezahlt_outside_foto),
                 bool(kunde.ist_bezahlt_outside_video),
             )
-        return ("manual",)
+        return ("manual", oldschool_mode)
 
     def _notify_watermark_visibility_update(self):
         # Nur aufrufen, wenn die App vollständig initialisiert ist
@@ -198,6 +215,10 @@ class FormFields:
         self.btn_gast = tk.Button(self.frame, text="Bearbeiten", command=self.toggle_edit_gast)
         self.btn_gast.grid(row=row, column=4, padx=5, pady=5)
         row += 1
+
+        # QR-Modus: Oldschool vorübergehend deaktiviert — keine Email/Telefon-Felder
+        self.email_var.set("")
+        self.telefon_var.set("")
 
         # --- VERSCHOBENE Felder ---
         row = self._create_tandemmaster_field(row)
@@ -318,19 +339,50 @@ class FormFields:
 
     def build_manual_form(self):
         """Baut das Formular für die manuelle Eingabe."""
+        oldschool_mode = bool(self.config.get_settings().get("oldschool_mode", False))
         row = 0
-        row = self._create_id_fields(
-            row=row,
-            mode='manual',
-            kunden_id_label="Kunden ID:",
-            booking_id_label="Booking ID:"
-        )
-        # Kontakt-/Namensfelder im manuellen Modus bewusst ausblenden
-        self.vorname_var.set("")
-        self.nachname_var.set("")
+        if not oldschool_mode:
+            row = self._create_id_fields(
+                row=row,
+                mode='manual',
+                kunden_id_label="Kunden ID:",
+                booking_id_label="Booking ID:"
+            )
+            # Kontakt-/Namensfelder im manuellen Modus bewusst ausblenden
+            self.vorname_var.set("")
+            self.nachname_var.set("")
+            self.email_var.set("")
+            self.telefon_var.set("")
+        else:
+            tk.Label(self.frame, text="Vorname:", font=("Arial", 11)).grid(
+                row=row, column=0, padx=5, pady=5, sticky="w"
+            )
+            self.entry_vorname = tk.Entry(self.frame, textvariable=self.vorname_var, font=("Arial", 11))
+            self.entry_vorname.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
+
+            tk.Label(self.frame, text="Nachname:", font=("Arial", 11)).grid(
+                row=row, column=2, padx=(10, 5), pady=5, sticky="w"
+            )
+            self.entry_nachname = tk.Entry(self.frame, textvariable=self.nachname_var, font=("Arial", 11))
+            self.entry_nachname.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
+            row += 1
+
+            tk.Label(self.frame, text="Email:", font=("Arial", 11)).grid(
+                row=row, column=0, padx=5, pady=5, sticky="w"
+            )
+            self.entry_email = tk.Entry(self.frame, textvariable=self.email_var, font=("Arial", 11))
+            self.entry_email.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
+
+            tk.Label(self.frame, text="Telefon:", font=("Arial", 11)).grid(
+                row=row, column=2, padx=(10, 5), pady=5, sticky="w"
+            )
+            self.entry_telefon = tk.Entry(self.frame, textvariable=self.telefon_var, font=("Arial", 11))
+            self.entry_telefon.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
+            row += 1
 
         # --- VERSCHOBENE Felder ---
-        row = self._create_gast_name_field(row)
+        if not oldschool_mode:
+            row = self._create_gast_name_field(row)
         row = self._create_tandemmaster_field(row)
         row = self._create_datum_ort_fields(row)
         # --- ENDE VERSCHOBEN ---
@@ -651,6 +703,10 @@ class FormFields:
             # Felder ändern
             self.entry_vorname.config(state=new_state, relief=new_relief, bg=new_bg)
             self.entry_nachname.config(state=new_state, relief=new_relief, bg=new_bg)
+            if self.entry_email:
+                self.entry_email.config(state=new_state, relief=new_relief, bg=new_bg)
+            if self.entry_telefon:
+                self.entry_telefon.config(state=new_state, relief=new_relief, bg=new_bg)
 
         except tk.TclError:
             # Widget existiert möglicherweise nicht mehr
@@ -693,6 +749,7 @@ class FormFields:
     def get_form_data(self):
         """Sammelt Daten aus dem *aktuell* angezeigten Formular."""
         mode = self.video_mode_var.get()  # Hol den Modus ZUERST
+        oldschool_mode = bool(self.config.get_settings().get("oldschool_mode", False))
 
         data = {
             "tandemmaster": self.entry_tandemmaster.get().strip() if self.entry_tandemmaster else "",
@@ -707,6 +764,8 @@ class FormFields:
         # Formular-spezifische Daten
         data["vorname"] = self.vorname_var.get().strip()
         data["nachname"] = self.nachname_var.get().strip()
+        data["email"] = self.email_var.get().strip()
+        data["telefon"] = self.telefon_var.get().strip()
         data["gast"] = f"{data['vorname']} {data['nachname']}".strip()  # .strip() für leere Felder
 
         if self.form_mode == 'kunde':
@@ -715,8 +774,11 @@ class FormFields:
         else:  # 'manual'
             data["kunden_id"] = self.kunde_id_var.get().strip()
             data["booking_id"] = self.booking_id_var.get().strip()
-            name = self.gast_name_var.get().strip()
-            data["gast"] = name or data["kunden_id"] or "Unbekannt"
+            if oldschool_mode:
+                data["gast"] = data["gast"] or "Unbekannt"
+            else:
+                name = self.gast_name_var.get().strip()
+                data["gast"] = name or data["kunden_id"] or "Unbekannt"
 
         # Werte nur basierend auf dem Modus setzen
         mode = self.video_mode_var.get()

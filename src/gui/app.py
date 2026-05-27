@@ -727,6 +727,9 @@ class VideoGeneratorApp:
         # SD-Monitor sofort neu starten (wenn Auto-Backup aktiviert/deaktiviert wurde)
         self._restart_sd_monitor_if_needed()
 
+        if hasattr(self, 'form_fields') and self.form_fields:
+            self.form_fields.reload_current_layout()
+
     def pack_components(self):
         # Linke Spalte
         self.form_fields.pack(pady=10, fill="x")
@@ -1654,6 +1657,8 @@ class VideoGeneratorApp:
             booking_id=(booking_id_val or None) if form_mode == "manual" else None,
             vorname=str(form_data["vorname"]),
             nachname=str(form_data["nachname"]),
+            email=(form_data.get("email", "").strip() or None),
+            telefon=(form_data.get("telefon", "").strip() or None),
             handcam_foto=bool(form_data["handcam_foto"]),
             handcam_video=bool(form_data["handcam_video"]),
             outside_foto=bool(form_data["outside_foto"]),

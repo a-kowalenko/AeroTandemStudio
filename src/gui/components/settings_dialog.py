@@ -66,6 +66,7 @@ class SettingsDialog:
         self.qr_video_parallel_enabled_var = tk.BooleanVar()
         self.qr_video_parallel_workers_var = tk.StringVar(value="2")
         self.clear_hw_cache_var = tk.BooleanVar(value=False)
+        self.oldschool_mode_var = tk.BooleanVar(value=False)
 
         self.create_widgets()
         self.load_settings()
@@ -126,14 +127,14 @@ class SettingsDialog:
         self.notebook.add(self.tab_encoding, text="Encoding")
         self.create_encoding_tab()
 
-        # --- Tab 3: Server ---
-        self.tab_server = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_server, text="Server")
-        self.create_server_tab()
+        # --- Tab 3: Backup ---
+        self.tab_backup = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.tab_backup, text="Backup")
+        self.create_backup_tab()
 
-        # --- Tab 4: Extras ---
+        # --- Tab 4: Version ---
         self.tab_extras = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_extras, text="Extras")
+        self.notebook.add(self.tab_extras, text="Version")
         self.create_extras_tab()
 
         # --- Tab 5: Erweitert (Video-QR) ---
@@ -247,8 +248,44 @@ class SettingsDialog:
             font=("Arial", 10),
         ).pack(anchor="w", padx=5, pady=2)
 
-        # --- Sektion 2: SD-Karten Backup ---
-        backup_frame = ttk.LabelFrame(self.tab_allgemein, text="SD-Karten Backup", padding=(10, 10))
+        # --- Sektion: Formular-Modus ---
+        form_mode_frame = ttk.LabelFrame(self.tab_allgemein, text="Formular", padding=(10, 10))
+        form_mode_frame.pack(fill="x", pady=(0, 15))
+        tk.Checkbutton(
+            form_mode_frame,
+            text="Oldschool Modus (Vorname/Nachname/Email/Telefon statt Kunden-/Booking-ID)",
+            variable=self.oldschool_mode_var,
+            font=("Arial", 10),
+        ).pack(anchor="w", padx=5, pady=2)
+
+        # --- Sektion: Server-Verbindung ---
+        server_frame = ttk.LabelFrame(self.tab_allgemein, text="Server-Verbindung", padding=(10, 10))
+        server_frame.pack(fill="x", pady=(0, 10))
+        server_frame.grid_columnconfigure(1, weight=1)
+
+        tk.Label(server_frame, text="Adresse:", font=("Arial", 11)).grid(
+            row=0, column=0, sticky="w", padx=5, pady=5)
+        self.server_entry = tk.Entry(server_frame, textvariable=self.server_var, font=("Arial", 11))
+        self.server_entry.grid(row=0, column=1, columnspan=3, sticky="ew", padx=5, pady=5)
+
+        tk.Label(server_frame, text="Beispiel: smb://server/share oder \\\\server\\share oder C:\\lokaler\\pfad",
+                font=("Arial", 9), fg="gray").grid(row=1, column=1, columnspan=3, sticky="w", padx=5)
+
+        tk.Label(server_frame, text="Login:", font=("Arial", 11)).grid(
+            row=2, column=0, sticky="w", padx=5, pady=(10, 5))
+        self.login_entry = tk.Entry(server_frame, textvariable=self.login_var, font=("Arial", 11), width=20)
+        self.login_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=(10, 5))
+
+        tk.Label(server_frame, text="Passwort:", font=("Arial", 11)).grid(
+            row=2, column=2, sticky="w", padx=(10, 5), pady=(10, 5))
+        self.password_entry = tk.Entry(server_frame, textvariable=self.password_var,
+                                       font=("Arial", 11), width=20, show="*")
+        self.password_entry.grid(row=2, column=3, sticky="ew", padx=5, pady=(10, 5))
+
+    def create_backup_tab(self):
+        """Erstellt den Tab 'Backup'"""
+        # --- SD-Karten Backup ---
+        backup_frame = ttk.LabelFrame(self.tab_backup, text="SD-Karten Backup", padding=(10, 10))
         backup_frame.pack(fill="x", pady=(0, 10))
         backup_frame.grid_columnconfigure(1, weight=1)
 
@@ -940,36 +977,8 @@ class SettingsDialog:
         state = tk.NORMAL if self.qr_video_parallel_enabled_var.get() else tk.DISABLED
         self.qr_workers_entry.config(state=state)
 
-    def create_server_tab(self):
-        """Erstellt den Tab 'Server'"""
-        # --- Server-Verbindung ---
-        server_frame = ttk.LabelFrame(self.tab_server, text="Server-Verbindung", padding=(10, 10))
-        server_frame.pack(fill="x", pady=(0, 10))
-        server_frame.grid_columnconfigure(1, weight=1)
-
-        # Server Adresse
-        tk.Label(server_frame, text="Adresse:", font=("Arial", 11)).grid(
-            row=0, column=0, sticky="w", padx=5, pady=5)
-        self.server_entry = tk.Entry(server_frame, textvariable=self.server_var, font=("Arial", 11))
-        self.server_entry.grid(row=0, column=1, columnspan=3, sticky="ew", padx=5, pady=5)
-
-        tk.Label(server_frame, text="Beispiel: smb://server/share oder \\\\server\\share oder C:\\lokaler\\pfad",
-                font=("Arial", 9), fg="gray").grid(row=1, column=1, columnspan=3, sticky="w", padx=5)
-
-        # Login / Passwort
-        tk.Label(server_frame, text="Login:", font=("Arial", 11)).grid(
-            row=2, column=0, sticky="w", padx=5, pady=(10, 5))
-        self.login_entry = tk.Entry(server_frame, textvariable=self.login_var, font=("Arial", 11), width=20)
-        self.login_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=(10, 5))
-
-        tk.Label(server_frame, text="Passwort:", font=("Arial", 11)).grid(
-            row=2, column=2, sticky="w", padx=(10, 5), pady=(10, 5))
-        self.password_entry = tk.Entry(server_frame, textvariable=self.password_var,
-                                       font=("Arial", 11), width=20, show="*")
-        self.password_entry.grid(row=2, column=3, sticky="ew", padx=5, pady=(10, 5))
-
     def create_extras_tab(self):
-        """Erstellt den Tab 'Extras'"""
+        """Erstellt den Tab 'Version'"""
         # --- Updates & Versionen ---
         version_frame = ttk.LabelFrame(self.tab_extras, text="Updates & Versionen", padding=(10, 10))
         version_frame.pack(fill="both", expand=True, pady=(0, 10))
@@ -1425,6 +1434,7 @@ class SettingsDialog:
             settings.get("keep_tandemmaster_on_session_reset", False))
         self.keep_videospringer_on_session_reset_var.set(
             settings.get("keep_videospringer_on_session_reset", False))
+        self.oldschool_mode_var.set(bool(settings.get("oldschool_mode", False)))
 
         scan_all_clips = settings.get("qr_video_scan_all_clips", True)
         self.qr_video_scan_scope_var.set("all" if scan_all_clips else "first")
@@ -1486,6 +1496,7 @@ class SettingsDialog:
 
         keep_tandemmaster_on_session_reset = self.keep_tandemmaster_on_session_reset_var.get()
         keep_videospringer_on_session_reset = self.keep_videospringer_on_session_reset_var.get()
+        oldschool_mode = bool(self.oldschool_mode_var.get())
 
         try:
             qr_video_scan_seconds = float(self.qr_video_scan_seconds_var.get().strip())
@@ -1573,6 +1584,7 @@ class SettingsDialog:
             # Formular beim Session-Zurücksetzen
             current_settings["keep_tandemmaster_on_session_reset"] = keep_tandemmaster_on_session_reset
             current_settings["keep_videospringer_on_session_reset"] = keep_videospringer_on_session_reset
+            current_settings["oldschool_mode"] = oldschool_mode
 
             current_settings["qr_video_scan_all_clips"] = (
                 self.qr_video_scan_scope_var.get() == "all"

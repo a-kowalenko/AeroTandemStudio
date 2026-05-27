@@ -813,34 +813,46 @@ class VideoProcessor:
                 try:
                     marker_type = "Outside" if outside_video_mode else "Handcam"
                     form_mode = form_data.get("form_mode")
+                    oldschool_mode = bool(settings.get("oldschool_mode", False)) if settings else False
                     if kunde is not None and is_dataclass(kunde):
-                        marker_data = asdict(kunde)
-                        marker_data["type"] = marker_type
-
-                        # ID-Felder strikt exklusiv halten (QR ODER manuell)
-                        marker_data.pop("kunden_id", None)
-                        marker_data.pop("booking_id", None)
-                        marker_data.pop("kunden_id_hash", None)
-                        marker_data.pop("booking_id_hash", None)
-
-                        if form_mode == "kunde":
-                            marker_data["kunden_id_hash"] = (form_data.get("kunden_id_hash", "") or "").strip() or None
-                            marker_data["booking_id_hash"] = (form_data.get("booking_id_hash", "") or "").strip() or None
+                        if oldschool_mode and form_mode != "kunde":
+                            marker_data = {
+                                "vorname": (form_data.get("vorname", "") or "").strip(),
+                                "nachname": (form_data.get("nachname", "") or "").strip(),
+                                "email": (form_data.get("email", "") or "").strip(),
+                            }
+                            telefon = (form_data.get("telefon", "") or "").strip()
+                            if telefon:
+                                marker_data["telefon"] = telefon
+                            marker_file.write(json.dumps(marker_data, ensure_ascii=False))
                         else:
-                            marker_data["kunden_id"] = (form_data.get("kunden_id", "") or "").strip() or None
-                            marker_data["booking_id"] = (form_data.get("booking_id", "") or "").strip() or None
+                            marker_data = asdict(kunde)
+                            marker_data["type"] = marker_type
 
-                        # Nicht gewünschte Felder explizit aus _fertig.txt entfernen
-                        excluded_fields = {
-                            "vorname", "nachname", "email", "telefon",
-                            "handcam_foto", "handcam_video", "outside_foto", "outside_video",
-                            "ist_bezahlt_handcam_foto", "ist_bezahlt_handcam_video",
-                            "ist_bezahlt_outside_foto", "ist_bezahlt_outside_video",
-                        }
-                        for field_name in excluded_fields:
-                            marker_data.pop(field_name, None)
+                            # ID-Felder strikt exklusiv halten (QR ODER manuell)
+                            marker_data.pop("kunden_id", None)
+                            marker_data.pop("booking_id", None)
+                            marker_data.pop("kunden_id_hash", None)
+                            marker_data.pop("booking_id_hash", None)
 
-                        marker_file.write(json.dumps(marker_data, ensure_ascii=False))
+                            if form_mode == "kunde":
+                                marker_data["kunden_id_hash"] = (form_data.get("kunden_id_hash", "") or "").strip() or None
+                                marker_data["booking_id_hash"] = (form_data.get("booking_id_hash", "") or "").strip() or None
+                            else:
+                                marker_data["kunden_id"] = (form_data.get("kunden_id", "") or "").strip() or None
+                                marker_data["booking_id"] = (form_data.get("booking_id", "") or "").strip() or None
+
+                            # Nicht gewünschte Felder explizit aus _fertig.txt entfernen
+                            excluded_fields = {
+                                "vorname", "nachname", "email", "telefon",
+                                "handcam_foto", "handcam_video", "outside_foto", "outside_video",
+                                "ist_bezahlt_handcam_foto", "ist_bezahlt_handcam_video",
+                                "ist_bezahlt_outside_foto", "ist_bezahlt_outside_video",
+                            }
+                            for field_name in excluded_fields:
+                                marker_data.pop(field_name, None)
+
+                            marker_file.write(json.dumps(marker_data, ensure_ascii=False))
                     else:
                         marker_file.write(json.dumps({"type": marker_type}, ensure_ascii=False))
                 except TypeError as json_err:

@@ -1354,11 +1354,12 @@ class VideoGeneratorApp:
                 if cancel_check():
                     result_queue.put(("cancelled", None))
                     return
-                result_queue.put(("success", (kunde, qr_scan_success)))
+                source_path = video_paths[0] if qr_scan_success else None
+                result_queue.put(("success", (kunde, qr_scan_success, source_path)))
                 return
 
             if use_hybrid:
-                kunde, qr_scan_success, _source_path, cancelled = (
+                kunde, qr_scan_success, source_path, cancelled = (
                     analysiere_videos_hybrid_bis_erster_treffer(
                         video_paths,
                         progress_callback=_progress,
@@ -1368,7 +1369,7 @@ class VideoGeneratorApp:
                     )
                 )
             else:
-                kunde, qr_scan_success, _source_path, cancelled = (
+                kunde, qr_scan_success, source_path, cancelled = (
                     analysiere_videos_bis_erster_treffer(
                         video_paths,
                         progress_callback=_progress,
@@ -1379,7 +1380,7 @@ class VideoGeneratorApp:
             if cancelled:
                 result_queue.put(("cancelled", None))
             else:
-                result_queue.put(("success", (kunde, qr_scan_success)))
+                result_queue.put(("success", (kunde, qr_scan_success, source_path)))
 
         except Exception as e:
             import traceback
@@ -1484,8 +1485,8 @@ class VideoGeneratorApp:
 
             # 2. Ergebnis verarbeiten
             if status == "success":
-                kunde, qr_scan_success = result
-                self._process_analysis_result(kunde, qr_scan_success, video_paths)
+                kunde, qr_scan_success, source_path = result
+                self._process_analysis_result(kunde, qr_scan_success, video_paths, source_path)
             elif status == "cancelled":
                 print("QR-Analyse in Clips vom Benutzer abgebrochen.")
             elif status == "error":
@@ -1557,7 +1558,78 @@ class VideoGeneratorApp:
                 f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}",
             )
 
-    def _process_analysis_result(self, kunde, qr_scan_success, video_paths):
+    def _get_media_duration_seconds(self, media_path: str):
+        """Ermittelt die Medien-Dauer in Sekunden (ffprobe)."""
+        if not media_path:
+            return None
+        if self.video_preview and hasattr(self.video_preview, "_get_video_duration_seconds"):
+            try:
+                return self.video_preview._get_video_duration_seconds(media_path)
+            except Exception:
+                pass
+        try:
+            import subprocess
+            from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
+
+            command = [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                media_path,
+            ]
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=True,
+                creationflags=SUBPROCESS_CREATE_NO_WINDOW,
+            )
+            return float(result.stdout.strip())
+        except Exception as e:
+            print(f"Konnte Medien-Dauer nicht ermitteln ({media_path}): {e}")
+            return None
+
+    def _maybe_remove_qr_source_after_scan(self, media_type: str, source_path: Optional[str]):
+        """Entfernt QR-Träger-Medien nach erfolgreicher Analyse, wenn in den Settings aktiviert."""
+        if not source_path or not self.drag_drop:
+            return
+
+        settings = self.config.get_settings()
+
+        if media_type == "photo":
+            if not settings.get("qr_remove_photo_after_scan", False):
+                return
+            if source_path not in self.drag_drop.photo_paths:
+                return
+            print(f"Entferne QR-Foto nach Analyse: {os.path.basename(source_path)}")
+            self.drag_drop.remove_photo(source_path, update_preview=True)
+            return
+
+        if media_type != "video":
+            return
+
+        if not settings.get("qr_remove_video_after_scan", False):
+            return
+        if source_path not in self.drag_drop.video_paths:
+            return
+
+        max_duration = float(settings.get("qr_remove_video_max_duration_sec", 10))
+        duration = self._get_media_duration_seconds(source_path)
+        if duration is None:
+            print(f"QR-Video nicht entfernt (Dauer unbekannt): {os.path.basename(source_path)}")
+            return
+        if duration > max_duration:
+            print(
+                f"QR-Video nicht entfernt ({duration:.1f}s > {max_duration}s): "
+                f"{os.path.basename(source_path)}"
+            )
+            return
+
+        print(f"Entferne QR-Videoclip nach Analyse ({duration:.1f}s): {os.path.basename(source_path)}")
+        self.discard_pending_cuts_for_path(source_path)
+        self.drag_drop.remove_video(source_path, update_preview=True)
+
+    def _process_analysis_result(self, kunde, qr_scan_success, video_paths, source_path=None):
         """
         Verarbeitet das erfolgreiche Analyseergebnis (im Haupt-Thread).
         """
@@ -1603,6 +1675,9 @@ class VideoGeneratorApp:
             # Formular-Layout aktualisieren
             self.form_fields.update_form_layout(qr_scan_success, kunde)
 
+            if qr_scan_success and kunde:
+                self._maybe_remove_qr_source_after_scan("video", source_path)
+
             # NEU: Preview läuft bereits parallel! Kein wait_for_preview_thread nötig.
             # Button-Status wird von video_preview._finalize_processing wiederhergestellt
             print("QR-Analyse abgeschlossen. Preview läuft parallel weiter.")
@@ -1632,6 +1707,7 @@ class VideoGeneratorApp:
                       f"Name: {kunde.vorname} {kunde.nachname}")
 
                 self.form_fields.update_form_layout(qr_scan_success, kunde)
+                self._maybe_remove_qr_source_after_scan("photo", photo_path)
 
             elif qr_scan_success and not kunde:
                 messagebox.showwarning(

@@ -735,6 +735,89 @@ class VideoProcessor:
             f"Finale MP4 ist nach allen Mux-Versuchen nicht browser-kompatibel: {last_reason}"
         )
 
+    def _build_body_only_stream_copy_command(self, source_path, output_path, video_params):
+        """Stream-Copy eines kombinierten Videos in die finale Ausgabedatei."""
+        cmd = ['ffmpeg', '-y', '-fflags', '+genpts', '-i', source_path, '-map', '0:v:0']
+        if video_params.get('has_audio', True):
+            cmd.extend(['-map', '0:a:0'])
+        cmd.extend([
+            '-c', 'copy',
+            '-avoid_negative_ts', 'make_zero',
+            '-movflags', '+faststart',
+            output_path,
+        ])
+        return cmd
+
+    def _export_combined_video_without_intro(
+        self,
+        full_video_output_path,
+        combined_video_path,
+        video_params,
+        work_temp_dir,
+        task_name="Finaler Schnitt (ohne Intro)",
+        encoding_lane=0,
+        extra_temp_files=None,
+    ):
+        """Exportiert das kombinierte Preview-Video direkt ohne Intro."""
+        expected_duration = self._get_video_duration(combined_video_path)
+        self._check_for_cancellation()
+
+        source_path = combined_video_path
+        if not self._mp4_has_faststart(combined_video_path):
+            normalized = os.path.join(work_temp_dir, "body_only_norm.mp4")
+            self._normalize_mp4_for_concat(combined_video_path, normalized, video_params)
+            if extra_temp_files is not None:
+                extra_temp_files.append(normalized)
+            source_path = normalized
+
+        self._update_status("Exportiere Video ohne Intro...")
+        command = self._build_body_only_stream_copy_command(
+            source_path, full_video_output_path, video_params
+        )
+        self._run_ffmpeg_with_progress(
+            command,
+            expected_duration,
+            task_name,
+            task_id=None,
+            encoding_lane=encoding_lane,
+        )
+
+        ok, reason = self._validate_browser_mp4(
+            full_video_output_path, video_params, expected_duration
+        )
+        if ok:
+            print("✓ Video ohne Intro exportiert (Browser-Validierung OK)")
+            return
+
+        print(f"⚠ Browser-Validierung fehlgeschlagen (ohne Intro): {reason}")
+        self._remove_output_file(full_video_output_path)
+
+        normalized = os.path.join(work_temp_dir, "body_only_norm_retry.mp4")
+        self._normalize_mp4_for_concat(combined_video_path, normalized, video_params)
+        if extra_temp_files is not None:
+            extra_temp_files.append(normalized)
+
+        command = self._build_body_only_stream_copy_command(
+            normalized, full_video_output_path, video_params
+        )
+        self._run_ffmpeg_with_progress(
+            command,
+            expected_duration,
+            f"{task_name} (Normalisierung)",
+            task_id=None,
+            encoding_lane=encoding_lane,
+        )
+        ok, reason = self._validate_browser_mp4(
+            full_video_output_path, video_params, expected_duration
+        )
+        if ok:
+            print("✓ Video ohne Intro exportiert (Normalisierung OK)")
+            return
+
+        raise Exception(
+            f"Finale MP4 ohne Intro ist nicht browser-kompatibel: {reason}"
+        )
+
     def create_video_with_intro_only(self, payload):
         """Erstellt ein Verzeichnis, verarbeitet optional Videos und kopiert Fotos."""
         thread = threading.Thread(
@@ -787,6 +870,7 @@ class VideoProcessor:
         videospringer = form_data["videospringer"]
         datum = form_data["datum"]
         dauer = settings.get("dauer", "5")
+        intro_enabled = settings.get("intro_enabled", True)
         ort = form_data["ort"]
         speicherort = settings.get("speicherort", "")
         outside_video_mode = form_data["video_mode"] == "outside"
@@ -817,48 +901,56 @@ class VideoProcessor:
                 self._update_progress(2, TOTAL_STEPS)
                 self._update_status("Ermittle detaillierte Videoinformationen...")
                 video_params = self._get_video_info(combined_video_path)
-
-                # Schritt 3: Textinhalte vorbereiten
-                self._check_for_cancellation()
-                self._update_progress(3, TOTAL_STEPS)
-                self._update_status("Bereite Text-Overlays vor...")
-                drawtext_filter = self._prepare_text_overlay(
-                    gast, tandemmaster, videospringer, datum, ort,
-                    video_params['width'], video_params['height'], outside_video_mode
-                )
-
-                hintergrund_path = self.hintergrund_path
-                if not os.path.exists(hintergrund_path):
-                    raise FileNotFoundError("hintergrund.png fehlt im assets/ Ordner")
-
                 work_temp = self._get_work_temp_dir(combined_video_path, speicherort)
+                mux_segments = None
+                temp_intro_with_audio_path = None
 
-                # Schritt 4: Kompatiblen Intro-Clip erstellen
-                self._check_for_cancellation()
-                self._update_progress(4, TOTAL_STEPS)
-                self._update_status("Erstelle exakt kompatiblen Intro-Clip...")
-                temp_intro_with_audio_path = os.path.join(work_temp, "intro_with_silent_audio.mp4")
-                temp_files.append(temp_intro_with_audio_path)
-                self._create_intro_with_silent_audio(
-                    temp_intro_with_audio_path, dauer, video_params, drawtext_filter
-                )
+                if intro_enabled:
+                    # Schritt 3: Textinhalte vorbereiten
+                    self._check_for_cancellation()
+                    self._update_progress(3, TOTAL_STEPS)
+                    self._update_status("Bereite Text-Overlays vor...")
+                    drawtext_filter = self._prepare_text_overlay(
+                        gast, tandemmaster, videospringer, datum, ort,
+                        video_params['width'], video_params['height'], outside_video_mode
+                    )
 
-                # Schritt 5 & 6: MP4 concat-Liste (kein MPEG-TS — spart viel Plattenplatz)
-                self._check_for_cancellation()
-                self._update_progress(5, TOTAL_STEPS)
-                self._update_status("Bereite Stream-Copy-Zusammenführung vor...")
+                    hintergrund_path = self.hintergrund_path
+                    if not os.path.exists(hintergrund_path):
+                        raise FileNotFoundError("hintergrund.png fehlt im assets/ Ordner")
 
-                mux_segments = self._prepare_final_mux_segments(
-                    temp_intro_with_audio_path,
-                    combined_video_path,
-                    video_params,
-                    work_temp,
-                )
-                temp_files.extend(mux_segments.get('temp_files', []))
+                    # Schritt 4: Kompatiblen Intro-Clip erstellen
+                    self._check_for_cancellation()
+                    self._update_progress(4, TOTAL_STEPS)
+                    self._update_status("Erstelle exakt kompatiblen Intro-Clip...")
+                    temp_intro_with_audio_path = os.path.join(work_temp, "intro_with_silent_audio.mp4")
+                    temp_files.append(temp_intro_with_audio_path)
+                    self._create_intro_with_silent_audio(
+                        temp_intro_with_audio_path, dauer, video_params, drawtext_filter
+                    )
 
-                self._assert_stream_copy_compatible(
-                    temp_intro_with_audio_path, mux_segments['combined_body_path']
-                )
+                    # Schritt 5 & 6: MP4 concat-Liste (kein MPEG-TS — spart viel Plattenplatz)
+                    self._check_for_cancellation()
+                    self._update_progress(5, TOTAL_STEPS)
+                    self._update_status("Bereite Stream-Copy-Zusammenführung vor...")
+
+                    mux_segments = self._prepare_final_mux_segments(
+                        temp_intro_with_audio_path,
+                        combined_video_path,
+                        video_params,
+                        work_temp,
+                    )
+                    temp_files.extend(mux_segments.get('temp_files', []))
+
+                    self._assert_stream_copy_compatible(
+                        temp_intro_with_audio_path, mux_segments['combined_body_path']
+                    )
+                else:
+                    self._check_for_cancellation()
+                    self._update_progress(3, TOTAL_STEPS)
+                    self._update_progress(4, TOTAL_STEPS)
+                    self._update_progress(5, TOTAL_STEPS)
+                    self._update_status("Intro deaktiviert – überspringe Intro-Erstellung...")
 
                 self._update_progress(6, TOTAL_STEPS)
 
@@ -902,16 +994,27 @@ class VideoProcessor:
                     if full_video_output_path:
                         self._check_for_cancellation()
                         self._update_progress(9, TOTAL_STEPS)
-                        self._run_final_intro_body_mux(
-                            full_video_output_path,
-                            video_params,
-                            mux_segments,
-                            temp_intro_with_audio_path,
-                            dauer,
-                            task_name="Finaler Schnitt (Intro + Video)",
-                            encoding_lane=0,
-                            extra_temp_files=temp_files,
-                        )
+                        if intro_enabled:
+                            self._run_final_intro_body_mux(
+                                full_video_output_path,
+                                video_params,
+                                mux_segments,
+                                temp_intro_with_audio_path,
+                                dauer,
+                                task_name="Finaler Schnitt (Intro + Video)",
+                                encoding_lane=0,
+                                extra_temp_files=temp_files,
+                            )
+                        else:
+                            self._export_combined_video_without_intro(
+                                full_video_output_path,
+                                combined_video_path,
+                                video_params,
+                                work_temp,
+                                task_name="Finaler Schnitt (ohne Intro)",
+                                encoding_lane=0,
+                                extra_temp_files=temp_files,
+                            )
                     else:
                         self._update_progress(9, TOTAL_STEPS)
                         self._update_status("Überspringe normale Video-Erstellung...")

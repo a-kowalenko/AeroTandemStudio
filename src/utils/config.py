@@ -53,6 +53,14 @@ class ConfigManager:
                         settings["encoding_strategy"] = "per_clip"
                     if "reencode_matching_clips" not in settings:
                         settings["reencode_matching_clips"] = False
+                    if "intro_enabled" not in settings:
+                        settings["intro_enabled"] = True
+                    if "qr_remove_photo_after_scan" not in settings:
+                        settings["qr_remove_photo_after_scan"] = False
+                    if "qr_remove_video_after_scan" not in settings:
+                        settings["qr_remove_video_after_scan"] = False
+                    if "qr_remove_video_max_duration_sec" not in settings:
+                        settings["qr_remove_video_max_duration_sec"] = 10
                     return settings
             except (json.JSONDecodeError, FileNotFoundError):
                 return self.get_default_settings()
@@ -64,6 +72,7 @@ class ConfigManager:
             "speicherort": "",
             "ort": "Calden",
             "dauer": 5,
+            "intro_enabled": True,
             "outside_video": False,
             "gast_name": "",
             "tandemmaster": "",
@@ -82,6 +91,9 @@ class ConfigManager:
             "qr_photo_parallel_enabled": False,  # Parallel bidirektional über alle Fotos
             "import_photo_parallel_enabled": True,  # Parallele Thumbnail-Erzeugung beim Import
             "qr_video_scan_all_clips": True,  # False = nur erster Clip, True = alle bis Treffer
+            "qr_remove_photo_after_scan": False,
+            "qr_remove_video_after_scan": False,
+            "qr_remove_video_max_duration_sec": 10,
             # SD-Karten Backup Einstellungen
             "sd_backup_folder": "",
             "sd_auto_backup": False,

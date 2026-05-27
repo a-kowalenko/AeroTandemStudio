@@ -73,6 +73,10 @@ class SettingsDialog:
         self.import_photo_parallel_enabled_var = tk.BooleanVar()
         self.clear_hw_cache_var = tk.BooleanVar(value=False)
         self.oldschool_mode_var = tk.BooleanVar(value=False)
+        self.intro_enabled_var = tk.BooleanVar(value=True)
+        self.qr_remove_photo_after_scan_var = tk.BooleanVar(value=False)
+        self.qr_remove_video_after_scan_var = tk.BooleanVar(value=False)
+        self.qr_remove_video_max_duration_sec_var = tk.StringVar(value="10")
 
         self.create_widgets()
         self.load_settings()
@@ -360,7 +364,8 @@ class SettingsDialog:
         speicherort_button.grid(row=0, column=1, sticky="e")
 
         # Intro Dauer
-        tk.Label(storage_frame, text="Intro Dauer (Sek.):", font=("Arial", 11)).grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.dauer_label = tk.Label(storage_frame, text="Intro Dauer (Sek.):", font=("Arial", 11))
+        self.dauer_label.grid(row=1, column=0, sticky="w", padx=5, pady=5)
 
         dauer_frame = tk.Frame(storage_frame, bg="white", relief=tk.RAISED, borderwidth=1)
         dauer_frame.grid(row=1, column=1, sticky="w", padx=5, pady=5)
@@ -380,6 +385,8 @@ class SettingsDialog:
                                       activebackground="#2196F3", activeforeground="white")
 
         def show_dauer_menu(event):
+            if not self.intro_enabled_var.get():
+                return
             dauer_dropdown.event_generate("<Button-1>")
             x = dauer_frame.winfo_rootx()
             y = dauer_frame.winfo_rooty() + dauer_frame.winfo_height()
@@ -405,6 +412,19 @@ class SettingsDialog:
         for widget in [dauer_frame, self.dauer_display, dauer_arrow]:
             widget.bind("<Enter>", on_enter)
             widget.bind("<Leave>", on_leave)
+
+        self.dauer_dropdown = dauer_dropdown
+        self.dauer_frame = dauer_frame
+        self.dauer_arrow = dauer_arrow
+
+        self.intro_enabled_checkbox = tk.Checkbutton(
+            storage_frame,
+            text="Intro beim Erstellen verwenden",
+            variable=self.intro_enabled_var,
+            font=("Arial", 10),
+            command=self._on_intro_enabled_toggle,
+        )
+        self.intro_enabled_checkbox.grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 5))
 
         # --- Sektion: Formular beim Zurücksetzen ---
         reset_form_frame = ttk.LabelFrame(self.tab_allgemein, text="Formular beim Zurücksetzen", padding=(10, 10))
@@ -1164,6 +1184,54 @@ class SettingsDialog:
             wraplength=580,
         ).pack(anchor="w", padx=20, pady=(0, 4))
 
+        after_scan_frame = ttk.LabelFrame(
+            qr_root_frame,
+            text="Nach Analyse",
+            padding=(8, 8),
+        )
+        after_scan_frame.grid(row=5, column=0, columnspan=2, sticky="ew", padx=2, pady=(0, 8))
+
+        self.qr_remove_photo_checkbox = tk.Checkbutton(
+            after_scan_frame,
+            text="QR-Foto nach erfolgreicher Analyse entfernen",
+            variable=self.qr_remove_photo_after_scan_var,
+            font=("Arial", 10),
+        )
+        self.qr_remove_photo_checkbox.pack(anchor="w", padx=5, pady=(0, 4))
+
+        self.qr_remove_video_checkbox = tk.Checkbutton(
+            after_scan_frame,
+            text="QR-Videoclip nach erfolgreicher Analyse entfernen",
+            variable=self.qr_remove_video_after_scan_var,
+            font=("Arial", 10),
+            command=self._on_qr_remove_video_toggle,
+        )
+        self.qr_remove_video_checkbox.pack(anchor="w", padx=5, pady=(0, 4))
+
+        max_duration_frame = tk.Frame(after_scan_frame)
+        max_duration_frame.pack(anchor="w", padx=5, pady=(0, 4))
+        self.qr_remove_video_max_duration_label = tk.Label(
+            max_duration_frame,
+            text="Maximale Clip-Länge für Löschung (Sek.):",
+            font=("Arial", 10),
+        )
+        self.qr_remove_video_max_duration_label.pack(side="left")
+        self.qr_remove_video_max_duration_entry = tk.Entry(
+            max_duration_frame,
+            textvariable=self.qr_remove_video_max_duration_sec_var,
+            font=("Arial", 10),
+            width=6,
+        )
+        self.qr_remove_video_max_duration_entry.pack(side="left", padx=(8, 0))
+        tk.Label(
+            after_scan_frame,
+            text="Gilt nur für Videos: Clips mit dieser Länge oder kürzer werden nach QR-Treffer entfernt.",
+            font=("Arial", 9),
+            fg="gray",
+            justify="left",
+            wraplength=580,
+        ).pack(anchor="w", padx=20, pady=(0, 4))
+
         cache_frame = ttk.LabelFrame(
             self.tab_erweitert,
             text="Speicher & Cache",
@@ -1293,6 +1361,39 @@ class SettingsDialog:
         self.qr_parallel_checkbox.config(state=parallel_state)
         if first_only:
             self.qr_video_parallel_enabled_var.set(False)
+
+    def _on_intro_enabled_toggle(self):
+        """Aktiviert/deaktiviert die Intro-Dauer-Auswahl."""
+        enabled = self.intro_enabled_var.get()
+        widget_state = tk.NORMAL if enabled else tk.DISABLED
+        cursor = "hand2" if enabled else "arrow"
+        bg = "white" if enabled else "#F0F0F0"
+
+        self.dauer_label.config(fg="black" if enabled else "gray")
+        self.dauer_frame.config(bg=bg)
+        self.dauer_display.config(
+            state=widget_state,
+            bg=bg,
+            fg="black" if enabled else "gray",
+            cursor=cursor,
+        )
+        self.dauer_arrow.config(
+            state=widget_state,
+            bg=bg,
+            fg="black" if enabled else "gray",
+            cursor=cursor,
+        )
+        try:
+            self.dauer_dropdown.config(state=widget_state)
+        except tk.TclError:
+            pass
+
+    def _on_qr_remove_video_toggle(self):
+        """Aktiviert/deaktiviert die Eingabe der maximalen Clip-Länge."""
+        enabled = self.qr_remove_video_after_scan_var.get()
+        state = tk.NORMAL if enabled else tk.DISABLED
+        self.qr_remove_video_max_duration_label.config(state=state)
+        self.qr_remove_video_max_duration_entry.config(state=state)
 
     def create_extras_tab(self):
         """Erstellt den Tab 'Version'"""
@@ -1617,6 +1718,7 @@ class SettingsDialog:
         # Allgemein
         self.speicherort_var.set(settings.get("speicherort", ""))
         self.dauer_var.set(str(settings.get("dauer", 5)))
+        self.intro_enabled_var.set(bool(settings.get("intro_enabled", True)))
 
         # SD-Karten Backup
         self.sd_backup_folder_var.set(settings.get("sd_backup_folder", ""))
@@ -1665,7 +1767,18 @@ class SettingsDialog:
         self.import_photo_parallel_enabled_var.set(
             settings.get("import_photo_parallel_enabled", True)
         )
+        self.qr_remove_photo_after_scan_var.set(
+            settings.get("qr_remove_photo_after_scan", False)
+        )
+        self.qr_remove_video_after_scan_var.set(
+            settings.get("qr_remove_video_after_scan", False)
+        )
+        self.qr_remove_video_max_duration_sec_var.set(
+            str(settings.get("qr_remove_video_max_duration_sec", 10))
+        )
         self._on_qr_scan_scope_changed()
+        self._on_intro_enabled_toggle()
+        self._on_qr_remove_video_toggle()
 
         # Trigger checkbox visibility based on auto_backup setting
         self.on_auto_backup_toggle()
@@ -1724,6 +1837,9 @@ class SettingsDialog:
         keep_tandemmaster_on_session_reset = self.keep_tandemmaster_on_session_reset_var.get()
         keep_videospringer_on_session_reset = self.keep_videospringer_on_session_reset_var.get()
         oldschool_mode = bool(self.oldschool_mode_var.get())
+        intro_enabled = bool(self.intro_enabled_var.get())
+        qr_remove_photo_after_scan = self.qr_remove_photo_after_scan_var.get()
+        qr_remove_video_after_scan = self.qr_remove_video_after_scan_var.get()
 
         try:
             qr_video_scan_seconds = float(self.qr_video_scan_seconds_var.get().strip())
@@ -1764,6 +1880,20 @@ class SettingsDialog:
             )
             return
 
+        try:
+            qr_remove_video_max_duration_sec = float(
+                self.qr_remove_video_max_duration_sec_var.get().strip()
+            )
+            if qr_remove_video_max_duration_sec <= 0 or qr_remove_video_max_duration_sec > 300:
+                raise ValueError("außerhalb Bereich")
+        except ValueError:
+            messagebox.showwarning(
+                "Ungültige Eingabe",
+                "Maximale Clip-Länge: positive Zahl bis 300 Sekunden.",
+                parent=self.dialog,
+            )
+            return
+
         if not server_url:
             messagebox.showwarning("Fehler", "Bitte geben Sie eine Server-Adresse ein.", parent=self.dialog)
             return
@@ -1789,6 +1919,7 @@ class SettingsDialog:
             # App-Einstellungen aktualisieren
             current_settings["speicherort"] = speicherort
             current_settings["dauer"] = int(dauer)
+            current_settings["intro_enabled"] = intro_enabled
 
             # SD-Karten Backup Einstellungen
             current_settings["sd_backup_folder"] = sd_backup_folder
@@ -1826,6 +1957,9 @@ class SettingsDialog:
             current_settings["qr_video_parallel_workers"] = qr_video_parallel_workers
             current_settings["qr_photo_parallel_enabled"] = qr_photo_parallel_enabled
             current_settings["import_photo_parallel_enabled"] = import_photo_parallel_enabled
+            current_settings["qr_remove_photo_after_scan"] = qr_remove_photo_after_scan
+            current_settings["qr_remove_video_after_scan"] = qr_remove_video_after_scan
+            current_settings["qr_remove_video_max_duration_sec"] = qr_remove_video_max_duration_sec
 
             # Speichern
             self.config.save_settings(current_settings)

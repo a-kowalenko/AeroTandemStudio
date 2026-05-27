@@ -232,6 +232,8 @@ class VideoProcessor:
         if vcodec == 'hevc':
             cmd.extend(['-bsf:v', 'hevc_metadata=aud=insert,extract_extradata', '-tag:v', 'hvc1'])
         elif vcodec == 'h264':
+            if intro_ts_path and body_ts_path:
+                cmd.extend(['-bsf:v', 'h264_metadata=aud=insert'])
             cmd.extend(['-tag:v', 'avc1'])
 
         cmd.append(full_video_output_path)
@@ -254,6 +256,20 @@ class VideoProcessor:
         if p == 'constrainedbaseline':
             return 'baseline'
         return p
+
+    @staticmethod
+    def _browser_safe_pix_fmts(vcodec):
+        vcodec = VideoProcessor._normalize_vcodec_name(vcodec)
+        if vcodec == 'hevc':
+            return ('yuv420p', 'yuv420p10le')
+        return ('yuv420p', 'yuvj420p')
+
+    @classmethod
+    def pix_fmt_needs_reencode_for_browser(cls, pix_fmt, vcodec):
+        """True wenn pix_fmt für Stream-Copy-Final mux nicht browser-tauglich ist."""
+        if not pix_fmt:
+            return False
+        return str(pix_fmt) not in cls._browser_safe_pix_fmts(vcodec)
 
     def _probe_video_stream_summary(self, video_path):
         """Liest zentrale Video-Stream-Eigenschaften für Concat-Kompatibilitätsprüfungen."""
@@ -302,46 +318,64 @@ class VideoProcessor:
             )
 
     def _validate_browser_mp4(self, output_path, video_params, expected_duration_sec=None):
-        """Prüft Browser-taugliche MP4 nach Stream-Copy-Mux."""
+        """Prüft Browser-taugliche MP4 nach Stream-Copy-Mux. Returns (ok, reason)."""
         if not output_path or not os.path.exists(output_path):
-            return False
+            reason = "Ausgabedatei fehlt"
+            print(f"Browser-Validierung: {reason}")
+            return False, reason
 
         try:
             stream = self._probe_video_stream_summary(output_path)
             if not stream:
-                return False
+                reason = "Video-Stream konnte nicht gelesen werden"
+                print(f"Browser-Validierung: {reason}")
+                return False, reason
 
             vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
+            safe_pix_fmts = self._browser_safe_pix_fmts(vcodec)
             if vcodec == 'h264':
                 if stream['vcodec'] != 'h264':
-                    return False
-                if stream.get('pix_fmt') not in ('yuv420p',):
-                    return False
+                    reason = f"Codec ist {stream['vcodec']}, erwartet h264"
+                    print(f"Browser-Validierung: {reason}")
+                    return False, reason
+                if stream.get('pix_fmt') not in safe_pix_fmts:
+                    reason = f"pix_fmt {stream.get('pix_fmt')} (erlaubt: {', '.join(safe_pix_fmts)})"
+                    print(f"Browser-Validierung: {reason}")
+                    return False, reason
                 vtag = stream.get('vtag') or ''
                 if vtag and vtag not in ('avc1', 'avc3'):
-                    return False
+                    reason = f"Video-Tag {vtag} (erlaubt: avc1, avc3)"
+                    print(f"Browser-Validierung: {reason}")
+                    return False, reason
             elif vcodec == 'hevc':
                 if stream['vcodec'] != 'hevc':
-                    return False
-                if stream.get('pix_fmt') not in ('yuv420p', 'yuv420p10le'):
-                    return False
+                    reason = f"Codec ist {stream['vcodec']}, erwartet hevc"
+                    print(f"Browser-Validierung: {reason}")
+                    return False, reason
+                if stream.get('pix_fmt') not in safe_pix_fmts:
+                    reason = f"pix_fmt {stream.get('pix_fmt')} (erlaubt: {', '.join(safe_pix_fmts)})"
+                    print(f"Browser-Validierung: {reason}")
+                    return False, reason
                 vtag = stream.get('vtag') or ''
                 if vtag and vtag not in ('hvc1', 'hev1'):
-                    return False
+                    reason = f"Video-Tag {vtag} (erlaubt: hvc1, hev1)"
+                    print(f"Browser-Validierung: {reason}")
+                    return False, reason
 
             if expected_duration_sec and expected_duration_sec > 0:
                 actual = self._get_video_duration(output_path)
                 if abs(actual - expected_duration_sec) > 3.0:
-                    print(
-                        f"Browser-Validierung: Dauer abweichend "
-                        f"(erwartet ~{expected_duration_sec:.1f}s, ist {actual:.1f}s)"
+                    reason = (
+                        f"Dauer abweichend (erwartet ~{expected_duration_sec:.1f}s, ist {actual:.1f}s)"
                     )
-                    return False
+                    print(f"Browser-Validierung: {reason}")
+                    return False, reason
 
-            return True
+            return True, ""
         except Exception as exc:
-            print(f"Browser-Validierung fehlgeschlagen: {exc}")
-            return False
+            reason = str(exc)
+            print(f"Browser-Validierung fehlgeschlagen: {reason}")
+            return False, reason
 
     def _prepare_final_mux_segments(
         self,
@@ -350,10 +384,11 @@ class VideoProcessor:
         video_params,
         work_temp_dir,
         force_normalize=False,
+        use_ts_concat=False,
     ):
         """
         Bereitet Intro + Hauptvideo für Stream-Copy-Zusammenführung vor.
-        HEVC → MPEG-TS-Concat (Browser-kompatibel), H.264 → MP4-concat.
+        HEVC/H.264-TS → MPEG-TS-Concat (Browser-kompatibel), sonst H.264 → MP4-concat.
         Schnellpfad: ohne body_norm/intro_norm wenn moov vor mdat (Vorschau-Concat).
         Returns: dict mit mux-Parametern + Liste temporärer Dateien.
         """
@@ -403,13 +438,19 @@ class VideoProcessor:
             intro_mux = intro_norm
             body_mux = body_norm
 
-        if vcodec == 'hevc':
-            self._update_status("HEVC: bereite MPEG-TS-Concat vor (stabile Wiedergabe)...")
+        if vcodec == 'hevc' or use_ts_concat:
+            if use_ts_concat and vcodec == 'h264':
+                self._update_status("H.264: bereite MPEG-TS-Concat vor (stabile Wiedergabe)...")
+            else:
+                self._update_status("HEVC: bereite MPEG-TS-Concat vor (stabile Wiedergabe)...")
             intro_ts = os.path.join(work_temp_dir, "intro.ts")
             body_ts = os.path.join(work_temp_dir, "body.ts")
             extra_temp_files.extend([intro_ts, body_ts])
             self._mp4_to_mpegts_stream_copy(intro_mux, intro_ts, vcodec, video_params)
-            self._update_status("HEVC: Hauptvideo nach MPEG-TS (Stream-Copy)...")
+            if use_ts_concat and vcodec == 'h264':
+                self._update_status("H.264: Hauptvideo nach MPEG-TS (Stream-Copy)...")
+            else:
+                self._update_status("HEVC: Hauptvideo nach MPEG-TS (Stream-Copy)...")
             self._mp4_to_mpegts_stream_copy(body_mux, body_ts, vcodec, video_params)
             return {
                 'method': 'ts',
@@ -444,9 +485,13 @@ class VideoProcessor:
         }
 
     def _execute_final_mux_command(self, full_video_output_path, video_params, mux_segments):
-        """Baut den FFmpeg-Befehl für den Stream-Copy-Mux (MP4-concat oder HEVC-TS-concat)."""
+        """Baut den FFmpeg-Befehl für den Stream-Copy-Mux (MP4-concat oder MPEG-TS-concat)."""
         if mux_segments.get('method') == 'ts':
-            self._update_status("Füge Intro an (HEVC Stream-Copy via MPEG-TS)...")
+            vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
+            if vcodec == 'h264':
+                self._update_status("Füge Intro an (H.264 Stream-Copy via MPEG-TS)...")
+            else:
+                self._update_status("Füge Intro an (HEVC Stream-Copy via MPEG-TS)...")
             return self._build_final_intro_body_stream_copy_command(
                 full_video_output_path,
                 video_params,
@@ -460,6 +505,117 @@ class VideoProcessor:
             concat_list_path=mux_segments['concat_list_path'],
         )
 
+    @staticmethod
+    def _remove_output_file(output_path):
+        if output_path and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+
+    def _run_stream_copy_mux_attempt(
+        self,
+        full_video_output_path,
+        video_params,
+        mux_segments,
+        temp_intro_with_audio_path,
+        intro_dauer,
+        expected_duration,
+        task_name,
+        encoding_lane,
+    ):
+        """Führt einen Stream-Copy-Mux aus und validiert das Ergebnis. Returns (ok, reason)."""
+        combined_body_path = mux_segments['combined_body_path']
+        self._assert_stream_copy_compatible(temp_intro_with_audio_path, combined_body_path)
+        command = self._execute_final_mux_command(full_video_output_path, video_params, mux_segments)
+        mux_progress_duration = self._estimate_stream_copy_mux_duration_sec(
+            intro_dauer, combined_body_path, mux_segments
+        )
+        self._run_ffmpeg_with_progress(
+            command,
+            mux_progress_duration,
+            task_name,
+            task_id=None,
+            encoding_lane=encoding_lane,
+        )
+        return self._validate_browser_mp4(full_video_output_path, video_params, expected_duration)
+
+    def _build_final_intro_body_reencode_command(
+        self,
+        output_path,
+        intro_path,
+        body_path,
+        video_params,
+    ):
+        """Re-Encode-Fallback: Intro + Body per filter concat zu browser-tauglicher MP4."""
+        vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
+        sw_codec = 'hevc' if vcodec == 'hevc' else 'h264'
+        encoding_params = self.hw_detector._get_software_params(sw_codec)
+        encoder_name = encoding_params.get('encoder') or 'libx264'
+
+        if vcodec == 'hevc' and self._is_10bit_pix_fmt(video_params.get('pix_fmt')):
+            target_pix_fmt = 'yuv420p10le'
+        else:
+            target_pix_fmt = 'yuv420p'
+
+        cmd = ['ffmpeg', '-y', '-i', intro_path, '-i', body_path]
+        cmd.extend([
+            '-filter_complex', '[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[outv][outa]',
+            '-map', '[outv]', '-map', '[outa]',
+        ])
+        cmd.extend(encoding_params['output_params'])
+
+        if encoder_name == 'libx264':
+            cmd.extend(['-preset', 'veryfast', '-crf', '18'])
+        elif encoder_name == 'libx265':
+            cmd.extend(['-preset', 'veryfast', '-crf', '20'])
+
+        cmd.extend(['-pix_fmt', target_pix_fmt])
+
+        profile_str = self._normalize_profile_name(video_params.get('profile'))
+        if profile_str and vcodec in ('h264', 'hevc'):
+            if vcodec in ('hevc',) and profile_str not in ('main', 'main10'):
+                profile_str = 'main'
+            cmd.extend(['-profile:v', profile_str])
+
+        if video_params.get('level') and vcodec in ('h264', 'hevc'):
+            cmd.extend(['-level:v', self._ffmpeg_level_string(vcodec, video_params['level'])])
+
+        vtag = video_params.get('vtag')
+        if vtag and vcodec in ('h264', 'hevc'):
+            cmd.extend(['-tag:v', vtag])
+        elif vcodec == 'h264':
+            cmd.extend(['-tag:v', 'avc1'])
+        elif vcodec == 'hevc':
+            cmd.extend(['-tag:v', 'hvc1'])
+
+        cmd.extend(['-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output_path])
+        return cmd
+
+    def _run_final_intro_body_reencode_mux(
+        self,
+        full_video_output_path,
+        video_params,
+        intro_path,
+        body_path,
+        intro_dauer,
+        task_name,
+        encoding_lane=0,
+    ):
+        """Letzter Ausweg: Intro + Hauptvideo einmal neu encodieren."""
+        self._update_status("Stream-Copy fehlgeschlagen – encodiere Intro + Video neu...")
+        expected_duration = self._estimate_final_output_duration_sec(intro_dauer, body_path)
+        command = self._build_final_intro_body_reencode_command(
+            full_video_output_path, intro_path, body_path, video_params
+        )
+        self._run_ffmpeg_with_progress(
+            command,
+            expected_duration,
+            f"{task_name} (Re-Encode)",
+            task_id=None,
+            encoding_lane=encoding_lane,
+        )
+
     def _run_final_intro_body_mux(
         self,
         full_video_output_path,
@@ -471,38 +627,35 @@ class VideoProcessor:
         encoding_lane=0,
         extra_temp_files=None,
     ):
-        """Fügt Intro + Hauptvideo ausschließlich per Stream-Copy zusammen (kein Neuencode)."""
+        """Fügt Intro + Hauptvideo per Stream-Copy zusammen; Fallbacks bei Validierungsfehlern."""
         combined_body_path = mux_segments['combined_body_path']
         expected_duration = self._estimate_final_output_duration_sec(intro_dauer, combined_body_path)
-        mux_progress_duration = self._estimate_stream_copy_mux_duration_sec(
-            intro_dauer, combined_body_path, mux_segments
-        )
+        vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
+        last_reason = "Unbekannter Validierungsfehler"
 
         self._check_for_cancellation()
-        self._assert_stream_copy_compatible(temp_intro_with_audio_path, combined_body_path)
 
-        command = self._execute_final_mux_command(full_video_output_path, video_params, mux_segments)
-        self._run_ffmpeg_with_progress(
-            command,
-            mux_progress_duration,
+        ok, reason = self._run_stream_copy_mux_attempt(
+            full_video_output_path,
+            video_params,
+            mux_segments,
+            temp_intro_with_audio_path,
+            intro_dauer,
+            expected_duration,
             task_name,
-            task_id=None,
-            encoding_lane=encoding_lane,
+            encoding_lane,
         )
-
-        if self._validate_browser_mp4(full_video_output_path, video_params, expected_duration):
+        if ok:
             print("✓ Finaler Schnitt per Stream-Copy (Browser-Validierung OK)")
             return
+        last_reason = reason
+        print(f"⚠ Browser-Validierung fehlgeschlagen (Stream-Copy): {reason}")
+        self._remove_output_file(full_video_output_path)
 
         if mux_segments.get('used_fast_path'):
-            print("⚠ Schnellpfad: Browser-Validierung fehlgeschlagen → Remux mit Normalisierung")
-            if os.path.exists(full_video_output_path):
-                try:
-                    os.remove(full_video_output_path)
-                except OSError:
-                    pass
-            self._update_status("Schnellpfad fehlgeschlagen – normalisiere Timestamps...")
-            fallback_segments = self._prepare_final_mux_segments(
+            print("⚠ Versuche Remux mit Timestamp-Normalisierung...")
+            self._update_status("Normalisiere Timestamps und füge erneut zusammen...")
+            norm_segments = self._prepare_final_mux_segments(
                 mux_segments['intro_source'],
                 mux_segments['combined_video_path'],
                 video_params,
@@ -510,31 +663,76 @@ class VideoProcessor:
                 force_normalize=True,
             )
             if extra_temp_files is not None:
-                extra_temp_files.extend(fallback_segments.get('temp_files', []))
+                extra_temp_files.extend(norm_segments.get('temp_files', []))
 
-            self._assert_stream_copy_compatible(
-                temp_intro_with_audio_path, fallback_segments['combined_body_path']
-            )
-            fallback_command = self._execute_final_mux_command(
-                full_video_output_path, video_params, fallback_segments
-            )
-            fallback_progress = self._estimate_stream_copy_mux_duration_sec(
-                intro_dauer, fallback_segments['combined_body_path'], fallback_segments
-            )
-            self._run_ffmpeg_with_progress(
-                fallback_command,
-                fallback_progress,
+            ok, reason = self._run_stream_copy_mux_attempt(
+                full_video_output_path,
+                video_params,
+                norm_segments,
+                temp_intro_with_audio_path,
+                intro_dauer,
+                expected_duration,
                 task_name,
-                task_id=None,
-                encoding_lane=encoding_lane,
+                encoding_lane,
             )
-            if self._validate_browser_mp4(full_video_output_path, video_params, expected_duration):
-                print("✓ Finaler Schnitt per Stream-Copy (Fallback-Normalisierung OK)")
+            if ok:
+                print("✓ Finaler Schnitt per Stream-Copy (Normalisierung OK)")
                 return
+            last_reason = reason
+            print(f"⚠ Browser-Validierung fehlgeschlagen (Normalisierung): {reason}")
+            self._remove_output_file(full_video_output_path)
+            mux_segments = norm_segments
 
+        if vcodec == 'h264' and mux_segments.get('method') != 'ts':
+            print("⚠ Versuche H.264 MPEG-TS-Concat...")
+            ts_segments = self._prepare_final_mux_segments(
+                mux_segments['intro_source'],
+                mux_segments['combined_video_path'],
+                video_params,
+                mux_segments['work_temp_dir'],
+                force_normalize=True,
+                use_ts_concat=True,
+            )
+            if extra_temp_files is not None:
+                extra_temp_files.extend(ts_segments.get('temp_files', []))
+
+            ok, reason = self._run_stream_copy_mux_attempt(
+                full_video_output_path,
+                video_params,
+                ts_segments,
+                temp_intro_with_audio_path,
+                intro_dauer,
+                expected_duration,
+                task_name,
+                encoding_lane,
+            )
+            if ok:
+                print("✓ Finaler Schnitt per Stream-Copy (H.264 MPEG-TS OK)")
+                return
+            last_reason = reason
+            print(f"⚠ Browser-Validierung fehlgeschlagen (H.264 MPEG-TS): {reason}")
+            self._remove_output_file(full_video_output_path)
+            combined_body_path = ts_segments['combined_body_path']
+
+        self._run_final_intro_body_reencode_mux(
+            full_video_output_path,
+            video_params,
+            temp_intro_with_audio_path,
+            combined_body_path,
+            intro_dauer,
+            task_name,
+            encoding_lane=encoding_lane,
+        )
+        ok, reason = self._validate_browser_mp4(
+            full_video_output_path, video_params, expected_duration
+        )
+        if ok:
+            print("✓ Finaler Schnitt per Re-Encode (Browser-Validierung OK)")
+            return
+
+        last_reason = reason or last_reason
         raise Exception(
-            "Finale MP4 ist nach Stream-Copy nicht browser-kompatibel. "
-            "Intro-Parameter stimmen vermutlich nicht mit dem Hauptvideo überein."
+            f"Finale MP4 ist nach allen Mux-Versuchen nicht browser-kompatibel: {last_reason}"
         )
 
     def create_video_with_intro_only(self, payload):

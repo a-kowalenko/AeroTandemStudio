@@ -23,6 +23,7 @@ from src.utils.media_datetime import (
 )
 from src.utils.hardware_acceleration import HardwareAccelerationDetector
 from src.video.parallel_processor import ParallelVideoProcessor
+from src.video.processor import VideoProcessor
 from typing import List, Dict, Callable  # NEU
 
 
@@ -2221,8 +2222,12 @@ class VideoPreview:
         cur_best = 0.0
 
         self.ffmpeg_process = subprocess.Popen([
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path,
-            "-c", "copy", "-movflags", "+faststart", output_path
+            "ffmpeg", "-y", "-fflags", "+genpts",
+            "-f", "concat", "-safe", "0", "-i", concat_list_path,
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
+            output_path
         ], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
             universal_newlines=True, encoding='utf-8', errors='replace',
             creationflags=SUBPROCESS_CREATE_NO_WINDOW)
@@ -2380,9 +2385,17 @@ class VideoPreview:
             }
 
         if total <= 1:
+            single_ok = not VideoProcessor.pix_fmt_needs_reencode_for_browser(
+                first_format.get('pix_fmt'), first_format.get('codec_name', 'h264')
+            )
+            details = (
+                "Nur ein Video - kompatibel"
+                if single_ok
+                else f"pix_fmt {first_format.get('pix_fmt')} nicht browser-tauglich"
+            )
             return {
-                "compatible": True,
-                "details": "Nur ein Video - kompatibel",
+                "compatible": single_ok,
+                "details": details,
                 "formats": formats,
             }
 
@@ -2401,6 +2414,12 @@ class VideoPreview:
                 if fmt.get(key) != first_format.get(key):
                     is_compatible = False
                     diffs.append(f"V{i + 1} {key}")
+            if 'error' not in fmt:
+                codec_name = fmt.get('codec_name', 'h264')
+                pix_fmt = fmt.get('pix_fmt')
+                if VideoProcessor.pix_fmt_needs_reencode_for_browser(pix_fmt, codec_name):
+                    is_compatible = False
+                    diffs.append(f"V{i + 1} pix_fmt={pix_fmt} (nicht browser-tauglich)")
         details = f"Alle {len(video_paths)} Videos kompatibel." if is_compatible else f"Format-Unterschiede: {', '.join(diffs[:3])}"
         return {"compatible": is_compatible, "details": details, "formats": formats}
 

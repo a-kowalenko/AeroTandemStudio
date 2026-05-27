@@ -70,6 +70,7 @@ class SettingsDialog:
         self.qr_video_parallel_enabled_var = tk.BooleanVar()
         self.qr_video_parallel_workers_var = tk.StringVar(value="2")
         self.qr_photo_parallel_enabled_var = tk.BooleanVar()
+        self.import_photo_parallel_enabled_var = tk.BooleanVar()
         self.clear_hw_cache_var = tk.BooleanVar(value=False)
         self.oldschool_mode_var = tk.BooleanVar(value=False)
 
@@ -1146,6 +1147,23 @@ class SettingsDialog:
             wraplength=580,
         ).pack(anchor="w", padx=20, pady=(0, 4))
 
+        self.import_photo_parallel_checkbox = tk.Checkbutton(
+            photo_qr_frame,
+            text="Parallele Thumbnail-Erzeugung beim Import",
+            variable=self.import_photo_parallel_enabled_var,
+            font=("Arial", 10, "bold"),
+        )
+        self.import_photo_parallel_checkbox.pack(anchor="w", padx=5, pady=(4, 4))
+        tk.Label(
+            photo_qr_frame,
+            text="Beschleunigt den Import bei vielen Fotos. Nutzt dieselbe Worker-Anzahl "
+                 "wie die parallele QR-Prüfung.",
+            font=("Arial", 9),
+            fg="gray",
+            justify="left",
+            wraplength=580,
+        ).pack(anchor="w", padx=20, pady=(0, 4))
+
         cache_frame = ttk.LabelFrame(
             self.tab_erweitert,
             text="Speicher & Cache",
@@ -1644,6 +1662,9 @@ class SettingsDialog:
         self.qr_video_parallel_enabled_var.set(settings.get("qr_video_parallel_enabled", False))
         self.qr_video_parallel_workers_var.set(str(settings.get("qr_video_parallel_workers", 2)))
         self.qr_photo_parallel_enabled_var.set(settings.get("qr_photo_parallel_enabled", False))
+        self.import_photo_parallel_enabled_var.set(
+            settings.get("import_photo_parallel_enabled", True)
+        )
         self._on_qr_scan_scope_changed()
 
         # Trigger checkbox visibility based on auto_backup setting
@@ -1730,6 +1751,7 @@ class SettingsDialog:
 
         qr_video_parallel_enabled = self.qr_video_parallel_enabled_var.get()
         qr_photo_parallel_enabled = self.qr_photo_parallel_enabled_var.get()
+        import_photo_parallel_enabled = self.import_photo_parallel_enabled_var.get()
         try:
             qr_video_parallel_workers = int(self.qr_video_parallel_workers_var.get().strip())
             if qr_video_parallel_workers < 1 or qr_video_parallel_workers > 4:
@@ -1803,6 +1825,7 @@ class SettingsDialog:
             current_settings["qr_video_parallel_enabled"] = qr_video_parallel_enabled
             current_settings["qr_video_parallel_workers"] = qr_video_parallel_workers
             current_settings["qr_photo_parallel_enabled"] = qr_photo_parallel_enabled
+            current_settings["import_photo_parallel_enabled"] = import_photo_parallel_enabled
 
             # Speichern
             self.config.save_settings(current_settings)

@@ -45,6 +45,8 @@ class ConfigManager:
                         settings["qr_video_scan_all_clips"] = True
                     if "qr_photo_parallel_enabled" not in settings:
                         settings["qr_photo_parallel_enabled"] = False
+                    if "import_photo_parallel_enabled" not in settings:
+                        settings["import_photo_parallel_enabled"] = True
                     if "oldschool_mode" not in settings:
                         settings["oldschool_mode"] = False
                     if "encoding_strategy" not in settings:
@@ -78,6 +80,7 @@ class ConfigManager:
             "qr_video_parallel_enabled": False,  # Hybrid: Clip 1 solo, Rest parallel
             "qr_video_parallel_workers": 2,  # Parallele Worker für QR (Video & Foto)
             "qr_photo_parallel_enabled": False,  # Parallel bidirektional über alle Fotos
+            "import_photo_parallel_enabled": True,  # Parallele Thumbnail-Erzeugung beim Import
             "qr_video_scan_all_clips": True,  # False = nur erster Clip, True = alle bis Treffer
             # SD-Karten Backup Einstellungen
             "sd_backup_folder": "",

@@ -28,6 +28,11 @@ from src.utils.media_datetime import (
     get_photo_display_epoch,
     resolve_video_display_epoch,
 )
+from src.utils.photo_thumbnail import (
+    THUMB_MAX_SIZE,
+    build_pil_thumbnail,
+    build_pil_thumbnails_parallel,
+)
 
 # Mit handle_drop / Pipeline abgestimmt (v. a. .mp4 für Videos)
 _DND_VIDEO_EXT = ".mp4"
@@ -565,6 +570,55 @@ class DragDropFrame:
             time.sleep(_TEMP_DIR_POLL_INTERVAL_SEC)
         return video_preview.temp_dir if video_preview.temp_dir and os.path.isdir(video_preview.temp_dir) else None
 
+    def _generate_import_photo_thumbnails(
+        self,
+        photo_paths: List[str],
+        dialog: "ImportProgressDialog",
+        pil_photo_cache: dict,
+    ) -> None:
+        """Erzeugt PIL-Thumbnails für importierte Fotos (parallel oder sequentiell)."""
+        settings = self.app.config.get_settings()
+        parallel_enabled = bool(settings.get("import_photo_parallel_enabled", True))
+        try:
+            workers = int(settings.get("qr_video_parallel_workers", 2))
+        except (TypeError, ValueError):
+            workers = 2
+        workers = max(1, min(4, workers))
+
+        n_thumb = len(photo_paths)
+        self.parent.after(0, dialog.speed_var.set, "")
+
+        def _update_thumb_ui(completed: int, total: int, basename: str) -> None:
+            gp = int((completed / total) * 100) if total else 100
+
+            def ui():
+                dialog.status_var.set(f"Importiere Fotos ({completed}/{total}): {basename}")
+                dialog.file_progress_var.set(gp)
+                dialog.global_progress_var.set(gp)
+                dialog.global_status_var.set(f"Gesamtfortschritt: {gp}%")
+
+            self.parent.after(0, ui)
+
+        if parallel_enabled and n_thumb > 1:
+            batch = build_pil_thumbnails_parallel(
+                photo_paths,
+                THUMB_MAX_SIZE,
+                workers,
+                cancel_check=dialog.cancel_requested.is_set,
+                on_progress=_update_thumb_ui,
+            )
+            pil_photo_cache.update(batch)
+            return
+
+        for i_thumb, photo_path in enumerate(photo_paths, start=1):
+            if dialog.cancel_requested.is_set():
+                break
+            fn = os.path.basename(photo_path)
+            _update_thumb_ui(i_thumb, n_thumb, fn)
+            thumb = build_pil_thumbnail(photo_path, THUMB_MAX_SIZE)
+            if thumb is not None:
+                pil_photo_cache[photo_path] = thumb
+
     def _schedule_import_finished(
         self,
         dialog,
@@ -923,35 +977,11 @@ class DragDropFrame:
 
             # Schwere PIL-Arbeit im Worker, damit der Dialog sichtbar bleibt und der Mainthread nicht einfriert
             if not dialog.cancel_requested.is_set() and added_photo_paths_this_batch:
-                from PIL import Image
-
-                thumb_max = int(60 * 1.3)  # wie PhotoPreview.thumbnail_size * 1.3
-                n_thumb = len(added_photo_paths_this_batch)
-                self.parent.after(0, dialog.speed_var.set, "")
-                for i_thumb, photo_path in enumerate(added_photo_paths_this_batch, start=1):
-                    if dialog.cancel_requested.is_set():
-                        break
-                    fn = os.path.basename(photo_path)
-                    self.parent.after(0, dialog.status_var.set,
-                                       f"Importiere Fotos ({i_thumb}/{n_thumb}): {fn}")
-                    gp = int((i_thumb / n_thumb) * 100) if n_thumb else 100
-
-                    def update_thumb_ui(g=gp):
-                        dialog.file_progress_var.set(g)
-                        dialog.global_progress_var.set(g)
-                        dialog.global_status_var.set(f"Gesamtfortschritt: {g}%")
-
-                    self.parent.after(0, update_thumb_ui)
-                    try:
-                        img = Image.open(photo_path)
-                        try:
-                            img.load()
-                            img.thumbnail((thumb_max, thumb_max), Image.LANCZOS)
-                            pil_photo_cache[photo_path] = img.copy()
-                        finally:
-                            img.close()
-                    except Exception as e:
-                        print(f"Fehler beim Vorberechnen des Thumbnails für {photo_path}: {e}")
+                self._generate_import_photo_thumbnails(
+                    added_photo_paths_this_batch,
+                    dialog,
+                    pil_photo_cache,
+                )
 
             if dialog.cancel_requested.is_set() and added_photo_paths_this_batch:
                 self._rollback_imported_photo_batch(added_photo_paths_this_batch)

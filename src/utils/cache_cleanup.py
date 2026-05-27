@@ -46,7 +46,11 @@ def format_bytes(num_bytes: int) -> str:
 
 class CacheCleanupService:
     PREVIEW_DIR_PREFIX = "aero_studio_preview_"
-    KNOWN_TEMP_FILES = ("preview_combined_fast.mp4", "preview_concat_list.txt")
+    KNOWN_TEMP_FILES = (
+        "preview_combined_fast.mp4",
+        "preview_combined_encoded.mp4",
+        "preview_concat_list.txt",
+    )
     AEROTANDEM_WORK_DIRNAME = ".aerotandem_work"
 
     @classmethod

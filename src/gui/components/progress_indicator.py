@@ -18,9 +18,10 @@ class ProgressHandler:
     DETAIL_TEXT_WRAP = 500
     STEP_WEIGHT_WHEN_ENCODING = 0.35
 
-    def __init__(self, parent, second_parent=None):
+    def __init__(self, parent, second_parent=None, details_parent=None):
         self.parent = parent
         self.second_parent = second_parent
+        self.details_parent = details_parent
         self._encoding_lane1_visible = False
         self._step_pct = 0.0
         self._macro_step = 0
@@ -75,7 +76,12 @@ class ProgressHandler:
             self._tl = None
             self.progress_bar = ttk.Progressbar(parent, orient="horizontal", mode="determinate", length=280)
             self.eta_label = tk.Label(parent, text="", font=("Arial", 10))
-            self.encoding_details_label = tk.Label(parent, text="", font=("Arial", 9), fg="gray")
+            details_master = details_parent if details_parent is not None else parent
+            self.encoding_details_label = tk.Label(
+                details_master, text="", font=("Arial", 9), fg="gray", anchor="w", justify="left"
+            )
+            if details_parent is not None:
+                self.encoding_details_label.config(wraplength=400)
             self.compact_frame = None
             self.detail_panel = None
 
@@ -177,13 +183,20 @@ class ProgressHandler:
 
         self.progress_bar.pack(in_=self.progress_container, side=tk.LEFT, padx=(0, 10))
         self.eta_label.pack(in_=self.progress_container, side=tk.LEFT)
-        self.encoding_details_label.pack(in_=self.parent, pady=0)
+        details_target = self.details_parent if self.details_parent is not None else self.parent
+        if self.details_parent is not None:
+            self.encoding_details_label.pack(in_=details_target, side=tk.TOP, anchor="w", fill="x", pady=(2, 0))
+        else:
+            self.encoding_details_label.pack(in_=details_target, pady=0)
 
     def pack_progress_bar_right(self):
         if self.second_parent is None:
             self.progress_bar.pack(side=tk.RIGHT, padx=(10, 0))
             self.eta_label.pack(side=tk.RIGHT, padx=(5, 0))
-            self.encoding_details_label.pack(side=tk.RIGHT, padx=(5, 0))
+            if self.details_parent is not None:
+                self.encoding_details_label.pack(side=tk.TOP, anchor="w", fill="x", pady=(2, 0))
+            else:
+                self.encoding_details_label.pack(side=tk.RIGHT, padx=(5, 0))
             return
 
         self.gesamt_caption.pack(side=tk.LEFT, padx=(0, 6))

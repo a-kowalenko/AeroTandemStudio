@@ -45,6 +45,10 @@ class ConfigManager:
                         settings["qr_video_scan_all_clips"] = True
                     if "oldschool_mode" not in settings:
                         settings["oldschool_mode"] = False
+                    if "encoding_strategy" not in settings:
+                        settings["encoding_strategy"] = "per_clip"
+                    if "reencode_matching_clips" not in settings:
+                        settings["reencode_matching_clips"] = False
                     return settings
             except (json.JSONDecodeError, FileNotFoundError):
                 return self.get_default_settings()
@@ -87,7 +91,11 @@ class ConfigManager:
             # Paralleles Processing
             "parallel_processing_enabled": True,  # Paralleles Processing standardmäßig aktiviert
             # Codec-Auswahl
-            "video_codec": "auto"  # auto, h264, h265, vp9, av1
+            "video_codec": "auto",  # auto, h264, h265, vp9, av1
+            # Encoding-Strategie bei festem Codec: per_clip (a) oder combined (b)
+            "encoding_strategy": "per_clip",
+            # Bei festem Codec: auch neu encodieren wenn Clips bereits passen
+            "reencode_matching_clips": False,
         }
 
     def save_settings(self, settings):

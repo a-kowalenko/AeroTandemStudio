@@ -21,6 +21,7 @@ class SettingsDialog:
         self.APP_VERSION = APP_VERSION
         self.on_settings_saved = on_settings_saved  # Callback für nach dem Speichern
         self._cache_clear_in_progress = False
+        self._settings_wheel_active_inner = None
 
     def show(self):
         """Zeigt den Einstellungs-Dialog"""
@@ -56,6 +57,9 @@ class SettingsDialog:
         self.parallel_processing_var = tk.BooleanVar()
         # Variable für Codec-Auswahl
         self.codec_var = tk.StringVar(value="auto")
+        # Encoding-Strategie bei festem Codec (per_clip | combined)
+        self.encoding_strategy_var = tk.StringVar(value="per_clip")
+        self.reencode_matching_clips_var = tk.BooleanVar(value=False)
         # Session-Zurücksetzen: Tandemmaster / Videospringer optional beibehalten
         self.keep_tandemmaster_on_session_reset_var = tk.BooleanVar()
         self.keep_videospringer_on_session_reset_var = tk.BooleanVar()
@@ -101,6 +105,171 @@ class SettingsDialog:
 
         self.dialog.geometry(f"{w}x{h}+{x}+{y}")
 
+    def _deactivate_tab_mousewheel(self):
+        """Entfernt globale Mausrad-Bindings für Settings-Tabs."""
+        if not self._settings_wheel_active_inner or not self.dialog:
+            return
+        try:
+            if self.dialog.winfo_exists():
+                self.dialog.unbind_all("<MouseWheel>")
+                self.dialog.unbind_all("<Button-4>")
+                self.dialog.unbind_all("<Button-5>")
+        except tk.TclError:
+            pass
+        self._settings_wheel_active_inner = None
+
+    def _activate_tab_mousewheel(self, tab_inner):
+        """Aktiviert Mausrad-Scroll für den Tab unter dem Cursor."""
+        if self._settings_wheel_active_inner is tab_inner:
+            return
+        self._deactivate_tab_mousewheel()
+        handlers = getattr(tab_inner, "_scroll_wheel_handlers", None)
+        if not handlers or not self.dialog:
+            return
+        self._settings_wheel_active_inner = tab_inner
+        self.dialog.bind_all("<MouseWheel>", handlers["mousewheel"])
+        self.dialog.bind_all("<Button-4>", handlers["linux_up"])
+        self.dialog.bind_all("<Button-5>", handlers["linux_down"])
+
+    def _attach_tab_mousewheel(self, tab_inner):
+        """Bindet Mausrad rekursiv an alle Widgets im Tab (nach Tab-Aufbau)."""
+        bind_fn = getattr(tab_inner, "_bind_mousewheel_to_widget", None)
+        if bind_fn:
+            bind_fn(tab_inner)
+
+    def _on_settings_notebook_tab_changed(self, event=None):
+        """Deaktiviert Mausrad-Scroll beim Tab-Wechsel bis der Cursor den Bereich betritt."""
+        self._deactivate_tab_mousewheel()
+
+    def _on_settings_dialog_destroy(self, event=None):
+        if event and event.widget is not self.dialog:
+            return
+        self._deactivate_tab_mousewheel()
+
+    def _widget_is_descendant(self, widget, ancestor):
+        w = widget
+        while w is not None:
+            if w == ancestor:
+                return True
+            try:
+                w = w.master
+            except tk.TclError:
+                break
+        return False
+
+    def _create_scrollable_tab_content(self, parent, padding=10):
+        """
+        Umschließt Tab-Inhalt mit vertikalem Scroll (Canvas + Scrollbar).
+        Gibt den inneren Frame zurück — bestehende create_*_tab-Methoden bleiben unverändert.
+        """
+        parent.grid_rowconfigure(0, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
+
+        container = tk.Frame(parent)
+        container.grid(row=0, column=0, sticky="nsew")
+        container.grid_rowconfigure(0, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(container, highlightthickness=0)
+        scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        canvas.grid(row=0, column=0, sticky="nsew")
+
+        inner = tk.Frame(canvas, padx=padding, pady=padding)
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _update_scrollbar_visibility():
+            canvas.update_idletasks()
+            bbox = canvas.bbox("all")
+            if not bbox or canvas.winfo_height() <= 0:
+                scrollbar.grid_remove()
+                return
+            content_height = bbox[3] - bbox[1]
+            if content_height > canvas.winfo_height():
+                scrollbar.grid(row=0, column=1, sticky="ns")
+            else:
+                scrollbar.grid_remove()
+
+        def _refresh_scroll():
+            canvas.update_idletasks()
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            _update_scrollbar_visibility()
+
+        def _on_inner_configure(event=None):
+            _refresh_scroll()
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(window_id, width=event.width)
+            _update_scrollbar_visibility()
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def _should_scroll():
+            bbox = canvas.bbox("all")
+            if not bbox or canvas.winfo_height() <= 0:
+                return False
+            return (bbox[3] - bbox[1]) > canvas.winfo_height()
+
+        def _on_mousewheel(event):
+            if self._settings_wheel_active_inner is not inner:
+                return
+            if _should_scroll():
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _on_linux_scroll_up(event):
+            if self._settings_wheel_active_inner is not inner:
+                return
+            if _should_scroll():
+                canvas.yview_scroll(-1, "units")
+
+        def _on_linux_scroll_down(event):
+            if self._settings_wheel_active_inner is not inner:
+                return
+            if _should_scroll():
+                canvas.yview_scroll(1, "units")
+
+        inner._scroll_wheel_handlers = {
+            "mousewheel": _on_mousewheel,
+            "linux_up": _on_linux_scroll_up,
+            "linux_down": _on_linux_scroll_down,
+        }
+
+        def _bind_mousewheel(widget):
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            widget.bind("<Button-4>", _on_linux_scroll_up)
+            widget.bind("<Button-5>", _on_linux_scroll_down)
+            for child in widget.winfo_children():
+                _bind_mousewheel(child)
+
+        def _on_scroll_area_enter(event):
+            self._activate_tab_mousewheel(inner)
+
+        def _on_scroll_area_leave(event):
+            if self._settings_wheel_active_inner is not inner:
+                return
+            target = event.widget.winfo_containing(event.x_root, event.y_root)
+            if target is not None and self._widget_is_descendant(target, container):
+                return
+            self._deactivate_tab_mousewheel()
+
+        for widget in (container, canvas, inner):
+            widget.bind("<Enter>", _on_scroll_area_enter, add="+")
+            widget.bind("<Leave>", _on_scroll_area_leave, add="+")
+
+        inner._scroll_canvas = canvas
+        inner._scroll_container = container
+        inner._scroll_refresh = _refresh_scroll
+        inner._bind_mousewheel_to_widget = _bind_mousewheel
+
+        return inner
+
+    def _add_scrollable_notebook_tab(self, title):
+        """Notebook-Tab mit scrollbarem Inhalts-Frame anlegen."""
+        shell = ttk.Frame(self.notebook)
+        self.notebook.add(shell, text=title)
+        return self._create_scrollable_tab_content(shell, padding=10)
+
     def create_widgets(self):
         """Erstellt die Widgets für den Dialog mit Tab-Layout"""
 
@@ -118,29 +287,32 @@ class SettingsDialog:
         self.notebook.pack(fill="both", expand=True, pady=(0, 15))
 
         # --- Tab 1: Allgemein ---
-        self.tab_allgemein = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_allgemein, text="Allgemein")
+        self.tab_allgemein = self._add_scrollable_notebook_tab("Allgemein")
         self.create_allgemein_tab()
+        self._attach_tab_mousewheel(self.tab_allgemein)
 
         # --- Tab 2: Encoding ---
-        self.tab_encoding = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_encoding, text="Encoding")
+        self.tab_encoding = self._add_scrollable_notebook_tab("Encoding")
         self.create_encoding_tab()
+        self._attach_tab_mousewheel(self.tab_encoding)
 
         # --- Tab 3: Backup ---
-        self.tab_backup = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_backup, text="Backup")
+        self.tab_backup = self._add_scrollable_notebook_tab("Backup")
         self.create_backup_tab()
+        self._attach_tab_mousewheel(self.tab_backup)
 
         # --- Tab 4: Version ---
-        self.tab_extras = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_extras, text="Version")
+        self.tab_extras = self._add_scrollable_notebook_tab("Version")
         self.create_extras_tab()
+        self._attach_tab_mousewheel(self.tab_extras)
 
         # --- Tab 5: Erweitert (Video-QR) ---
-        self.tab_erweitert = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_erweitert, text="Erweitert")
+        self.tab_erweitert = self._add_scrollable_notebook_tab("Erweitert")
         self.create_erweitert_tab()
+        self._attach_tab_mousewheel(self.tab_erweitert)
+
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_settings_notebook_tab_changed)
+        self.dialog.bind("<Destroy>", self._on_settings_dialog_destroy, add="+")
 
         # --- Dialog-Buttons (außerhalb der Tabs) ---
         button_frame = tk.Frame(main_frame)
@@ -540,10 +712,103 @@ class SettingsDialog:
         )
         self.parallel_info_label.grid(row=4, column=0, sticky="w", padx=20, pady=(0, 5))
 
+        # --- Encoding-Strategie (nur bei festem Codec) ---
+        separator3 = ttk.Separator(advanced_frame, orient='horizontal')
+        separator3.grid(row=5, column=0, sticky="ew", pady=10)
+
+        strategy_header = tk.Label(
+            advanced_frame,
+            text="Encoding-Strategie (bei festem Codec):",
+            font=("Arial", 10, "bold"),
+            anchor="w",
+        )
+        strategy_header.grid(row=6, column=0, sticky="w", padx=5, pady=(0, 5))
+
+        self.encoding_strategy_per_clip_radio = tk.Radiobutton(
+            advanced_frame,
+            text="Pro Clip encodieren, dann zusammenfügen",
+            variable=self.encoding_strategy_var,
+            value="per_clip",
+            font=("Arial", 10),
+            anchor="w",
+        )
+        self.encoding_strategy_per_clip_radio.grid(row=7, column=0, sticky="w", padx=20, pady=2)
+
+        self.encoding_strategy_combined_radio = tk.Radiobutton(
+            advanced_frame,
+            text="Zuerst zusammenfügen, dann einmal encodieren",
+            variable=self.encoding_strategy_var,
+            value="combined",
+            font=("Arial", 10),
+            anchor="w",
+        )
+        self.encoding_strategy_combined_radio.grid(row=8, column=0, sticky="w", padx=20, pady=2)
+
+        self.encoding_strategy_hint_label = tk.Label(
+            advanced_frame,
+            text="Combined ist meist schneller bei wenigen einheitlichen Clips. "
+                 "Pro Clip nutzt parallele Encodierung und besseren Cache.",
+            font=("Arial", 9),
+            fg="gray",
+            wraplength=650,
+            justify="left",
+            anchor="w",
+        )
+        self.encoding_strategy_hint_label.grid(row=9, column=0, sticky="w", padx=20, pady=(0, 5))
+
+        self.encoding_strategy_auto_hint_label = tk.Label(
+            advanced_frame,
+            text="Nur relevant bei festem Codec (H.264, H.265, VP9, AV1) — bei Auto deaktiviert.",
+            font=("Arial", 9),
+            fg="#888888",
+            wraplength=650,
+            justify="left",
+            anchor="w",
+        )
+        self.encoding_strategy_auto_hint_label.grid(row=10, column=0, sticky="w", padx=20, pady=(0, 5))
+
+        self.reencode_matching_clips_checkbox = tk.Checkbutton(
+            advanced_frame,
+            text="Neu encodieren, auch wenn alle Clips bereits den gewählten Codec haben",
+            variable=self.reencode_matching_clips_var,
+            font=("Arial", 10),
+            anchor="w",
+        )
+        self.reencode_matching_clips_checkbox.grid(row=11, column=0, sticky="w", padx=20, pady=(5, 2))
+
+        self.reencode_matching_clips_hint_label = tk.Label(
+            advanced_frame,
+            text="Standard: Stream-Copy wenn Codec und Formate bereits passen (schneller).",
+            font=("Arial", 9),
+            fg="gray",
+            wraplength=650,
+            justify="left",
+            anchor="w",
+        )
+        self.reencode_matching_clips_hint_label.grid(row=12, column=0, sticky="w", padx=20, pady=(0, 5))
+
+    def _update_encoding_strategy_state(self):
+        """Aktiviert/deaktiviert Encoding-Strategie abhängig von Codec-Auswahl."""
+        is_auto = self.codec_var.get() == "auto"
+        state = tk.DISABLED if is_auto else tk.NORMAL
+        for widget in (
+            self.encoding_strategy_per_clip_radio,
+            self.encoding_strategy_combined_radio,
+            self.encoding_strategy_hint_label,
+            self.reencode_matching_clips_checkbox,
+            self.reencode_matching_clips_hint_label,
+        ):
+            widget.config(state=state)
+        if is_auto:
+            self.encoding_strategy_auto_hint_label.config(fg="#2196F3")
+        else:
+            self.encoding_strategy_auto_hint_label.config(fg="gray")
+
     def on_codec_changed(self):
         """Wird aufgerufen wenn ein anderer Codec ausgewählt wird"""
         selected_codec = self.codec_var.get()
         print(f"Codec geändert zu: {selected_codec}")
+        self._update_encoding_strategy_state()
 
         # Aktualisiere Hardware-Info mit dem neuen Codec (falls Hardware-Beschleunigung aktiv)
         if self.hardware_acceleration_var.get() and not self.hw_detection_running:
@@ -981,9 +1246,8 @@ class SettingsDialog:
         """Erstellt den Tab 'Version'"""
         # --- Updates & Versionen ---
         version_frame = ttk.LabelFrame(self.tab_extras, text="Updates & Versionen", padding=(10, 10))
-        version_frame.pack(fill="both", expand=True, pady=(0, 10))
-        version_frame.grid_columnconfigure(1, weight=1)  # Dropdown column expands
-        version_frame.grid_rowconfigure(2, weight=1)  # Scrollable info panel row expands
+        version_frame.pack(fill="x", pady=(0, 10))
+        version_frame.grid_columnconfigure(1, weight=1)
 
         # Variables for version switcher
         self.available_versions = []  # Will be filled when loading
@@ -1025,52 +1289,12 @@ class SettingsDialog:
         )
         self.apply_version_button.grid(row=1, column=2, sticky="e", padx=5, pady=(5, 10))
 
-        # Row 2: Scrollable info panel container (entire panel scrollable)
+        # Row 2: Release-Info (Tab-Scroll übernimmt vertikales Scrollen)
         info_panel_container = tk.Frame(version_frame, relief=tk.SUNKEN, borderwidth=1, bg="white")
-        info_panel_container.grid(row=2, column=0, columnspan=3, sticky="nsew", padx=5, pady=(0, 10))
+        info_panel_container.grid(row=2, column=0, columnspan=3, sticky="ew", padx=5, pady=(0, 10))
 
-        # Create canvas and scrollbar for entire info panel
-        canvas = tk.Canvas(info_panel_container, bg="white", highlightthickness=0)
-        scrollbar = tk.Scrollbar(info_panel_container, orient="vertical", command=canvas.yview)
-
-        # Store scrollbar reference for dynamic show/hide
-        self.version_info_scrollbar = scrollbar
-
-        # Function to update scrollbar visibility based on content size
-        def _update_scrollbar_visibility():
-            canvas.update_idletasks()
-            bbox = canvas.bbox("all")
-            if bbox:
-                content_height = bbox[3] - bbox[1]
-                canvas_height = canvas.winfo_height()
-                if content_height > canvas_height:
-                    # Content is larger, show scrollbar
-                    scrollbar.pack(side="right", fill="y")
-                else:
-                    # Content fits, hide scrollbar
-                    scrollbar.pack_forget()
-
-        # Store for use in update methods
-        self._update_version_scrollbar_visibility = _update_scrollbar_visibility
-
-        # Scrollable frame inside canvas
-        scrollable_frame = tk.Frame(canvas, bg="white")
-
-        def _on_frame_configure(e):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            _update_scrollbar_visibility()
-
-        scrollable_frame.bind("<Configure>", _on_frame_configure)
-
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        # Pack canvas (scrollbar will be packed dynamically)
-        canvas.pack(side="left", fill="both", expand=True)
-
-        # Version info labels inside scrollable frame
         self.version_info_label = tk.Label(
-            scrollable_frame,
+            info_panel_container,
             text="Wählen Sie eine Version aus der Liste",
             font=("Arial", 10, "bold"),
             bg="white",
@@ -1080,7 +1304,7 @@ class SettingsDialog:
         self.version_info_label.pack(fill="x", padx=10, pady=(10, 5))
 
         self.release_date_label = tk.Label(
-            scrollable_frame,
+            info_panel_container,
             text="",
             font=("Arial", 9),
             bg="white",
@@ -1089,9 +1313,8 @@ class SettingsDialog:
         )
         self.release_date_label.pack(fill="x", padx=10, pady=(0, 10))
 
-        # Release Notes label
         notes_label = tk.Label(
-            scrollable_frame,
+            info_panel_container,
             text="Release Notes:",
             font=("Arial", 9, "bold"),
             bg="white",
@@ -1099,61 +1322,8 @@ class SettingsDialog:
         )
         notes_label.pack(fill="x", padx=10, pady=(0, 5))
 
-        # Container frame for patch notes content (will be populated with labels)
-        self.patch_notes_container = tk.Frame(scrollable_frame, bg="white")
+        self.patch_notes_container = tk.Frame(info_panel_container, bg="white")
         self.patch_notes_container.pack(fill="x", padx=0, pady=(0, 10))
-
-        # Store canvas reference for mousewheel scrolling
-        self.version_info_canvas = canvas
-
-        # Enable mousewheel scrolling for canvas
-        def _on_mousewheel(event):
-            # Only scroll if content is actually larger than the visible area
-            bbox = canvas.bbox("all")
-            if bbox:
-                content_height = bbox[3] - bbox[1]
-                canvas_height = canvas.winfo_height()
-                if content_height > canvas_height:
-                    canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-
-        # Helper function to check if scrolling is needed
-        def _should_scroll():
-            bbox = canvas.bbox("all")
-            if bbox:
-                content_height = bbox[3] - bbox[1]
-                canvas_height = canvas.winfo_height()
-                return content_height > canvas_height
-            return False
-
-        # Linux scroll handlers
-        def _on_linux_scroll_up(e):
-            if _should_scroll():
-                canvas.yview_scroll(-1, "units")
-
-        def _on_linux_scroll_down(e):
-            if _should_scroll():
-                canvas.yview_scroll(1, "units")
-
-        # Bind mousewheel to all widgets in the scrollable frame
-        def _bind_to_mousewheel(widget):
-            """Recursively bind mousewheel to widget and all its children"""
-            widget.bind("<MouseWheel>", _on_mousewheel)
-            widget.bind("<Button-4>", _on_linux_scroll_up)  # Linux scroll up
-            widget.bind("<Button-5>", _on_linux_scroll_down)  # Linux scroll down
-
-            for child in widget.winfo_children():
-                _bind_to_mousewheel(child)
-
-        # Store bind function for later use
-        self._bind_mousewheel_to_widget = _bind_to_mousewheel
-
-        # Bind mousewheel to scrollable_frame and all its children
-        _bind_to_mousewheel(scrollable_frame)
-
-        # Also bind to canvas itself
-        canvas.bind("<MouseWheel>", _on_mousewheel)
-        canvas.bind("<Button-4>", _on_linux_scroll_up)
-        canvas.bind("<Button-5>", _on_linux_scroll_down)
 
         # Status/Error label for loading failures (initially shown)
         self.version_status_label = tk.Label(
@@ -1326,17 +1496,11 @@ class SettingsDialog:
             )
             no_notes_label.pack(fill="x", padx=10, pady=5)
 
-        # Update canvas scroll region after content changes
+        # Update Tab-Scroll nach dynamischem Patch-Notes-Inhalt
         self.patch_notes_container.update_idletasks()
-        self.version_info_canvas.configure(scrollregion=self.version_info_canvas.bbox("all"))
-
-        # Update scrollbar visibility based on new content size
-        if hasattr(self, '_update_version_scrollbar_visibility'):
-            self._update_version_scrollbar_visibility()
-
-        # Re-bind mousewheel to new labels in patch_notes_container
-        if hasattr(self, '_bind_mousewheel_to_widget'):
-            self._bind_mousewheel_to_widget(self.patch_notes_container)
+        if hasattr(self.tab_extras, "_scroll_refresh"):
+            self.tab_extras._scroll_refresh()
+        self._attach_tab_mousewheel(self.tab_extras)
 
         # Enable/disable apply button (disable if current version is selected)
         if is_current:
@@ -1428,6 +1592,9 @@ class SettingsDialog:
 
         # Codec-Auswahl
         self.codec_var.set(settings.get("video_codec", "auto"))
+        self.encoding_strategy_var.set(settings.get("encoding_strategy", "per_clip"))
+        self.reencode_matching_clips_var.set(settings.get("reencode_matching_clips", False))
+        self._update_encoding_strategy_state()
 
         # Formular beim Session-Zurücksetzen
         self.keep_tandemmaster_on_session_reset_var.set(
@@ -1493,6 +1660,10 @@ class SettingsDialog:
 
         # Codec-Auswahl
         video_codec = self.codec_var.get()
+        encoding_strategy = self.encoding_strategy_var.get()
+        if encoding_strategy not in ("per_clip", "combined"):
+            encoding_strategy = "per_clip"
+        reencode_matching_clips = self.reencode_matching_clips_var.get()
 
         keep_tandemmaster_on_session_reset = self.keep_tandemmaster_on_session_reset_var.get()
         keep_videospringer_on_session_reset = self.keep_videospringer_on_session_reset_var.get()
@@ -1580,6 +1751,8 @@ class SettingsDialog:
 
             # Codec-Auswahl
             current_settings["video_codec"] = video_codec
+            current_settings["encoding_strategy"] = encoding_strategy
+            current_settings["reencode_matching_clips"] = reencode_matching_clips
 
             # Formular beim Session-Zurücksetzen
             current_settings["keep_tandemmaster_on_session_reset"] = keep_tandemmaster_on_session_reset

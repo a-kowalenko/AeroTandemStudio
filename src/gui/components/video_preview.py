@@ -54,6 +54,8 @@ class VideoPreview:
         self.video_copies_map: Dict[tuple, str] = {}  # Map: (filename, size) -> copy_path
         self.metadata_cache: Dict[tuple, Dict] = {}  # Map: (filename, size) -> {duration, ...}
         self.videos_were_reencoded = False  # Flag: Wurden Videos bereits auf Default-Format (1080p@30) kodiert?
+        self._combined_encode_cache_key = None
+        self._combined_encode_cache_path = None
         # ---
 
         # --- NEU: Thumbnail-Scrollleiste ---
@@ -486,12 +488,16 @@ class VideoPreview:
         center_container = tk.Frame(status_progress_container)
         center_container.pack(expand=True)
 
-        # Status-Label links
-        self.status_label = tk.Label(center_container, text="Ziehen Sie Videos in das Feld links",
-                                     font=("Arial", 10), fg="gray", wraplength=400)
-        self.status_label.pack(side='left', padx=(0, 10))
+        # Status + Detail-Text links, Fortschrittsbalken rechts
+        self.status_column = tk.Frame(center_container)
+        self.status_column.pack(side='left', padx=(0, 10))
 
-        # Progress bar container rechts
+        self.status_label = tk.Label(
+            self.status_column, text="Ziehen Sie Videos in das Feld links",
+            font=("Arial", 10), fg="gray", wraplength=400, anchor="w", justify="left",
+        )
+        self.status_label.pack(side='top', anchor='w', fill='x')
+
         self.progress_frame = tk.Frame(center_container)
         self.progress_frame.pack(side='left')
 
@@ -543,7 +549,9 @@ class VideoPreview:
             print(f"   {len(self.video_copies_map)} Video(s) bereits im Cache")
 
         if not self.progress_handler:
-            self.progress_handler = ProgressHandler(self.progress_frame)
+            self.progress_handler = ProgressHandler(
+                self.progress_frame, details_parent=self.status_column
+            )
 
         self.status_label.config(text="Erstelle Vorschau...", fg="blue")
         # self.play_button.config(state="disabled")  # ENTFERNT
@@ -593,6 +601,7 @@ class VideoPreview:
         self.video_copies_map.clear()
         self.metadata_cache.clear()  # NEU
         self.videos_were_reencoded = False  # Flag zurücksetzen
+        self._invalidate_combined_encode_cache()
 
         # NEU: Thumbnail-Cache leeren
         self.thumbnail_images.clear()
@@ -624,6 +633,7 @@ class VideoPreview:
             # Die Dateien werden während des Re-Encodings überschrieben
             self.video_copies_map.clear()
             self.metadata_cache.clear()
+            self._invalidate_combined_encode_cache()
         elif needs_reencoding and preserve_cache:
             # Bei Re-Encoding MIT preserve_cache: Nur neue Videos verarbeiten, Cache behalten
             print(f"⚠️ Re-Encoding aktiviert → Kodiere nur neue Videos, Cache bleibt erhalten")
@@ -1066,7 +1076,8 @@ class VideoPreview:
             print(f"    Konnte Thumbnail-Check nicht durchführen: {e}")
             return False  # Im Zweifelsfall ohne Thumbnail-Entfernung kopieren
 
-    def _run_ffmpeg_with_progress(self, command, total_duration=None, task_name="Encoding", task_id=None, video_index=None):
+    def _run_ffmpeg_with_progress(self, command, total_duration=None, task_name="Encoding", task_id=None,
+                                  video_index=None, preview_progress=False, preview_codec=None):
         """
         Führt FFmpeg-Befehl aus und liest den Fortschritt live aus.
 
@@ -1181,6 +1192,20 @@ class VideoPreview:
                                 self.parent.after(0, self.app.drag_drop.update_video_progress,
                                                 video_index, progress_percent, fps, eta_str)
 
+                            if preview_progress:
+                                pct = progress_percent
+                                cur = current_time_sec
+                                tot = total_duration
+                                f = fps
+                                eta = eta_str
+                                codec = preview_codec
+                                self.parent.after(
+                                    0,
+                                    lambda p=pct, c=cur, t=tot, fc=f, e=eta, cd=codec: (
+                                        self._apply_combined_encode_progress_ui(p, c, t, cd, fc, e)
+                                    ),
+                                )
+
             # Warte auf Prozessende mit Timeout
             try:
                 process.wait(timeout=10)
@@ -1210,6 +1235,16 @@ class VideoPreview:
                 if total_duration is not None and isinstance(total_duration, (int, float)):
                     self.parent.after(0, self.app.drag_drop.update_video_progress,
                                     video_index, 100, fps, "0:00")
+
+            if preview_progress and total_duration is not None and isinstance(total_duration, (int, float)):
+                tot = float(total_duration)
+                codec = preview_codec
+                self.parent.after(
+                    0,
+                    lambda t=tot, cd=codec: self._apply_combined_encode_progress_ui(
+                        100.0, t, t, cd, fps, "0:00"
+                    ),
+                )
 
             return True
 
@@ -1253,22 +1288,123 @@ class VideoPreview:
             print(f"Warnung: Konnte Videodauer nicht ermitteln für {video_path}: {e}")
             return None
 
-    def _reencode_single_clip(self, input_path, output_path, task_id=None, video_index=None):
-        """
-        Kodiert ein einzelnes Video neu auf das Ziel-Format.
-        WICHTIG: Blockiert während des Re-Encodings.
+    def _get_preview_encoding_settings(self):
+        """Liest Codec- und Encoding-Strategie aus den App-Einstellungen."""
+        selected_codec = "auto"
+        encoding_strategy = "per_clip"
+        reencode_matching_clips = False
+        if self.app and hasattr(self.app, 'config'):
+            settings = self.app.config.get_settings()
+            selected_codec = settings.get("video_codec", "auto")
+            encoding_strategy = settings.get("encoding_strategy", "per_clip")
+            reencode_matching_clips = bool(settings.get("reencode_matching_clips", False))
+        if encoding_strategy not in ("per_clip", "combined"):
+            encoding_strategy = "per_clip"
+        return selected_codec, encoding_strategy, reencode_matching_clips
 
-        Args:
-            input_path: Pfad zum Input-Video
-            output_path: Pfad zum Output-Video
-            task_id: Optional Task-ID für paralleles Encoding
-            video_index: Optional Index des Videos in der DragDrop-Tabelle
-        """
-        # WICHTIG: Wenn Input = Output, verwende temporäre Datei
+    @staticmethod
+    def _normalize_target_codec(codec_name):
+        """Normalisiert ffprobe- oder Settings-Codec-Namen für Vergleiche."""
+        if not codec_name:
+            return "h264"
+        name = str(codec_name).lower()
+        if name in ("hevc", "h265"):
+            return "h265"
+        return name
+
+    def _clips_match_target_codec(self, format_info, target_codec):
+        """Prüft ob alle Clips bereits den gewählten Ziel-Codec verwenden."""
+        normalized_target = self._normalize_target_codec(target_codec)
+        formats = format_info.get("formats") or []
+        valid_formats = [fmt for fmt in formats if "error" not in fmt]
+        if not valid_formats:
+            return False
+        for fmt in valid_formats:
+            if self._normalize_target_codec(fmt.get("codec_name")) != normalized_target:
+                return False
+        return True
+
+    def _resolve_encoding_plan(self, selected_codec, encoding_strategy, format_info,
+                               reencode_matching_clips=False):
+        """Bestimmt Clip- vs. Combined-Encoding anhand Codec, Strategie und Kompatibilität."""
+        compatible = format_info.get("compatible", True)
+        force_codec = selected_codec != "auto"
+
+        if not force_codec:
+            if compatible:
+                return {
+                    "strategy": "stream_copy_only",
+                    "needs_clip_reencoding": False,
+                    "needs_combined_reencoding": False,
+                    "target_codec": None,
+                    "fallback_reason": None,
+                }
+            return {
+                "strategy": "per_clip",
+                "needs_clip_reencoding": True,
+                "needs_combined_reencoding": False,
+                "target_codec": "h264",
+                "fallback_reason": None,
+            }
+
+        target_codec = selected_codec
+        if (
+            compatible
+            and not reencode_matching_clips
+            and self._clips_match_target_codec(format_info, target_codec)
+        ):
+            return {
+                "strategy": "stream_copy_only",
+                "needs_clip_reencoding": False,
+                "needs_combined_reencoding": False,
+                "target_codec": None,
+                "fallback_reason": None,
+            }
+
+        if encoding_strategy == "combined" and compatible:
+            return {
+                "strategy": "combined",
+                "needs_clip_reencoding": False,
+                "needs_combined_reencoding": True,
+                "target_codec": target_codec,
+                "fallback_reason": None,
+            }
+
+        fallback_reason = None
+        if encoding_strategy == "combined" and not compatible:
+            fallback_reason = format_info.get("details", "Clips nicht stream-copy-kompatibel")
+
+        return {
+            "strategy": "per_clip",
+            "needs_clip_reencoding": True,
+            "needs_combined_reencoding": False,
+            "target_codec": target_codec,
+            "fallback_reason": fallback_reason,
+        }
+
+    def _build_combined_encode_cache_key(self, original_paths, target_codec, encoding_strategy,
+                                         reencode_matching_clips=False):
+        """Cache-Schlüssel für das Ergebnis eines Combined-Encodes."""
+        parts = []
+        for path in original_paths:
+            identity = self._get_file_identity(path)
+            parts.append(repr(identity) if identity else os.path.basename(path))
+        return (
+            f"{encoding_strategy}:{target_codec}:"
+            f"reenc={int(bool(reencode_matching_clips))}:{'|'.join(parts)}"
+        )
+
+    def _get_combined_encoded_output_path(self):
+        return os.path.join(tempfile.gettempdir(), "preview_combined_encoded.mp4")
+
+    def _invalidate_combined_encode_cache(self):
+        self._combined_encode_cache_key = None
+        self._combined_encode_cache_path = None
+
+    def _build_reencode_ffmpeg_command(self, input_path, output_path, codec_to_use):
+        """Baut den FFmpeg-Befehl für Re-Encoding (Clip oder Combined)."""
         use_temp_output = os.path.normpath(input_path) == os.path.normpath(output_path)
-
         if use_temp_output:
-            # Erstelle temporären Output-Pfad
             base, ext = os.path.splitext(output_path)
             temp_output_path = f"{base}.__temp_reencode__{ext}"
             actual_output_path = temp_output_path
@@ -1281,44 +1417,18 @@ class VideoPreview:
             'audio_codec': 'aac', 'audio_sample_rate': 48000, 'audio_channels': 2
         }
         tp = target_params
-
-        # NEU: Hole Codec-Auswahl aus Settings
-        selected_codec = "auto"
-        if self.app and hasattr(self.app, 'config'):
-            settings = self.app.config.get_settings()
-            selected_codec = settings.get("video_codec", "auto")
-
-        # Wenn "auto", verwende h264 (Standard), sonst den ausgewählten Codec
-        codec_to_use = "h264" if selected_codec == "auto" else selected_codec
-
-        # Hole Encoding-Parameter für den gewählten Codec
         encoding_params = self._get_encoding_params(codec_to_use)
 
         cmd = ["ffmpeg", "-y"]
-
-        # FEHLERTOLERANZ: Ignoriere Dekodier-Fehler
         cmd.extend(["-err_detect", "ignore_err", "-fflags", "+genpts+igndts"])
 
-        # Hardware-spezifische Konfiguration
         hw_info = self.hw_detector.detect_hardware()
         hw_type = hw_info.get('type') if hw_info.get('available') else None
-        # NEU: use_hw_filters = False, weil wir Software-Filter für Aspect-Ratio nutzen
-        # Nur das Encoding läuft in Hardware, nicht die Filter
-        use_hw_filters = False  # Deaktiviert wegen Aspect-Ratio-Problemen
+        use_hw_filters = False
 
-        # Kein Hardware-Decoding, da wir Software-Filter verwenden
-        # Dies verhindert Pixel-Format-Inkompatibilitäten
-
-        # Input
         cmd.extend(["-i", input_path])
 
-        # Filter-Chain basierend auf Hardware-Typ
         if use_hw_filters and hw_type == 'intel':
-            # Intel Quick Sync: Verwende vpp_qsv (Video Processing Pipeline)
-            # WICHTIG: vpp_qsv hat KEIN force_original_aspect_ratio!
-            # Lösung: Erst mit Software-Scale auf richtige Größe MIT Aspect Ratio,
-            # dann mit vpp_qsv nur FPS-Konvertierung und Format
-            # Alternative: Nutze Software-Filter für Scaling, nur Hardware für Encoding
             filter_str = (
                 f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
                 f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
@@ -1326,9 +1436,6 @@ class VideoPreview:
             )
             cmd.extend(["-vf", filter_str])
         elif use_hw_filters and hw_type == 'nvidia':
-            # NVIDIA CUDA: scale_cuda unterstützt force_original_aspect_ratio nicht direkt
-            # Lösung: Berechne Scaling manuell oder nutze Software-Filter
-            # Für Konsistenz: Software-Scale + Hardware-Upload
             filter_str = (
                 f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
                 f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
@@ -1336,39 +1443,29 @@ class VideoPreview:
             )
             cmd.extend(["-vf", filter_str])
         else:
-            # Software-Filter (Standard)
-            # WICHTIG: format=yuv420p konvertiert 10-bit Videos zu 8-bit (für Kompatibilität)
-            filter_chain = f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']},format=yuv420p"
-
-            # Für Hardware-Encoder: Konvertiere zu nv12 für Encoder, dann zurück zu yuv420p
+            filter_chain = (
+                f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
+                f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"fps={tp['fps']},format=yuv420p"
+            )
             if self.hw_accel_enabled and hw_type in ['intel', 'nvidia', 'amd']:
-                filter_chain = f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,fps={tp['fps']}"
-
+                filter_chain = (
+                    f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
+                    f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                    f"fps={tp['fps']}"
+                )
             cmd.extend(["-vf", filter_chain])
 
-        # WICHTIG: Pixel-Format explizit setzen für bessere Kompatibilität
-        # Wird VOR Encoder-Parametern gesetzt, kann aber überschrieben werden
         cmd.extend(["-pix_fmt", "yuv420p"])
-
-        # Video-Encoder (Hardware oder Software)
         cmd.extend(encoding_params['output_params'])
 
-        # WICHTIG: Für Hardware-Encoder (besonders QSV) nochmal Pixel-Format erzwingen
-        # QSV bevorzugt nv12, aber für VLC-Kompatibilität brauchen wir yuv420p
         if self.hw_accel_enabled:
             cmd.extend(["-pix_fmt", "yuv420p"])
 
-        # Zusätzliche Parameter für Software-Encoding (wenn HW nicht aktiv)
         if not self.hw_accel_enabled:
             encoder = encoding_params.get('encoder', 'libx264')
-
-            # Keyframe-Interval für bessere Schneidbarkeit (für alle Codecs)
-            # GOP alle 1 Sekunde = 30 Frames bei 30fps
             cmd.extend(["-g", "30", "-keyint_min", "30"])
-
-            # Codec-spezifische Parameter
             if encoder == 'libx264':
-                # H.264 spezifische Optimierungen
                 cmd.extend([
                     "-preset", "veryfast",
                     "-crf", "26",
@@ -1376,111 +1473,93 @@ class VideoPreview:
                     "-x264-params", "ref=1:me=dia:subme=1:trellis=0"
                 ])
             elif encoder == 'libx265':
-                # H.265/HEVC spezifische Optimierungen
                 cmd.extend([
                     "-preset", "veryfast",
                     "-crf", "28",
                     "-x265-params", "ref=1:me=dia"
                 ])
             elif encoder == 'libvpx-vp9':
-                # VP9 spezifische Optimierungen
                 cmd.extend([
-                    "-deadline", "realtime",  # Schnelles Encoding
-                    "-cpu-used", "5",  # Geschwindigkeit (0=langsam, 5=schnell)
-                    "-row-mt", "1",  # Multi-Threading
-                    "-b:v", "0",  # CRF Mode
-                    "-crf", "31"  # Qualität (höher = kleiner/schlechter)
+                    "-deadline", "realtime",
+                    "-cpu-used", "5",
+                    "-row-mt", "1",
+                    "-b:v", "0",
+                    "-crf", "31"
                 ])
             elif encoder in ['libaom-av1', 'libsvtav1']:
-                # AV1 spezifische Optimierungen
                 cmd.extend([
-                    "-cpu-used", "8",  # Sehr schnell
+                    "-cpu-used", "8",
                     "-crf", "35",
                     "-b:v", "0"
                 ])
         else:
-            # Bei Hardware-Encoding: Optimierte Qualitätseinstellungen
-            # (preset und tune sind bereits in encoding_params enthalten)
             print(f"  → Nutze Hardware-Encoder: {encoding_params['encoder']}")
-            # DEBUG: Zeige extra_params
-            if 'extra_params' in self.hw_detector.detect_hardware():
-                extra_params = self.hw_detector.detect_hardware().get('extra_params', [])
-                if '-g' in extra_params:
-                    gop_index = extra_params.index('-g')
-                    gop_value = extra_params[gop_index + 1] if gop_index + 1 < len(extra_params) else '?'
-                    print(f"  → GOP-Size: {gop_value} (Keyframes alle {gop_value} Frames)")
-                else:
-                    print(f"  ⚠️ WARNUNG: Keine GOP-Parameter (-g) in Hardware-Config!")
-            if use_hw_filters:
-                print(f"  → Nutze Hardware-Filter: {hw_type}")
 
-        # Audio-Encoding
         cmd.extend([
             "-c:a", tp['audio_codec'],
             "-b:a", "96k",
             "-ar", str(tp['audio_sample_rate']),
             "-ac", str(tp['audio_channels'])
         ])
-
-        # Container-Optionen
         cmd.extend([
             "-movflags", "+faststart",
             "-max_muxing_queue_size", "1024",
             "-map", "0:v:0", "-map", "0:a:0?",
-            actual_output_path  # Verwende temp path wenn Input=Output
+            actual_output_path
         ])
 
-        # WICHTIG: Capture stderr für Fehlerdiagnose
+        return cmd, actual_output_path, temp_output_path, use_temp_output
+
+    def _execute_reencode(self, input_path, output_path, codec_to_use, task_id=None,
+                          video_index=None, task_name=None, show_preview_progress=False):
+        """Führt Re-Encoding aus inkl. Fortschritt, Temp-Datei und HW-Fallback."""
+        cmd, actual_output_path, temp_output_path, use_temp_output = self._build_reencode_ffmpeg_command(
+            input_path, output_path, codec_to_use
+        )
+
         hw_status = "HW-Beschleunigung" if self.hw_accel_enabled else "Software"
         print(f"Starte Re-Encoding ({hw_status}): {os.path.basename(input_path)} → 1080p@30fps")
 
-        # Hole Videodauer für Fortschrittsanzeige
         total_duration = self._get_video_duration_seconds(input_path)
         if total_duration is None:
-            print(f"Warnung: Konnte Videodauer nicht ermitteln - kein ETA verfügbar")
+            print("Warnung: Konnte Videodauer nicht ermitteln - kein ETA verfügbar")
 
-        # Task Name basierend auf task_id
-        task_name = f"Re-Encoding {os.path.basename(input_path)[:20]}"
-        if task_id:
-            task_name = f"[Task {task_id}] " + task_name
+        if task_name is None:
+            task_name = f"Re-Encoding {os.path.basename(input_path)[:20]}"
+            if task_id:
+                task_name = f"[Task {task_id}] " + task_name
 
-        # Verwende neue Methode mit Live-Fortschritt
         try:
-            self._run_ffmpeg_with_progress(cmd, total_duration, task_name, task_id, video_index)
+            self._run_ffmpeg_with_progress(
+                cmd, total_duration, task_name, task_id, video_index,
+                preview_progress=show_preview_progress,
+                preview_codec=codec_to_use if show_preview_progress else None,
+            )
 
-            # Wenn temporäre Datei verwendet wurde, ersetze Original atomisch
             if use_temp_output and os.path.exists(temp_output_path):
                 try:
-                    # Atomare Ersetzung: löscht Original und benennt temp um
                     os.replace(temp_output_path, output_path)
                     print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
                 except Exception as e:
                     print(f"⚠️ Fehler beim Ersetzen der Datei: {e}")
-                    # Cleanup temp file
                     if os.path.exists(temp_output_path):
                         os.remove(temp_output_path)
                     raise
             else:
                 print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
 
-            # Setze Status in DragDrop-Tabelle auf "Fertig"
             if video_index is not None and self.app and hasattr(self.app, 'drag_drop'):
                 self.parent.after(0, self.app.drag_drop.set_video_status, video_index, "✓ Fertig")
+            return
 
-            return  # Erfolg!
         except subprocess.CalledProcessError as e:
-            # Cleanup temp file bei Fehler
             if use_temp_output and temp_output_path and os.path.exists(temp_output_path):
                 try:
                     os.remove(temp_output_path)
-                except:
+                except OSError:
                     pass
 
-            # Hole stderr aus dem Fehler
             stderr_text = e.stderr if hasattr(e, 'stderr') else "Kein stderr verfügbar"
-
-            # ZUSÄTZLICHE ÜBERPRÜFUNG: Wenn Output-Datei existiert und vernünftige Größe hat,
-            # betrachte als Erfolg (prüfe temp_output_path wenn verwendet)
             check_path = temp_output_path if use_temp_output else output_path
             output_exists = os.path.exists(check_path)
             output_size = os.path.getsize(check_path) if output_exists else 0
@@ -1488,32 +1567,23 @@ class VideoPreview:
 
             if output_valid:
                 print(f"⚠️ FFmpeg beendet mit Fehler, aber Output-Datei ist valid ({output_size} bytes)")
-                print(f"→ Betrachte als Erfolg")
-
-                # Wenn temporäre Datei verwendet wurde, ersetze Original
                 if use_temp_output:
                     try:
                         os.replace(temp_output_path, output_path)
-                        print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
                     except Exception as replace_err:
                         print(f"⚠️ Fehler beim Ersetzen der Datei: {replace_err}")
                         raise
-                else:
-                    print(f"✅ Re-Encoding erfolgreich: {os.path.basename(output_path)}")
+                return
 
-                return  # Erfolg!
-
-            # Echter Fehler - zeige Details
             print(f"\n{'='*60}")
             print(f"FFmpeg Fehler bei: {os.path.basename(input_path)}")
             print(f"{'='*60}")
-            print(f"Fehler: {stderr_text[:500]}")  # Zeige ersten Teil
+            print(f"Fehler: {stderr_text[:500]}")
             print(f"{'='*60}\n")
 
-            # WICHTIG: Prüfe auf Hardware-Encoder-Fehler und versuche Fallback
             if self.hw_accel_enabled and stderr_text:
                 hw_error_indicators = [
-                    "10 bit encode not supported",  # WICHTIG: 10-bit Videos nicht von HW-Encoder unterstützt
+                    "10 bit encode not supported",
                     "Driver does not support",
                     "nvenc API version",
                     "minimum required Nvidia driver",
@@ -1529,37 +1599,120 @@ class VideoPreview:
                     "Undefined constant",
                     "hwaccel initialisation returned error"
                 ]
-
                 if any(indicator in stderr_text for indicator in hw_error_indicators):
-                    print(f"⚠️ Hardware-Encoder-Fehler erkannt!")
-
-                    # Prüfe spezifisch auf 10-bit Problem
+                    print("⚠️ Hardware-Encoder-Fehler erkannt!")
                     if "10 bit encode not supported" in stderr_text:
-                        print(f"→ 10-bit Video erkannt - Hardware-Encoder unterstützt nur 8-bit")
-
-                    print(f"→ Versuche Fallback auf Software-Encoding (libx264)...")
-
-                    # Deaktiviere Hardware-Beschleunigung temporär
+                        print("→ 10-bit Video erkannt - Hardware-Encoder unterstützt nur 8-bit")
+                    print("→ Versuche Fallback auf Software-Encoding (libx264)...")
                     original_hw_state = self.hw_accel_enabled
                     self.hw_accel_enabled = False
-
                     try:
-                        # Rekursiver Aufruf mit Software-Encoding
-                        print(f"Starte Re-Encoding (Software): {os.path.basename(input_path)} → 1080p@30fps")
-                        self._reencode_single_clip(input_path, output_path, task_id, video_index)
-                        print(f"✅ Software-Encoding erfolgreich als Fallback")
-                        return  # Erfolgreicher Fallback
+                        self._execute_reencode(
+                            input_path, output_path, codec_to_use, task_id, video_index, task_name,
+                            show_preview_progress=show_preview_progress,
+                        )
+                        print("✅ Software-Encoding erfolgreich als Fallback")
+                        return
                     finally:
-                        # Stelle Hardware-Zustand wieder her
                         self.hw_accel_enabled = original_hw_state
 
-            # Kein Fallback möglich - werfe Fehler
             raise Exception(f"Re-Encoding fehlgeschlagen: {os.path.basename(input_path)}")
         except Exception as e:
             if "abgebrochen" in str(e) or "abort" in str(e).lower():
-                raise  # Nutzer-Abbruch weiterreichen
+                raise
             print(f"Fehler beim Re-Encoding: {e}")
             raise
+
+    def _reencode_combined_video(self, input_path, output_path, codec_to_use):
+        """Encodiert ein bereits zusammengefügtes Video einmal auf den Ziel-Codec."""
+        task_name = f"Combined Re-Encoding → {codec_to_use}"
+        self._execute_reencode(
+            input_path, output_path, codec_to_use,
+            task_id=None, video_index=None, task_name=task_name,
+            show_preview_progress=True,
+        )
+
+    def _finalize_combined_preview(self, video_paths, temp_copy_paths, encoding_plan):
+        """Concat (Stream-Copy) und optional ein Combined-Re-Encode."""
+        n_clips = len(temp_copy_paths)
+        if encoding_plan.get("needs_combined_reencoding"):
+            status = f"Füge {n_clips} Clip(s) zusammen (Stream-Copy)…"
+        else:
+            status = f"Kombiniere {n_clips} Clip(s) ohne Neuencode (FFmpeg concat)…"
+        self.parent.after(0, lambda s=status: self.status_label.config(text=s, fg="blue"))
+
+        raw_combined = self._create_fast_combined_video(temp_copy_paths)
+        if self.cancellation_event.is_set() or not raw_combined:
+            return None, False
+
+        if not encoding_plan.get("needs_combined_reencoding"):
+            was_reencoded = (
+                encoding_plan.get("needs_clip_reencoding", False) or self.videos_were_reencoded
+            )
+            return raw_combined, was_reencoded
+
+        cache_key = self._build_combined_encode_cache_key(
+            video_paths,
+            encoding_plan["target_codec"],
+            "combined",
+            self._get_preview_encoding_settings()[2],
+        )
+        encoded_path = self._get_combined_encoded_output_path()
+
+        if (
+            self._combined_encode_cache_key == cache_key
+            and self._combined_encode_cache_path
+            and os.path.exists(self._combined_encode_cache_path)
+        ):
+            print("♻️ Verwende gecachtes Combined-Encode-Ergebnis")
+            if raw_combined != encoded_path and os.path.exists(raw_combined):
+                try:
+                    os.remove(raw_combined)
+                except OSError:
+                    pass
+            return self._combined_encode_cache_path, True
+
+        target = encoding_plan["target_codec"]
+        self.parent.after(0, lambda t=target: self.status_label.config(
+            text=f"Encodiere kombiniertes Video (1×) als {t}…", fg="orange"))
+
+        ui_ready = threading.Event()
+
+        def _kick_encode_progress_ui():
+            try:
+                self._begin_combined_encode_progress_ui(raw_combined, target)
+            finally:
+                ui_ready.set()
+
+        self.parent.after(0, _kick_encode_progress_ui)
+        ui_ready.wait(timeout=15.0)
+
+        self._reencode_combined_video(raw_combined, encoded_path, target)
+        self._combined_encode_cache_key = cache_key
+        self._combined_encode_cache_path = encoded_path
+
+        if raw_combined != encoded_path and os.path.exists(raw_combined):
+            try:
+                os.remove(raw_combined)
+            except OSError:
+                pass
+
+        return encoded_path, True
+
+    def _reencode_single_clip(self, input_path, output_path, task_id=None, video_index=None):
+        """
+        Kodiert ein einzelnes Video neu auf das Ziel-Format.
+        WICHTIG: Blockiert während des Re-Encodings.
+        """
+        selected_codec = "auto"
+        if self.app and hasattr(self.app, 'config'):
+            settings = self.app.config.get_settings()
+            selected_codec = settings.get("video_codec", "auto")
+
+        codec_to_use = "h264" if selected_codec == "auto" else selected_codec
+        self._execute_reencode(
+            input_path, output_path, codec_to_use, task_id, video_index
+        )
 
     def _create_combined_preview(self, video_paths):
         """
@@ -1575,22 +1728,23 @@ class VideoPreview:
             # Deaktiviere Erstellen-Button während Kombinierung
             self.parent.after(0, lambda: self.app._set_button_waiting())
 
-            # Hole Codec-Auswahl aus Settings
-            selected_codec = "auto"
-            if self.app and hasattr(self.app, 'config'):
-                settings = self.app.config.get_settings()
-                selected_codec = settings.get("video_codec", "auto")
-                print(f"Codec-Auswahl: {selected_codec}")
+            # Hole Codec- und Encoding-Einstellungen
+            selected_codec, encoding_strategy, reencode_matching_clips = self._get_preview_encoding_settings()
+            print(
+                f"Codec-Auswahl: {selected_codec}, Encoding-Strategie: {encoding_strategy}, "
+                f"Re-Encode bei passendem Codec: {reencode_matching_clips}"
+            )
 
-            # Initialisiere Variablen
             needs_reencoding = False
-            force_codec = selected_codec != "auto"  # Wenn nicht "auto", dann erzwinge Re-Encoding
-
-            # Bestimme den Ziel-Codec für Encoding-Anzeige
-            target_codec = None
-            if force_codec:
-                # Wenn ein spezifischer Codec gewählt wurde, verwende ihn
-                target_codec = selected_codec
+            target_codec = selected_codec if selected_codec != "auto" else None
+            encoding_plan = {
+                "strategy": "stream_copy_only",
+                "needs_clip_reencoding": False,
+                "needs_combined_reencoding": False,
+                "target_codec": target_codec,
+                "fallback_reason": None,
+            }
+            format_info = {"compatible": True, "details": ""}
 
             temp_copy_paths = []
 
@@ -1613,6 +1767,12 @@ class VideoPreview:
                     print(f"✅ Alle {len(cached_copy_paths)} Videos bereits im Cache")
                     temp_copy_paths = cached_copy_paths
                     needs_reencoding = False
+                    format_info = self._check_video_formats(temp_copy_paths, show_ui=False)
+                    encoding_plan = self._resolve_encoding_plan(
+                        selected_codec, encoding_strategy, format_info, reencode_matching_clips
+                    )
+                    if encoding_plan.get("target_codec"):
+                        target_codec = encoding_plan["target_codec"]
                     self.parent.after(0, lambda: self.encoding_label.config(
                         text="Verwende existierende Kopien"))
                     self.parent.after(0, lambda n=len(cached_copy_paths): self.status_label.config(
@@ -1645,85 +1805,93 @@ class VideoPreview:
 
                 if len(new_videos) > 0 and len(cached_videos) > 0:
                     # FALL 2a: Mix aus neuen und gecachten Videos
-                    if self.videos_were_reencoded:
-                        # Gecachte Videos wurden bereits neu kodiert (sind 1080p@30)
-                        # → Nur neue Videos müssen auf 1080p@30 kodiert werden
-                        print("✅ Gecachte Videos bereits standardisiert (1080p@30)")
-                        print(f"→ Kodiere nur die {len(new_videos)} neuen Video(s) auf 1080p@30")
+                    test_videos = [cached_videos[0]] + new_videos
+                    format_info = self._check_video_formats(test_videos)
+                    encoding_plan = self._resolve_encoding_plan(
+                        selected_codec, encoding_strategy, format_info, reencode_matching_clips
+                    )
+                    if encoding_plan.get("target_codec"):
+                        target_codec = encoding_plan["target_codec"]
+                    if encoding_plan.get("fallback_reason"):
+                        print(
+                            f"⚠️ Combined nicht möglich: {encoding_plan['fallback_reason']} "
+                            f"→ Fallback per_clip"
+                        )
 
-                        # WICHTIG: needs_reencoding=True, ABER Cache NICHT leeren!
-                        # Wir kodieren nur die neuen Videos, gecachte bleiben
-                        needs_reencoding = True
-
-                        self.parent.after(0, lambda n=len(new_videos): self.status_label.config(
-                            text=f"Kodiere {n} neue Clip(s), Cache bleibt erhalten…",
-                            fg="orange"))
-                        # Kodiere nur neue Videos (mit speziellem Flag um Cache-Clear zu vermeiden)
-                        new_encoded_paths = self._prepare_video_copies(new_videos, needs_reencoding=True, preserve_cache=True)
-
-                        # Jetzt baue temp_copy_paths in der richtigen Reihenfolge
+                    if encoding_plan["strategy"] == "combined":
+                        print("✅ Combined-Strategie: neue Clips per Stream-Copy")
+                        needs_reencoding = False
+                        self.videos_were_reencoded = True
+                        self._invalidate_combined_encode_cache()
+                        self.parent.after(0, lambda: self.status_label.config(
+                            text="Neue Clips kompatibel – kopiere in Arbeitsordner…",
+                            fg="blue"))
+                        self._prepare_video_copies(new_videos, needs_reencoding=False)
                         temp_copy_paths = []
                         for p in video_paths:
                             copy_path = self._find_cached_copy(p)
                             if copy_path:
                                 temp_copy_paths.append(copy_path)
                             else:
-                                # Sollte nicht passieren, aber zur Sicherheit
                                 raise Exception(f"Video {p} nicht in Cache gefunden!")
-                    else:
-                        # Gecachte Videos wurden nur kopiert (Stream-Copy)
-                        # → Prüfe ob neue Videos kompatibel sind
-                        print(f"Prüfe ob neue(s) Video(s) kompatibel mit gecachten...")
+                        self.parent.after(0, lambda: self._update_encoding_info(format_info, target_codec))
+                    elif self.videos_were_reencoded and encoding_plan["needs_clip_reencoding"]:
+                        # Gecachte Videos wurden bereits neu kodiert (sind 1080p@30)
+                        print("✅ Gecachte Videos bereits standardisiert (1080p@30)")
+                        print(f"→ Kodiere nur die {len(new_videos)} neuen Video(s) auf 1080p@30")
+                        needs_reencoding = True
+                        self._invalidate_combined_encode_cache()
+                        self.parent.after(0, lambda n=len(new_videos): self.status_label.config(
+                            text=f"Kodiere {n} neue Clip(s), Cache bleibt erhalten…",
+                            fg="orange"))
+                        self._prepare_video_copies(
+                            new_videos, needs_reencoding=True, preserve_cache=True
+                        )
+                        temp_copy_paths = []
+                        for p in video_paths:
+                            copy_path = self._find_cached_copy(p)
+                            if copy_path:
+                                temp_copy_paths.append(copy_path)
+                            else:
+                                raise Exception(f"Video {p} nicht in Cache gefunden!")
+                    elif format_info["compatible"] and not encoding_plan["needs_clip_reencoding"]:
+                        print("✅ Neue Videos kompatibel → Stream-Copy")
+                        needs_reencoding = False
                         self.parent.after(0, lambda: self.status_label.config(
-                            text="Prüfe Kompatibilität neuer mit gecachten Clips…",
+                            text="Neue Clips kompatibel – kopiere in Arbeitsordner…",
                             fg="blue"))
-
-                        # Prüfe Format: ein gecachtes + alle neuen
-                        test_videos = [cached_videos[0]] + new_videos
-                        format_info = self._check_video_formats(test_videos)
-
-                        if format_info["compatible"]:
-                            # Neue Videos sind kompatibel → Stream-Copy
-                            print("✅ Neue Videos kompatibel → Stream-Copy")
-                            needs_reencoding = False
-                            self.parent.after(0, lambda: self.status_label.config(
-                                text="Neue Clips kompatibel – kopiere in Arbeitsordner…",
-                                fg="blue"))
-                            new_copied_paths = self._prepare_video_copies(new_videos, needs_reencoding=False)
-
-                            # Baue temp_copy_paths mit file-identity-basiertem Cache
-                            temp_copy_paths = []
-                            for p in video_paths:
-                                copy_path = self._find_cached_copy(p)
-                                if copy_path:
-                                    temp_copy_paths.append(copy_path)
-                                else:
-                                    raise Exception(f"Video {p} nicht in Cache gefunden!")
-
-                            self.parent.after(0, lambda: self._update_encoding_info(format_info, target_codec))
-                        else:
-                            # Neue Videos nicht kompatibel → ALLE neu kodieren
-                            print(f"⚠️ Format-Unterschiede: {format_info['details']}")
-                            print("→ ALLE Videos werden auf 1080p@30 standardisiert")
-                            needs_reencoding = True
-
-                            # Wenn kein spezifischer Codec gewählt, wird standardisiert (h264)
-                            if not target_codec:
-                                target_codec = "h264"
-
-                            # Cache leeren - ABER Dateien NICHT löschen!
-                            # Die Dateien werden beim Re-Encoding überschrieben.
-                            if self.video_copies_map:
-                                print("🗑️ Leere Cache (Dateien bleiben erhalten für Re-Encoding)...")
-                                self.video_copies_map.clear()
-                                self.metadata_cache.clear()
-
-                            self.parent.after(0, lambda: self._update_encoding_info(format_info, target_codec))
-                            self.parent.after(0, lambda: self.status_label.config(
-                                text="Standardisiere alle Clips (Re-Encoding)…",
-                                fg="orange"))
-                            temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding=True)
-                            self.videos_were_reencoded = True  # Markiere als neu kodiert
+                        self._prepare_video_copies(new_videos, needs_reencoding=False)
+                        temp_copy_paths = []
+                        for p in video_paths:
+                            copy_path = self._find_cached_copy(p)
+                            if copy_path:
+                                temp_copy_paths.append(copy_path)
+                            else:
+                                raise Exception(f"Video {p} nicht in Cache gefunden!")
+                        self.parent.after(0, lambda: self._update_encoding_info(format_info, target_codec))
+                    else:
+                        # Inkompatible Clips oder erzwungenes per_clip → ALLE neu kodieren
+                        print(f"⚠️ Format-Unterschiede: {format_info['details']}")
+                        print("→ ALLE Videos werden auf 1080p@30 standardisiert")
+                        needs_reencoding = True
+                        if not target_codec:
+                            target_codec = encoding_plan.get("target_codec") or "h264"
+                        self._invalidate_combined_encode_cache()
+                        if self.video_copies_map:
+                            print("🗑️ Leere Cache (Dateien bleiben erhalten für Re-Encoding)...")
+                            self.video_copies_map.clear()
+                            self.metadata_cache.clear()
+                        self.parent.after(0, lambda: self._update_encoding_info(format_info, target_codec))
+                        self.parent.after(0, lambda: self.status_label.config(
+                            text="Standardisiere alle Clips (Re-Encoding)…",
+                            fg="orange"))
+                        temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding=True)
+                        self.videos_were_reencoded = True
+                        encoding_plan = self._resolve_encoding_plan(
+                            selected_codec, "per_clip", {"compatible": True, "details": "", "formats": []},
+                            reencode_matching_clips=True,
+                        )
+                        encoding_plan["needs_clip_reencoding"] = True
 
                 elif len(new_videos) == len(video_paths):
                     # FALL 2b: Alle Videos sind neu (erste Beladung)
@@ -1732,18 +1900,36 @@ class VideoPreview:
                         text=f"Analysiere Formate von {n} Clip(s)…",
                         fg="blue"))
                     format_info = self._check_video_formats(video_paths)
+                    encoding_plan = self._resolve_encoding_plan(
+                        selected_codec, encoding_strategy, format_info, reencode_matching_clips
+                    )
+                    if encoding_plan.get("target_codec"):
+                        target_codec = encoding_plan["target_codec"]
+                    if encoding_plan.get("fallback_reason"):
+                        print(
+                            f"⚠️ Combined nicht möglich: {encoding_plan['fallback_reason']} "
+                            f"→ Fallback per_clip"
+                        )
 
-                    # NEU: Prüfe Codec-Auswahl
-                    if force_codec:
-                        # Spezifischer Codec wurde ausgewählt → ALLE neu kodieren
+                    if encoding_plan["strategy"] == "combined":
+                        print(
+                            f"→ Codec '{selected_codec}' + Combined: Stream-Copy, dann einmal encodieren"
+                        )
+                        needs_reencoding = False
+                        self.videos_were_reencoded = True
+                        self._invalidate_combined_encode_cache()
+                        self.parent.after(0, lambda c=selected_codec: self.status_label.config(
+                            text=f"Codec „{c}“ (Combined) – bereite Clips vor…",
+                            fg="orange"))
+                    elif encoding_plan["needs_clip_reencoding"]:
                         print(f"→ Codec '{selected_codec}' ausgewählt → ALLE Videos werden neu kodiert")
                         needs_reencoding = True
                         self.videos_were_reencoded = True
+                        self._invalidate_combined_encode_cache()
                         self.parent.after(0, lambda c=selected_codec: self.status_label.config(
                             text=f"Codec „{c}“ erzwungen – bereite alle Clips vor…",
                             fg="orange"))
                     elif format_info["compatible"]:
-                        # Alle gleich → Stream-Copy
                         print("✅ Alle Videos kompatibel → Stream-Copy")
                         needs_reencoding = False
                         self.videos_were_reencoded = False
@@ -1751,20 +1937,21 @@ class VideoPreview:
                             text="Alle Formate gleich – Stream-Copy in Arbeitsordner…",
                             fg="blue"))
                     else:
-                        # Unterschiede → ALLE neu kodieren
                         print(f"⚠️ Format-Unterschiede: {format_info['details']}")
                         print("→ ALLE Videos werden auf 1080p@30 standardisiert")
                         needs_reencoding = True
                         self.videos_were_reencoded = True
-                        # Wenn kein spezifischer Codec gewählt, wird standardisiert (h264)
                         if not target_codec:
                             target_codec = "h264"
+                        self._invalidate_combined_encode_cache()
                         self.parent.after(0, lambda: self.status_label.config(
                             text="Formate uneinheitlich – standardisiere alle Clips…",
                             fg="orange"))
 
                     self.parent.after(0, lambda: self._update_encoding_info(format_info, target_codec))
-                    temp_copy_paths = self._prepare_video_copies(video_paths, needs_reencoding=needs_reencoding)
+                    temp_copy_paths = self._prepare_video_copies(
+                        video_paths, needs_reencoding=encoding_plan["needs_clip_reencoding"]
+                    )
                 else:
                     # FALL 2c: Nur gecachte Videos (sollte nicht vorkommen, wäre FALL 1)
                     temp_copy_paths = []
@@ -1782,11 +1969,14 @@ class VideoPreview:
 
             n_clips = len(temp_copy_paths)
             print(f"Starte Kombinierung von {n_clips} Videos...")
-            self.parent.after(0, lambda n=n_clips: self.status_label.config(
-                text=f"Kombiniere {n} Clip(s) ohne Neuencode (FFmpeg concat)…",
-                fg="blue"))
 
-            self.combined_video_path = self._create_fast_combined_video(temp_copy_paths)
+            combined_path, was_reencoded = self._finalize_combined_preview(
+                video_paths, temp_copy_paths, encoding_plan
+            )
+            self.combined_video_path = combined_path
+            if was_reencoded:
+                self.videos_were_reencoded = True
+            needs_reencoding = was_reencoded
 
             if self.cancellation_event.is_set():
                 self.parent.after(0, self._update_ui_cancelled)
@@ -1862,7 +2052,9 @@ class VideoPreview:
     def _begin_combine_progress_ui(self, copy_paths):
         """Hauptthread: Fortschrittsbalken für FFmpeg-Concat anzeigen."""
         if not self.progress_handler:
-            self.progress_handler = ProgressHandler(self.progress_frame)
+            self.progress_handler = ProgressHandler(
+                self.progress_frame, details_parent=self.status_column
+            )
         self._stop_combine_indeterminate_if_any()
         self.progress_handler.pack_progress_bar_right()
         try:
@@ -1908,6 +2100,73 @@ class VideoPreview:
             ct = self._format_duration_compact(cur_sec)
             tt = self._format_duration_compact(total_sec)
             self.progress_handler.encoding_details_label.config(text=f"Kombiniere… {ct} / {tt}")
+            self.parent.update_idletasks()
+        except tk.TclError:
+            pass
+
+    def _begin_combined_encode_progress_ui(self, input_path, codec):
+        """Hauptthread: Fortschrittsbalken für Combined-Re-Encode anzeigen."""
+        if not self.progress_handler:
+            self.progress_handler = ProgressHandler(
+                self.progress_frame, details_parent=self.status_column
+            )
+        self._stop_combine_indeterminate_if_any()
+        self.progress_handler.pack_progress_bar_right()
+
+        total = self._get_video_duration_seconds(input_path)
+        if total is None:
+            total = 0.0
+        self._combined_encode_total_sec = max(float(total), 0.0)
+        self._combined_encode_codec = codec
+        self._combined_encode_use_indeterminate = self._combined_encode_total_sec < 0.05
+
+        bar = self.progress_handler.progress_bar
+        codec_label = (codec or "h264").upper()
+        if self._combined_encode_use_indeterminate:
+            try:
+                bar.config(mode="indeterminate", maximum=100)
+                bar.start(12)
+            except tk.TclError:
+                pass
+            self._combine_indeterminate_active = True
+            self.progress_handler.eta_label.config(text="Encodiere…")
+            self.progress_handler.encoding_details_label.config(
+                text=f"1× Encode als {codec_label}…"
+            )
+        else:
+            self._combine_indeterminate_active = False
+            try:
+                bar.stop()
+            except tk.TclError:
+                pass
+            bar.config(mode="determinate", maximum=100)
+            bar["value"] = 0
+            self.progress_handler.eta_label.config(text="0%")
+            self.progress_handler.encoding_details_label.config(
+                text=f"Encodiere kombiniert als {codec_label}…"
+            )
+        self.update_encoding_progress(0, task_name=f"Encodiere ({codec_label})")
+        self.parent.update_idletasks()
+
+    def _apply_combined_encode_progress_ui(self, pct, cur_sec, total_sec, codec=None,
+                                           fps=None, eta=None):
+        """Hauptthread: Fortschritt während Combined-Re-Encode aktualisieren."""
+        if not self.progress_handler:
+            return
+        if getattr(self, "_combined_encode_use_indeterminate", False):
+            return
+        try:
+            self.progress_handler.progress_bar["value"] = pct
+            self.progress_handler.eta_label.config(text=f"{int(min(100, pct))}%")
+            ct = self._format_duration_compact(cur_sec)
+            tt = self._format_duration_compact(total_sec)
+            codec_label = (codec or getattr(self, "_combined_encode_codec", None) or "h264").upper()
+            self.progress_handler.encoding_details_label.config(
+                text=f"Encodiere ({codec_label})… {ct} / {tt}"
+            )
+            self.update_encoding_progress(
+                pct, fps=fps, eta=eta, task_name=f"Encodiere ({codec_label})"
+            )
             self.parent.update_idletasks()
         except tk.TclError:
             pass
@@ -2044,8 +2303,8 @@ class VideoPreview:
             video_paths: Pfade zu den zu prüfenden Dateien
             show_ui: Wenn False (z. B. Hintergrund nach Schnitt), kein Spinner/Status pro Clip
         """
-        if len(video_paths) <= 1:
-            return {"compatible": True, "details": "Nur ein Video - kompatibel"}
+        if not video_paths:
+            return {"compatible": True, "details": "Keine Videos", "formats": []}
 
         total = len(video_paths)
         formats = []
@@ -2114,7 +2373,19 @@ class VideoPreview:
 
         first_format = next((f for f in formats if 'error' not in f), None)
         if not first_format:
-            return {"compatible": False, "details": "No valid video streams found."}
+            return {
+                "compatible": False,
+                "details": "No valid video streams found.",
+                "formats": formats,
+            }
+
+        if total <= 1:
+            return {
+                "compatible": True,
+                "details": "Nur ein Video - kompatibel",
+                "formats": formats,
+            }
+
         is_compatible = True
         diffs = []
         compare_keys = [
@@ -2131,7 +2402,7 @@ class VideoPreview:
                     is_compatible = False
                     diffs.append(f"V{i + 1} {key}")
         details = f"Alle {len(video_paths)} Videos kompatibel." if is_compatible else f"Format-Unterschiede: {', '.join(diffs[:3])}"
-        return {"compatible": is_compatible, "details": details}
+        return {"compatible": is_compatible, "details": details, "formats": formats}
 
     def _update_encoding_info(self, format_info, target_codec=None):
         """
@@ -2322,25 +2593,51 @@ class VideoPreview:
             standardized_this_run = False
             format_info = {"compatible": True, "details": ""}
 
-            if len(temp_copy_paths) > 1:
-                self.parent.after(0, lambda: self.status_label.config(
-                    text="Prüfe Clip-Kompatibilität nach Schnitt...", fg="blue"))
-                format_info = self._check_video_formats(temp_copy_paths, show_ui=False)
-                if not format_info.get("compatible", False):
-                    print(f"⚠️ Nach Schnitt: {format_info.get('details', '')}")
-                    print("→ Standardisiere alle Clips für sicheres concat (wie erste Vorschau).")
-                    standardized_this_run = True
-                    self.videos_were_reencoded = True
-                    self.parent.after(
-                        0, lambda fi=format_info: self._update_encoding_info(fi, "h264"))
-                    temp_copy_paths = self._prepare_video_copies(
-                        self.last_video_paths, needs_reencoding=True)
+            selected_codec, encoding_strategy, reencode_matching_clips = self._get_preview_encoding_settings()
+            target_codec = selected_codec if selected_codec != "auto" else None
+
+            format_info = self._check_video_formats(temp_copy_paths, show_ui=False)
+
+            encoding_plan = self._resolve_encoding_plan(
+                selected_codec, encoding_strategy, format_info, reencode_matching_clips
+            )
+            if encoding_plan.get("target_codec"):
+                target_codec = encoding_plan["target_codec"]
+            self._invalidate_combined_encode_cache()
+
+            if not format_info.get("compatible", False):
+                print(f"⚠️ Nach Schnitt: {format_info.get('details', '')}")
+                print("→ Standardisiere alle Clips für sicheres concat (wie erste Vorschau).")
+                standardized_this_run = True
+                self.videos_were_reencoded = True
+                encoding_plan = self._resolve_encoding_plan(
+                    selected_codec, "per_clip",
+                    {"compatible": True, "details": "", "formats": format_info.get("formats", [])},
+                    reencode_matching_clips=True,
+                )
+                encoding_plan["needs_clip_reencoding"] = True
+                self.parent.after(
+                    0, lambda fi=format_info: self._update_encoding_info(fi, target_codec or "h264"))
+                temp_copy_paths = self._prepare_video_copies(
+                    self.last_video_paths, needs_reencoding=True
+                )
+            elif encoding_plan.get("fallback_reason"):
+                print(
+                    f"⚠️ Combined nicht möglich: {encoding_plan['fallback_reason']} "
+                    f"→ Fallback per_clip"
+                )
 
             if self.cancellation_event.is_set():
                 self.parent.after(0, self._update_ui_cancelled)
                 return
 
-            new_combined_path = self._create_fast_combined_video(temp_copy_paths)
+            video_paths = self.last_video_paths or []
+            new_combined_path, was_reencoded = self._finalize_combined_preview(
+                video_paths, temp_copy_paths, encoding_plan
+            )
+            if was_reencoded:
+                standardized_this_run = True
+                self.videos_were_reencoded = True
 
             if self.cancellation_event.is_set():
                 self.parent.after(0, self._update_ui_cancelled)

@@ -1488,9 +1488,11 @@ class SettingsDialog:
         version_frame.grid_columnconfigure(1, weight=1)
 
         # Variables for version switcher
-        self.available_versions = []  # Will be filled when loading
+        self.all_available_versions = []  # Raw release data from updater
+        self.available_versions = []  # Filtered list shown in dropdown
         self.selected_version_data = None
         self.version_var = tk.StringVar()
+        self.show_prereleases_var = tk.BooleanVar(value=False)
 
         # Row 0: Update Button (top left) and empty space
         update_button = tk.Button(
@@ -1499,9 +1501,19 @@ class SettingsDialog:
         )
         update_button.grid(row=0, column=0, sticky="w", pady=(5, 10), padx=5)
 
-        # Row 1: Dropdown Label, Dropdown, and Apply Button in same row
+        # Row 0: Prerelease filter (right of update button)
+        self.show_prereleases_checkbox = tk.Checkbutton(
+            version_frame,
+            text="Prereleases anzeigen",
+            variable=self.show_prereleases_var,
+            font=("Arial", 10),
+            command=self.on_prerelease_filter_changed,
+        )
+        self.show_prereleases_checkbox.grid(row=0, column=1, columnspan=2, sticky="w", padx=(10, 5), pady=(5, 10))
+
+        # Row 2: Dropdown Label, Dropdown, and Apply Button in same row
         dropdown_label = tk.Label(version_frame, text="Verfügbare Versionen:", font=("Arial", 10))
-        dropdown_label.grid(row=1, column=0, sticky="w", padx=(5, 10), pady=(5, 10))
+        dropdown_label.grid(row=2, column=0, sticky="w", padx=(5, 10), pady=(5, 10))
 
         self.version_dropdown = ttk.Combobox(
             version_frame,
@@ -1511,7 +1523,7 @@ class SettingsDialog:
             width=25,
             height=10  # Maximal 10 Einträge gleichzeitig sichtbar
         )
-        self.version_dropdown.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(5, 10))
+        self.version_dropdown.grid(row=2, column=1, sticky="ew", padx=(0, 10), pady=(5, 10))
         self.version_dropdown.bind("<<ComboboxSelected>>", self.on_version_selected)
 
         self.apply_version_button = tk.Button(
@@ -1525,11 +1537,11 @@ class SettingsDialog:
             height=1,
             state="disabled"
         )
-        self.apply_version_button.grid(row=1, column=2, sticky="e", padx=5, pady=(5, 10))
+        self.apply_version_button.grid(row=2, column=2, sticky="e", padx=5, pady=(5, 10))
 
-        # Row 2: Release-Info (Tab-Scroll übernimmt vertikales Scrollen)
+        # Row 3: Release-Info (Tab-Scroll übernimmt vertikales Scrollen)
         info_panel_container = tk.Frame(version_frame, relief=tk.SUNKEN, borderwidth=1, bg="white")
-        info_panel_container.grid(row=2, column=0, columnspan=3, sticky="ew", padx=5, pady=(0, 10))
+        info_panel_container.grid(row=3, column=0, columnspan=3, sticky="ew", padx=5, pady=(0, 10))
 
         self.version_info_label = tk.Label(
             info_panel_container,
@@ -1570,7 +1582,7 @@ class SettingsDialog:
             font=("Arial", 9),
             fg="#666666"
         )
-        self.version_status_label.grid(row=3, column=0, columnspan=3, pady=(0, 5), padx=5)
+        self.version_status_label.grid(row=4, column=0, columnspan=3, pady=(0, 5), padx=5)
 
         # Store reference to status label grid info
         self.version_status_label_shown = True
@@ -1603,6 +1615,8 @@ class SettingsDialog:
     def check_for_updates(self):
         """Startet die Update-Prüfung"""
         try:
+            # Wichtig: Dieser Check bleibt bewusst bei GitHub /releases/latest (stable only).
+            # Die Checkbox "Prereleases anzeigen" wirkt nur auf den Versions-Dropdown im Settings-Tab.
             # Verwende die gleiche Funktion wie beim App-Start, aber mit Benachrichtigung
             # force_check=True zeigt auch ignorierte Versionen an
             from src.installer.updater import initialize_updater
@@ -1638,6 +1652,7 @@ class SettingsDialog:
 
     def _populate_version_dropdown(self, releases):
         """Füllt Dropdown mit verfügbaren Versionen (wird im Main Thread aufgerufen)"""
+        self.selected_version_data = None
         if releases is None:
             # Error loading releases
             self.version_status_label.config(
@@ -1645,34 +1660,68 @@ class SettingsDialog:
                 fg="red"
             )
             if not self.version_status_label_shown:
-                self.version_status_label.grid(row=3, column=0, columnspan=3, pady=(0, 5), padx=5)
+                self.version_status_label.grid(row=4, column=0, columnspan=3, pady=(0, 5), padx=5)
                 self.version_status_label_shown = True
             self.version_dropdown.config(state="disabled")
+            self.version_dropdown.set("")
+            self.version_info_label.config(text="Wählen Sie eine Version aus der Liste")
+            self.release_date_label.config(text="")
+            self.apply_version_button.config(state="disabled")
             return
 
-        if not releases:
-            self.version_status_label.config(
-                text="Keine Versionen verfügbar.",
-                fg="#666666"
-            )
+        self.all_available_versions = releases
+        self._apply_version_filter_and_refresh()
+
+    def _apply_version_filter_and_refresh(self):
+        """Filtert Releases gemäß Prerelease-Checkbox und aktualisiert das Dropdown."""
+        all_releases = self.all_available_versions or []
+        include_prereleases = self.show_prereleases_var.get()
+
+        if include_prereleases:
+            filtered_releases = list(all_releases)
+        else:
+            filtered_releases = [
+                release for release in all_releases
+                if not bool(release.get("prerelease", False))
+            ]
+
+        self.available_versions = filtered_releases
+        self.version_dropdown.set("")
+        self.selected_version_data = None
+
+        for widget in self.patch_notes_container.winfo_children():
+            widget.destroy()
+
+        self.version_info_label.config(text="Wählen Sie eine Version aus der Liste")
+        self.release_date_label.config(text="")
+        self.apply_version_button.config(state="disabled")
+
+        if not filtered_releases:
+            if all_releases and not include_prereleases:
+                status_text = "Keine normalen Releases verfügbar. Aktivieren Sie 'Prereleases anzeigen'."
+            else:
+                status_text = "Keine Versionen verfügbar."
+
+            self.version_status_label.config(text=status_text, fg="#666666")
             if not self.version_status_label_shown:
-                self.version_status_label.grid(row=3, column=0, columnspan=3, pady=(0, 5), padx=5)
+                self.version_status_label.grid(row=4, column=0, columnspan=3, pady=(0, 5), padx=5)
                 self.version_status_label_shown = True
+            self.version_dropdown["values"] = []
             self.version_dropdown.config(state="disabled")
             return
 
-        # Store releases data
-        self.available_versions = releases
-
-        # Build dropdown values (mark current version)
+        # Build dropdown values (mark current version and prereleases)
         dropdown_values = []
-        for release in releases:
+        for release in filtered_releases:
             version_text = release['tag_name']
             if version_text == self.APP_VERSION:
                 version_text += " (Installiert)"
+            elif bool(release.get("prerelease", False)):
+                version_text += " (Prerelease)"
             dropdown_values.append(version_text)
 
         self.version_dropdown['values'] = dropdown_values
+        self.version_dropdown.config(state="readonly")
 
         # Hide status label when successful
         if self.version_status_label_shown:
@@ -1680,11 +1729,15 @@ class SettingsDialog:
             self.version_status_label_shown = False
 
         # Select current version by default if available
-        for idx, release in enumerate(releases):
+        for idx, release in enumerate(filtered_releases):
             if release['tag_name'] == self.APP_VERSION:
                 self.version_dropdown.current(idx)
                 self.on_version_selected(None)
                 break
+
+    def on_prerelease_filter_changed(self):
+        """Aktualisiert die Liste verfügbarer Versionen nach Filterwechsel."""
+        self._apply_version_filter_and_refresh()
 
     def on_version_selected(self, event):
         """Event handler wenn eine Version im Dropdown ausgewählt wird"""
@@ -1870,6 +1923,7 @@ class SettingsDialog:
         self.qr_remove_video_max_duration_sec_var.set(
             str(settings.get("qr_remove_video_max_duration_sec", 10))
         )
+        self.show_prereleases_var.set(bool(settings.get("show_prereleases", False)))
         self._on_qr_scan_scope_changed()
         self._on_intro_enabled_toggle()
         self._on_qr_remove_video_toggle()
@@ -1937,6 +1991,7 @@ class SettingsDialog:
         intro_enabled = bool(self.intro_enabled_var.get())
         qr_remove_photo_after_scan = self.qr_remove_photo_after_scan_var.get()
         qr_remove_video_after_scan = self.qr_remove_video_after_scan_var.get()
+        show_prereleases = bool(self.show_prereleases_var.get())
 
         try:
             qr_video_scan_seconds = float(self.qr_video_scan_seconds_var.get().strip())
@@ -2065,6 +2120,7 @@ class SettingsDialog:
             current_settings["qr_remove_photo_after_scan"] = qr_remove_photo_after_scan
             current_settings["qr_remove_video_after_scan"] = qr_remove_video_after_scan
             current_settings["qr_remove_video_max_duration_sec"] = qr_remove_video_max_duration_sec
+            current_settings["show_prereleases"] = show_prereleases
 
             # Speichern
             self.config.save_settings(current_settings)

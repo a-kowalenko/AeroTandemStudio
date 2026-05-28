@@ -21,6 +21,8 @@ if sys.platform == "win32":
     import ctypes
 
 # Konfiguration
+# Wichtig: /releases/latest liefert absichtlich nur das stabile "latest" Release.
+# Prerelease-Handling ist nur für den manuellen Versions-Dropdown in den Einstellungen.
 GITHUB_API_URL = "https://api.github.com/repos/a-kowalenko/AeroTandemStudio/releases/latest"
 GITHUB_ALL_RELEASES_URL = "https://api.github.com/repos/a-kowalenko/AeroTandemStudio/releases"
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -348,7 +350,8 @@ def get_all_releases(min_version=None):
             'tag_name': str,      # z.B. "0.5.1.2"
             'published_at': str,  # z.B. "2024-01-15T10:30:00Z"
             'body': str,          # Release Notes (Markdown)
-            'installer_url': str  # Download-URL für .exe
+            'installer_url': str, # Download-URL für .exe
+            'prerelease': bool    # GitHub Prerelease-Flag
         }
         Oder None bei Fehler
     """
@@ -396,7 +399,8 @@ def get_all_releases(min_version=None):
                     'tag_name': tag,
                     'published_at': release.get("published_at", ""),
                     'body': release.get("body", "Keine Details verfügbar."),
-                    'installer_url': installer_url
+                    'installer_url': installer_url,
+                    'prerelease': bool(release.get("prerelease", False)),
                 })
 
         # Sortiere absteigend nach Version

@@ -67,6 +67,8 @@ class ConfigManager:
                         settings["qr_remove_video_after_scan"] = False
                     if "qr_remove_video_max_duration_sec" not in settings:
                         settings["qr_remove_video_max_duration_sec"] = 10
+                    if "show_prereleases" not in settings:
+                        settings["show_prereleases"] = False
                     return settings
             except (json.JSONDecodeError, FileNotFoundError):
                 return self.get_default_settings()
@@ -100,6 +102,7 @@ class ConfigManager:
             "qr_remove_photo_after_scan": False,
             "qr_remove_video_after_scan": False,
             "qr_remove_video_max_duration_sec": 10,
+            "show_prereleases": False,
             # SD-Karten Backup Einstellungen
             "sd_backup_folder": "",
             "sd_auto_backup": False,

@@ -44,6 +44,9 @@ class SettingsDialog:
         # Variablen für SD-Karten Backup
         self.sd_backup_folder_var = tk.StringVar()
         self.sd_auto_backup_var = tk.BooleanVar()
+        self.sd_server_backup_enabled_var = tk.BooleanVar()
+        self.sd_server_backup_path_var = tk.StringVar()
+        self.sd_server_backup_mode_var = tk.StringVar(value="direct_dual_write")
         self.sd_clear_var = tk.BooleanVar()
         self.sd_auto_import_var = tk.BooleanVar()
         self.sd_skip_processed_var = tk.BooleanVar()
@@ -507,6 +510,56 @@ class SettingsDialog:
                                          command=self.waehle_backup_ordner)
         backup_folder_button.grid(row=0, column=1, sticky="e")
 
+        # Optionales Server-Backup (nur sichtbar bei Auto-Backup)
+        self.sd_server_backup_checkbox = tk.Checkbutton(
+            backup_frame,
+            text="Zusätzlich auf Server sichern",
+            variable=self.sd_server_backup_enabled_var,
+            font=("Arial", 10),
+            command=self.on_server_backup_toggle,
+        )
+
+        self.sd_server_path_frame = tk.Frame(backup_frame)
+        self.sd_server_path_frame.grid_columnconfigure(1, weight=1)
+        tk.Label(self.sd_server_path_frame, text="Server-Pfad:", font=("Arial", 10)).grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
+        self.sd_server_path_entry = tk.Entry(
+            self.sd_server_path_frame,
+            textvariable=self.sd_server_backup_path_var,
+            font=("Arial", 10),
+        )
+        self.sd_server_path_entry.grid(row=0, column=1, sticky="ew", padx=(0, 5))
+        tk.Button(
+            self.sd_server_path_frame,
+            text="Wählen...",
+            command=self.waehle_server_backup_ordner,
+        ).grid(row=0, column=2, sticky="e")
+
+        self.sd_server_mode_frame = tk.Frame(backup_frame)
+        tk.Label(
+            self.sd_server_mode_frame,
+            text="Kopierstrategie:",
+            font=("Arial", 9),
+            fg="gray",
+        ).pack(anchor="w", padx=0)
+        tk.Radiobutton(
+            self.sd_server_mode_frame,
+            text="Direkt: pro Datei SD -> lokal + Server",
+            variable=self.sd_server_backup_mode_var,
+            value="direct_dual_write",
+            font=("Arial", 9),
+            anchor="w",
+        ).pack(anchor="w")
+        tk.Radiobutton(
+            self.sd_server_mode_frame,
+            text="Spiegeln: erst lokal, dann lokal -> Server",
+            variable=self.sd_server_backup_mode_var,
+            value="local_then_server",
+            font=("Arial", 9),
+            anchor="w",
+        ).pack(anchor="w")
+
         # Haupt-Checkbox: Automatischer Backup
         self.sd_auto_backup_checkbox = tk.Checkbutton(
             backup_frame,
@@ -941,21 +994,29 @@ class SettingsDialog:
             # 1. Automatisch importieren (ERSTE Option)
             self.sd_auto_import_checkbox.grid(row=3, column=0, sticky="w", padx=30, pady=2)
 
+            # 1b. Optionales Server-Backup
+            self.sd_server_backup_checkbox.grid(row=4, column=0, sticky="w", padx=30, pady=(6, 2))
+            self.on_server_backup_toggle()
+
             # 2. Größen-Limit Option
-            self.sd_size_limit_checkbox.grid(row=4, column=0, sticky="w", padx=30, pady=(8, 2))
+            self.sd_size_limit_checkbox.grid(row=7, column=0, sticky="w", padx=30, pady=(8, 2))
             self.on_size_limit_toggle()  # Zeige/Verstecke Eingabefeld
 
             # 3. SD-Karte leeren
-            self.sd_clear_checkbox.grid(row=6, column=0, sticky="w", padx=30, pady=2)
+            self.sd_clear_checkbox.grid(row=9, column=0, sticky="w", padx=30, pady=2)
         else:
             # Verstecke und deaktiviere alle abhängigen Checkboxen
             self.sd_pc_name_frame.grid_forget()
             self.sd_auto_import_checkbox.grid_forget()
+            self.sd_server_backup_checkbox.grid_forget()
+            self.sd_server_path_frame.grid_forget()
+            self.sd_server_mode_frame.grid_forget()
             self.sd_size_limit_checkbox.grid_forget()
             self.sd_size_limit_frame.grid_forget()
             self.sd_clear_checkbox.grid_forget()
             self.sd_skip_manual_checkbox.grid_forget()
             self.sd_auto_import_var.set(False)
+            self.sd_server_backup_enabled_var.set(False)
             self.sd_size_limit_enabled_var.set(False)
             self.sd_clear_var.set(False)
             self.sd_skip_processed_manual_var.set(False)
@@ -979,13 +1040,23 @@ class SettingsDialog:
             self.sd_skip_manual_checkbox.grid_forget()
             self.sd_skip_processed_manual_var.set(False)
 
+    def on_server_backup_toggle(self):
+        """Zeigt/versteckt Felder für optionales Server-Backup."""
+        enabled = self.sd_server_backup_enabled_var.get()
+        if enabled and self.sd_auto_backup_var.get():
+            self.sd_server_path_frame.grid(row=5, column=0, columnspan=2, sticky="ew", padx=50, pady=(0, 2))
+            self.sd_server_mode_frame.grid(row=6, column=0, columnspan=2, sticky="w", padx=50, pady=(0, 2))
+        else:
+            self.sd_server_path_frame.grid_forget()
+            self.sd_server_mode_frame.grid_forget()
+
     def on_size_limit_toggle(self):
         """Wird aufgerufen wenn die Größen-Limit Checkbox geändert wird"""
         is_enabled = self.sd_size_limit_enabled_var.get()
 
         if is_enabled:
             # Zeige Eingabefeld (noch mehr eingerückt als Checkbox)
-            self.sd_size_limit_frame.grid(row=5, column=0, sticky="w", padx=50, pady=(0, 2))
+            self.sd_size_limit_frame.grid(row=8, column=0, sticky="w", padx=50, pady=(0, 2))
         else:
             # Verstecke Eingabefeld
             self.sd_size_limit_frame.grid_forget()
@@ -1722,6 +1793,12 @@ class SettingsDialog:
         if directory:
             self.sd_backup_folder_var.set(directory)
 
+    def waehle_server_backup_ordner(self):
+        """Öffnet Dialog zur Auswahl des optionalen Server-Backup-Ordners."""
+        directory = filedialog.askdirectory(parent=self.dialog, title="Server Backup-Ordner wählen")
+        if directory:
+            self.sd_server_backup_path_var.set(directory)
+
     def load_settings(self):
         """Lädt die gespeicherten Einstellungen"""
         settings = self.config.get_settings()
@@ -1737,6 +1814,9 @@ class SettingsDialog:
         # SD-Karten Backup
         self.sd_backup_folder_var.set(settings.get("sd_backup_folder", ""))
         self.sd_auto_backup_var.set(settings.get("sd_auto_backup", False))
+        self.sd_server_backup_enabled_var.set(settings.get("sd_server_backup_enabled", False))
+        self.sd_server_backup_path_var.set(settings.get("sd_server_backup_path", ""))
+        self.sd_server_backup_mode_var.set(settings.get("sd_server_backup_mode", "direct_dual_write"))
         self.sd_clear_var.set(settings.get("sd_clear_after_backup", False))
         self.sd_auto_import_var.set(settings.get("sd_auto_import", False))
         self.sd_skip_processed_var.set(settings.get("sd_skip_processed", False))  # NEU
@@ -1816,6 +1896,9 @@ class SettingsDialog:
         # SD-Karten Backup
         sd_backup_folder = self.sd_backup_folder_var.get()
         sd_auto_backup = self.sd_auto_backup_var.get()
+        sd_server_backup_enabled = self.sd_server_backup_enabled_var.get()
+        sd_server_backup_path = self.sd_server_backup_path_var.get().strip()
+        sd_server_backup_mode = self.sd_server_backup_mode_var.get().strip()
         sd_clear = self.sd_clear_var.get()
         sd_auto_import = self.sd_auto_import_var.get()
         sd_skip_processed = self.sd_skip_processed_var.get()  # NEU
@@ -1920,6 +2003,11 @@ class SettingsDialog:
         if sd_auto_backup and not sd_backup_folder:
             messagebox.showwarning("Fehler", "Bitte geben Sie einen Backup-Ordner an.", parent=self.dialog)
             return
+        if sd_auto_backup and sd_server_backup_enabled and not sd_server_backup_path:
+            messagebox.showwarning("Fehler", "Bitte geben Sie einen Server-Backup-Pfad an.", parent=self.dialog)
+            return
+        if sd_server_backup_mode not in ("direct_dual_write", "local_then_server"):
+            sd_server_backup_mode = "direct_dual_write"
 
         try:
             # Aktuelle Einstellungen laden
@@ -1938,6 +2026,9 @@ class SettingsDialog:
             # SD-Karten Backup Einstellungen
             current_settings["sd_backup_folder"] = sd_backup_folder
             current_settings["sd_auto_backup"] = sd_auto_backup
+            current_settings["sd_server_backup_enabled"] = sd_server_backup_enabled
+            current_settings["sd_server_backup_path"] = sd_server_backup_path
+            current_settings["sd_server_backup_mode"] = sd_server_backup_mode
             current_settings["sd_clear_after_backup"] = sd_clear
             current_settings["sd_auto_import"] = sd_auto_import
             current_settings["sd_skip_processed"] = sd_skip_processed  # NEU

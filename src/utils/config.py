@@ -31,6 +31,12 @@ class ConfigManager:
                         settings["sd_skip_processed"] = False
                     if "sd_pc_name" not in settings:
                         settings["sd_pc_name"] = ""
+                    if "sd_server_backup_enabled" not in settings:
+                        settings["sd_server_backup_enabled"] = False
+                    if "sd_server_backup_path" not in settings:
+                        settings["sd_server_backup_path"] = ""
+                    if "sd_server_backup_mode" not in settings:
+                        settings["sd_server_backup_mode"] = "direct_dual_write"
                     if "gast_name" not in settings:
                         settings["gast_name"] = ""
                     if "qr_video_scan_seconds" not in settings:
@@ -98,6 +104,9 @@ class ConfigManager:
             "sd_backup_folder": "",
             "sd_auto_backup": False,
             "sd_pc_name": "",
+            "sd_server_backup_enabled": False,
+            "sd_server_backup_path": "",
+            "sd_server_backup_mode": "direct_dual_write",  # direct_dual_write | local_then_server
             "sd_clear_after_backup": False,
             "sd_auto_import": False,
             "sd_skip_processed": False,  # Nur neue Dateien sichern/importieren

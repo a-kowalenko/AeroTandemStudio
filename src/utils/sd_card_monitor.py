@@ -10,6 +10,8 @@ import threading
 import shutil
 import string
 import sys
+import platform
+import subprocess
 
 try:
     import win32api
@@ -37,6 +39,8 @@ except ImportError:
 LINUX_API_AVAILABLE = True
 
 from src.utils.media_history import MediaHistoryStore, get_media_type_from_filename  # NEU
+from src.utils.file_utils import normalize_server_path
+from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 
 
 class SDCardMonitor:
@@ -293,7 +297,7 @@ class SDCardMonitor:
                 backup_type = "full"
 
             # Erstelle Backup (mit optionaler Dateiauswahl)
-            backup_path, error_message, copied_files = self._create_backup(drive, backup_folder, selected_files)
+            backup_path, error_message, copied_files, backup_info = self._create_backup(drive, backup_folder, selected_files)
 
             if backup_path:
                 print(f"Backup erfolgreich: {backup_path}")
@@ -318,20 +322,20 @@ class SDCardMonitor:
 
                 # Rufe Callback auf mit Erfolg
                 if self.on_backup_complete:
-                    self.on_backup_complete(backup_path, True, None)
+                    self.on_backup_complete(backup_path, True, None, backup_info)
             else:
                 # Backup fehlgeschlagen
                 print(f"Backup fehlgeschlagen: {error_message}")
                 backup_type = "failed"
                 if self.on_backup_complete:
-                    self.on_backup_complete(None, False, error_message)
+                    self.on_backup_complete(None, False, error_message, None)
 
         except Exception as e:
             error_message = f"Fehler beim Backup: {str(e)}"
             print(error_message)
             backup_type = "failed"
             if self.on_backup_complete:
-                self.on_backup_complete(None, False, error_message)
+                self.on_backup_complete(None, False, error_message, None)
         finally:
             # Setze backup_in_progress IMMER zurück (auch bei Fehler oder SD-Entfernung)
             self.backup_in_progress = False
@@ -470,13 +474,15 @@ class SDCardMonitor:
                            Wenn None, werden alle Dateien kopiert.
 
         Returns:
-            Tuple (backup_path, error_message, copied_files):
-                - backup_path: Pfad zum Backup-Ordner oder None bei Fehler
+            Tuple (backup_path, error_message, copied_files, backup_info):
+                - backup_path: Pfad zum lokalen Backup-Ordner oder None bei Fehler
                 - error_message: Fehlermeldung oder None bei Erfolg
                 - copied_files: Liste der erfolgreich kopierten Quelldateien (Pfade auf SD-Karte)
+                - backup_info: Zusatzinfos zum optionalen Server-Backup
         """
         backup_path = None
-        copied_source_files = []  # NEU: Tracke erfolgreich kopierte Quelldateien
+        copied_source_files = []
+        server_cleanup = None
         try:
             settings = self.config.get_settings()
             raw_pc_name = (settings.get("sd_pc_name") or "").strip()
@@ -484,59 +490,45 @@ class SDCardMonitor:
             pc_part = f"[{safe_pc_name}]" if safe_pc_name else ""
             short_hash = secrets.token_hex(2)
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-            backup_path = os.path.join(backup_folder, f"SD_Backup_{timestamp}{pc_part}_{short_hash}")
+            backup_dir_name = f"SD_Backup_{timestamp}{pc_part}_{short_hash}"
+            backup_path = os.path.join(backup_folder, backup_dir_name)
 
             print(f"Starte Backup von {drive} nach {backup_path}...")
-
             if selected_files:
                 print(f"  → Nur {len(selected_files)} ausgewählte Dateien werden kopiert")
 
-            # DCIM Ordner
             dcim_source = os.path.join(drive, "DCIM")
-
             if not os.path.isdir(dcim_source):
                 error_msg = f"DCIM Ordner nicht gefunden: {dcim_source}"
                 print(error_msg)
-                return None, error_msg, []
+                return None, error_msg, [], None
 
-            # Erstelle Backup-Ordner
             os.makedirs(backup_path, exist_ok=True)
 
-            # Definiere erlaubte Mediendatei-Endungen
             valid_video_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.m4v', '.mpg', '.mpeg', '.wmv', '.flv', '.webm'}
             valid_photo_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.gif', '.webp', '.heic', '.raw', '.cr2', '.nef', '.arw', '.dng'}
             valid_extensions = valid_video_extensions | valid_photo_extensions
 
-            # Sammle alle Mediendateien (oder nur ausgewählte)
             media_files = []
-
             if selected_files:
-                # Nur ausgewählte Dateien
                 for file_path in selected_files:
                     if os.path.exists(file_path):
                         media_files.append(file_path)
             else:
-                # Alle Dateien sammeln
                 for root, dirs, files in os.walk(dcim_source):
                     for file in files:
-                        file_lower = file.lower()
-                        file_ext = os.path.splitext(file_lower)[1]
-
-                        # Nur vollwertige Mediendateien (keine .lrf, .thm, etc.)
+                        file_ext = os.path.splitext(file.lower())[1]
                         if file_ext in valid_extensions:
-                            src_file = os.path.join(root, file)
-                            media_files.append(src_file)
+                            media_files.append(os.path.join(root, file))
 
             if not media_files:
                 error_msg = "Keine Mediendateien auf der SD-Karte gefunden"
                 print(error_msg)
-                return None, error_msg, []
+                return None, error_msg, [], None
 
-            # Optional: Duplikate überspringen
             skip_processed = settings.get("sd_skip_processed", False)
             filtered_files = []
             skipped_count = 0
-
             if skip_processed:
                 print("Duplikat-Filter aktiv: Prüfe bereits verarbeitete Dateien...")
                 for src_file in media_files:
@@ -544,7 +536,7 @@ class SDCardMonitor:
                     if not ident:
                         filtered_files.append(src_file)
                         continue
-                    identity_hash, size_bytes = ident
+                    identity_hash, _ = ident
                     if self.history.contains(identity_hash):
                         skipped_count += 1
                     else:
@@ -555,59 +547,81 @@ class SDCardMonitor:
             if not filtered_files:
                 error_msg = f"Keine neuen Dateien zum Sichern. Übersprungen: {skipped_count}"
                 print(error_msg)
-                return None, error_msg, []
+                return None, error_msg, [], None
 
-            # Berechne Gesamtgröße basierend auf gefilterter Liste
             total_size = 0
             for file_path in filtered_files:
                 try:
                     total_size += os.path.getsize(file_path)
                 except Exception:
                     pass
-
             total_mb = total_size / (1024 * 1024)
             print(f"Gefunden: {len(media_files)} Mediendateien ({total_mb:.1f} MB), neu: {len(filtered_files)}, übersprungen: {skipped_count}")
 
-            # Kopiere mit Progress-Tracking
+            server_backup_enabled = bool(settings.get("sd_server_backup_enabled", False))
+            server_backup_mode = settings.get("sd_server_backup_mode", "direct_dual_write")
+            if server_backup_mode not in ("direct_dual_write", "local_then_server"):
+                server_backup_mode = "direct_dual_write"
+            server_backup_root = (settings.get("sd_server_backup_path") or "").strip()
+            server_backup_path = None
+            server_warning_message = None
+            server_success = False
+
+            if server_backup_enabled and server_backup_root:
+                server_backup_path, server_cleanup, server_error = self._prepare_server_backup_target(
+                    server_backup_root, backup_dir_name, settings
+                )
+                if server_error:
+                    server_warning_message = f"Server-Backup deaktiviert (Lokal bleibt erfolgreich): {server_error}"
+                    print(f"⚠️ {server_warning_message}")
+                    server_backup_enabled = False
+
             copied_size = 0
             copied_count = 0
             start_time = time.time()
-
-            # Behandle Dateinamen-Duplikate
             used_filenames = set()
+            local_to_server_map = []
 
             for src_file in filtered_files:
                 try:
-                    # Original-Dateiname
                     original_name = os.path.basename(src_file)
                     dst_filename = original_name
-
-                    # Bei Duplikaten im Zielordner: Füge Suffix hinzu
                     counter = 1
                     name_without_ext, ext = os.path.splitext(original_name)
                     while dst_filename.lower() in used_filenames:
                         dst_filename = f"{name_without_ext}_{counter}{ext}"
                         counter += 1
-
                     used_filenames.add(dst_filename.lower())
-                    dst_file = os.path.join(backup_path, dst_filename)
 
-                    # Kopiere Datei
+                    local_dst_file = os.path.join(backup_path, dst_filename)
                     file_size = os.path.getsize(src_file)
-                    shutil.copy2(src_file, dst_file)
-                    copied_source_files.append(src_file)  # NEU: Tracke erfolgreich kopierte Datei
+                    shutil.copy2(src_file, local_dst_file)
+                    copied_source_files.append(src_file)
                     copied_size += file_size
                     copied_count += 1
 
-                    # Historie aktualisieren (backed_up_at setzen)
+                    if server_backup_enabled and server_backup_mode == "direct_dual_write" and server_backup_path:
+                        try:
+                            server_dst_file = os.path.join(server_backup_path, dst_filename)
+                            shutil.copy2(src_file, server_dst_file)
+                            server_success = True
+                        except Exception as server_copy_error:
+                            server_warning_message = (
+                                f"Server-Backup teilweise fehlgeschlagen: {server_copy_error}"
+                            )
+                            server_backup_enabled = False
+                    elif server_backup_enabled and server_backup_mode == "local_then_server":
+                        local_to_server_map.append((local_dst_file, dst_filename))
+
                     ident = self.history.compute_identity(src_file)
                     if ident:
                         identity_hash, size_bytes = ident
                         media_type = get_media_type_from_filename(original_name)
-                        self.history.upsert(identity_hash, original_name, size_bytes, media_type,
-                                            backed_up_at=time.strftime('%Y-%m-%dT%H:%M:%S'))
+                        self.history.upsert(
+                            identity_hash, original_name, size_bytes, media_type,
+                            backed_up_at=time.strftime('%Y-%m-%dT%H:%M:%S')
+                        )
 
-                    # Progress-Update
                     if self.on_progress_update and total_size > 0:
                         current_mb = copied_size / (1024 * 1024)
                         elapsed_time = time.time() - start_time
@@ -615,28 +629,123 @@ class SDCardMonitor:
                         self.on_progress_update(current_mb, total_mb, speed_mbps)
 
                 except (IOError, OSError, FileNotFoundError) as e:
-                    # IO-Fehler deutet auf SD-Entfernung hin
                     error_msg = f"SD-Karte wurde während des Backups entfernt: {str(e)}"
                     print(f"  ⚠️ {error_msg}")
-                    return None, error_msg, copied_source_files  # Gebe bereits kopierte Dateien zurück
+                    return None, error_msg, copied_source_files, None
                 except Exception as e:
                     print(f"  ⚠️ Fehler beim Kopieren von {src_file}: {e}")
-                    # Weiter mit nächster Datei
+
+            if server_backup_enabled and server_backup_mode == "local_then_server" and server_backup_path:
+                for local_file, dst_filename in local_to_server_map:
+                    try:
+                        shutil.copy2(local_file, os.path.join(server_backup_path, dst_filename))
+                        server_success = True
+                    except Exception as server_copy_error:
+                        server_warning_message = (
+                            f"Server-Backup teilweise fehlgeschlagen: {server_copy_error}"
+                        )
+                        break
+
+            if server_backup_enabled and server_backup_path and server_warning_message is None and not server_success:
+                # Fall: aktiv, aber keine Datei kopiert (z. B. keine neuen Dateien). Kein harter Fehler.
+                server_success = False
 
             print(f"Backup abgeschlossen: {copied_count} neue Mediendateien kopiert")
-
-            return backup_path, None, copied_source_files  # Erfolg: Pfad, kein Fehler, kopierte Dateien
+            backup_info = {
+                "server_backup_enabled": bool(settings.get("sd_server_backup_enabled", False)),
+                "server_backup_mode": server_backup_mode,
+                "server_backup_path": server_backup_path,
+                "server_backup_success": server_success and server_warning_message is None,
+                "server_warning_message": server_warning_message,
+            }
+            return backup_path, None, copied_source_files, backup_info
 
         except Exception as e:
             error_msg = f"Fehler beim Erstellen des Backups: {str(e)}"
             print(error_msg)
-            # Aufräumen bei Fehler
             if backup_path and os.path.isdir(backup_path):
                 try:
                     shutil.rmtree(backup_path)
                 except Exception:
                     pass
-            return None, error_msg, []  # Fehler: kein Pfad, Fehlermeldung, keine Dateien
+            return None, error_msg, [], None
+        finally:
+            if server_cleanup:
+                try:
+                    server_cleanup()
+                except Exception:
+                    pass
+
+    def _prepare_server_backup_target(self, server_target_root, backup_dir_name, settings):
+        """Bereitet den Zielordner für optionales Server-Backup vor."""
+        normalized_path, is_network_path, _ = normalize_server_path(server_target_root)
+        if not normalized_path:
+            return None, None, "Ungültiger Server-Backup-Pfad."
+
+        cleanup_fn = None
+        if is_network_path and platform.system() == "Windows":
+            share_root = self._extract_unc_share_root(normalized_path)
+            if not share_root:
+                return None, None, f"Ungültiger UNC-Pfad: {normalized_path}"
+            ok, message = self._connect_windows_share(share_root, settings)
+            if not ok:
+                return None, None, message
+            cleanup_fn = lambda: self._disconnect_windows_share(share_root)
+
+        backup_target = os.path.join(normalized_path, backup_dir_name)
+        try:
+            os.makedirs(backup_target, exist_ok=True)
+        except Exception as e:
+            if cleanup_fn:
+                cleanup_fn()
+                cleanup_fn = None
+            return None, None, f"Server-Zielordner konnte nicht erstellt werden: {e}"
+        return backup_target, cleanup_fn, None
+
+    def _extract_unc_share_root(self, unc_path):
+        """Extrahiert aus \\server\\share\\unterordner den Teil \\server\\share."""
+        if not unc_path.startswith("\\\\"):
+            return None
+        trimmed = unc_path[2:]
+        parts = trimmed.split("\\")
+        if len(parts) < 2:
+            return None
+        return f"\\\\{parts[0]}\\{parts[1]}"
+
+    def _connect_windows_share(self, share_root, settings):
+        """Authentifiziert einen Windows-Share via net use."""
+        login = (settings.get("server_login") or "").strip()
+        password = settings.get("server_password") or ""
+        subprocess.run(
+            f'net use "{share_root}" /delete /y',
+            shell=True,
+            capture_output=True,
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+        )
+        if login:
+            connect_cmd = f'net use "{share_root}" "{password}" /user:{login}'
+        else:
+            connect_cmd = f'net use "{share_root}"'
+        result = subprocess.run(
+            connect_cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+        )
+        if result.returncode == 0:
+            return True, None
+        error = (result.stderr or result.stdout or "").strip()
+        return False, f"Server-Authentifizierung fehlgeschlagen: {error}"
+
+    def _disconnect_windows_share(self, share_root):
+        """Trennt eine zuvor geöffnete Windows-Share-Verbindung."""
+        subprocess.run(
+            f'net use "{share_root}" /delete /y',
+            shell=True,
+            capture_output=True,
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW
+        )
 
     def _clear_sd_files(self, files_to_delete):
         """

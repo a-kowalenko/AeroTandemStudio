@@ -3082,7 +3082,7 @@ class VideoGeneratorApp:
                     self.sd_status_indicator.hide()
                 self.progress_handler.set_status("Status: Bereit.")
 
-    def on_sd_backup_complete(self, backup_path, success, error_message=None):
+    def on_sd_backup_complete(self, backup_path, success, error_message=None, backup_info=None):
         """
         Wird aufgerufen wenn SD-Karten Backup abgeschlossen ist
 
@@ -3113,6 +3113,21 @@ class VideoGeneratorApp:
         # Erfolgsfall
         print(f"SD-Karten Backup erfolgreich: {backup_path}")
 
+        server_warning = None
+        server_path = None
+        if isinstance(backup_info, dict):
+            server_warning = backup_info.get("server_warning_message")
+            server_path = backup_info.get("server_backup_path")
+        if server_warning:
+            warning_text = server_warning
+            if server_path:
+                warning_text += f"\n\nServer-Ziel:\n{server_path}"
+            messagebox.showwarning(
+                "Backup lokal erfolgreich, Server mit Warnung",
+                warning_text,
+                parent=self.root,
+            )
+
         settings = self.config.get_settings()
 
         # Prüfe ob automatischer Import aktiviert ist
@@ -3121,9 +3136,12 @@ class VideoGeneratorApp:
             self.import_from_backup(backup_path)
         else:
             # Zeige nur Erfolgs-Benachrichtigung
+            info_text = f"SD-Karten Backup wurde erfolgreich erstellt:\n{backup_path}"
+            if server_path and not server_warning:
+                info_text += f"\n\nServer-Kopie erstellt:\n{server_path}"
             messagebox.showinfo(
                 "Backup erfolgreich",
-                f"SD-Karten Backup wurde erfolgreich erstellt:\n{backup_path}",
+                info_text,
                 parent=self.root
             )
 

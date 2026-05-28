@@ -307,8 +307,8 @@ class SettingsDialog:
         self.create_backup_tab()
         self._attach_tab_mousewheel(self.tab_backup)
 
-        # --- Tab 4: QR-Code Analyse ---
-        self.tab_qr_analyse = self._add_scrollable_notebook_tab("QR-Code Analyse")
+        # --- Tab 4: QR Analyse ---
+        self.tab_qr_analyse = self._add_scrollable_notebook_tab("QR Analyse")
         self.create_qr_analyse_tab()
         self._attach_tab_mousewheel(self.tab_qr_analyse)
 
@@ -1028,10 +1028,10 @@ class SettingsDialog:
         threading.Thread(target=detect_cpu_info_async, daemon=True).start()
 
     def create_qr_analyse_tab(self):
-        """Erstellt den Tab 'QR-Code Analyse'."""
+        """Erstellt den Tab 'QR Analyse'."""
         qr_root_frame = ttk.LabelFrame(
             self.tab_qr_analyse,
-            text="QR-Code Analyse",
+            text="QR Analyse",
             padding=(10, 10),
         )
         qr_root_frame.pack(fill="x", pady=(0, 10))
@@ -1351,7 +1351,11 @@ class SettingsDialog:
         if result is None:
             return
 
-        message = result.summary_message()
+        message = (
+            "Importierte Medien und Formular-Eingaben wurden geleert.\n"
+            "Zusätzlicher Cache-Cleanup danach:\n"
+            f"{result.summary_message()}"
+        )
         if result.errors:
             detail = "\n".join(result.errors[:5])
             if len(result.errors) > 5:

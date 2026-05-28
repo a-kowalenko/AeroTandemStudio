@@ -962,17 +962,28 @@ class VideoGeneratorApp:
                                              cursor="")
         # Wenn der Button "Abbrechen" anzeigt, ändere nichts
 
-    def update_video_preview(self, video_paths: List[str], run_qr_check: bool = True):
+    def update_video_preview(
+        self,
+        video_paths: List[str],
+        run_qr_check: bool = True,
+        qr_video_paths: Optional[List[str]] = None,
+    ):
         """
         Aktualisiert die Video-Vorschau. Startet die QR-Analyse in einem
         separaten Thread oder setzt das Formular zurück, wenn keine Videos vorhanden sind.
-        NEU: run_qr_check steuert, ob die QR-Analyse durchgeführt werden soll.
+        run_qr_check steuert, ob die QR-Analyse durchgeführt werden soll.
+        Optional kann mit qr_video_paths eine Teilmenge der Clips für QR vorgegeben werden.
         """
         if threading.current_thread() is not threading.main_thread():
             paths_copy = video_paths.copy()
+            qr_paths_copy = None if qr_video_paths is None else qr_video_paths.copy()
             self.root.after(
                 0,
-                lambda: self.update_video_preview(paths_copy, run_qr_check=run_qr_check),
+                lambda: self.update_video_preview(
+                    paths_copy,
+                    run_qr_check=run_qr_check,
+                    qr_video_paths=qr_paths_copy,
+                ),
             )
             return
 
@@ -1017,8 +1028,10 @@ class VideoGeneratorApp:
             return
             # --- ENDE NEU ---
 
-        # NEU: QR-Prüfung nur starten, wenn run_qr_check True ist
-        if run_qr_check:
+        qr_scan_paths = video_paths if qr_video_paths is None else qr_video_paths
+        qr_scan_paths = qr_scan_paths.copy() if qr_scan_paths else []
+
+        if run_qr_check and qr_scan_paths:
             # Starte QR-Analyse UND Preview-Erstellung PARALLEL!
             print("Starte QR-Analyse und Preview-Erstellung parallel...")
 
@@ -1027,10 +1040,10 @@ class VideoGeneratorApp:
                 self.video_preview.update_preview(video_paths)
 
             # 2. QR-Analyse starten (läuft ebenfalls in eigenem Thread)
-            self.run_qr_analysis(video_paths)
+            self.run_qr_analysis(qr_scan_paths)
         else:
             # Keine QR-Prüfung, nur Vorschau aktualisieren
-            print("QR-Prüfung übersprungen - erster Clip hat sich nicht geändert.")
+            print("QR-Prüfung übersprungen - keine neuen Clips für Auto-Scan.")
             if self.video_preview:
                 self.video_preview.update_preview(video_paths)
 

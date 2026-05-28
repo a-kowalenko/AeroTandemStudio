@@ -137,7 +137,7 @@ class DragDropFrame:
         self.frame = tk.Frame(parent, relief="sunken", borderwidth=2, padx=10, pady=10)
         self.video_paths = []
         self.photo_paths = []
-        self.last_first_video = None  # NEU: Speichert den ersten Clip für Vergleich
+        self._auto_qr_scanned_video_paths: set[str] = set()
 
         # Lade QR-Check-Status aus Config (Standard: False)
         settings = self.app.config.get_settings()
@@ -161,6 +161,12 @@ class DragDropFrame:
         self._video_sort_desc = False
         self._photo_sort_column = "Dateiname"
         self._photo_sort_desc = False
+        self._video_reorder_drag_item = None
+        self._video_reorder_start_index = None
+        self._video_reorder_insert_index = None
+        self._video_reorder_drag_active = False
+        self._video_row_highlight_after_id = None
+        self._video_drop_indicator = None
         self.create_widgets()
 
     def create_widgets(self):
@@ -277,10 +283,16 @@ class DragDropFrame:
 
         # Rechtsklick-Event für Kontextmenü
         self.video_tree.bind("<Button-3>", self._show_video_context_menu)
+        self.video_tree.bind("<ButtonPress-1>", self._on_video_reorder_press, add="+")
+        self.video_tree.bind("<B1-Motion>", self._on_video_reorder_motion, add="+")
+        self.video_tree.bind("<ButtonRelease-1>", self._on_video_reorder_release, add="+")
 
         # Drag & Drop für Video-Tabelle
         self.video_tree.drop_target_register(DND_FILES)
         self.video_tree.dnd_bind('<<Drop>>', self._handle_video_table_drop)
+        self.video_tree.tag_configure("recently_moved", background="#dff4df")
+        self._video_drop_indicator = tk.Frame(self.video_tree, height=2, bg="#2d89ef")
+        self._video_drop_indicator.place_forget()
 
         # Steuerungs-Buttons für Videos
         video_button_frame = tk.Frame(self.video_tab)
@@ -627,6 +639,7 @@ class DragDropFrame:
         new_photos_added: bool,
         cancelled: bool,
         pil_photo_cache=None,
+        imported_video_paths: Optional[List[str]] = None,
         error_message: Optional[str] = None,
         unreadable_paths: Optional[List[str]] = None,
         videos_imported: int = 0,
@@ -640,6 +653,7 @@ class DragDropFrame:
                 dialog,
                 cancelled,
                 pil_photo_cache,
+                imported_video_paths=imported_video_paths or [],
                 error_message=error_message,
                 unreadable_paths=unreadable_paths or [],
                 videos_imported=videos_imported,
@@ -997,6 +1011,7 @@ class DragDropFrame:
                 new_photos_added=new_photos_added,
                 cancelled=cancelled,
                 pil_photo_cache=cache_snapshot,
+                imported_video_paths=imported_paths if not cancelled else [],
                 unreadable_paths=unreadable_paths,
                 videos_imported=len(imported_paths) if not cancelled else 0,
                 photos_imported=len(photo_batch_paths) if not cancelled else 0,
@@ -1009,6 +1024,7 @@ class DragDropFrame:
                 new_videos_added=False,
                 new_photos_added=False,
                 cancelled=False,
+                imported_video_paths=[],
                 error_message=str(e),
                 unreadable_paths=unreadable_paths,
             )
@@ -1047,6 +1063,7 @@ class DragDropFrame:
         cancelled,
         pil_photo_cache=None,
         *,
+        imported_video_paths: Optional[List[str]] = None,
         error_message: Optional[str] = None,
         unreadable_paths: Optional[List[str]] = None,
         videos_imported: int = 0,
@@ -1054,6 +1071,7 @@ class DragDropFrame:
     ):
         dialog.destroy()
         unreadable_paths = unreadable_paths or []
+        imported_video_paths = imported_video_paths or []
 
         self._update_drop_label_after_import(
             new_videos_added=new_videos_added,
@@ -1107,7 +1125,18 @@ class DragDropFrame:
             self._auto_select_longest_video()
 
         if new_videos_added:
-            self.parent.after(0, self._update_app_preview)
+            auto_qr_video_paths: List[str] = []
+            if self.qr_check_enabled.get():
+                for path in imported_video_paths:
+                    norm_path = os.path.normpath(path)
+                    if norm_path not in self._auto_qr_scanned_video_paths:
+                        auto_qr_video_paths.append(path)
+                        self._auto_qr_scanned_video_paths.add(norm_path)
+
+            self.parent.after(
+                0,
+                lambda: self._update_app_preview(qr_video_paths=auto_qr_video_paths),
+            )
 
         if new_photos_added:
             self._update_photo_preview(pil_photo_cache)
@@ -1192,26 +1221,22 @@ class DragDropFrame:
             print(f"  ❌ Fehler beim Importieren von {os.path.basename(source_path)}: {e}")
             return None
 
-    def _update_app_preview(self, video_paths=None):
+    def _update_app_preview(self, video_paths=None, qr_video_paths=None, run_qr_check=None):
         """
         Fordert eine Aktualisierung der Vorschau über die Hauptanwendung an.
-        NEU: QR-Prüfung wird nur ausgelöst, wenn sich der erste Clip ändert UND die Checkbox aktiviert ist.
+        Auto-QR läuft nur für explizit übergebene Clips (typisch: neu importierte Videos).
         """
         paths = self.video_paths.copy() if video_paths is None else video_paths.copy()
-
-        # NEU: Prüfe, ob sich der erste Clip geändert hat
-        current_first_video = paths[0] if paths else None
-        first_video_changed = (current_first_video != self.last_first_video)
-
-        # Aktualisiere die gespeicherte Referenz
-        self.last_first_video = current_first_video
-
-        # NEU: QR-Prüfung nur wenn Checkbox aktiviert ist UND sich der erste Clip geändert hat
-        run_qr_check = self.qr_check_enabled.get() and first_video_changed
+        qr_paths = [] if qr_video_paths is None else qr_video_paths.copy()
+        if run_qr_check is None:
+            run_qr_check = self.qr_check_enabled.get() and bool(qr_paths)
 
         if hasattr(self.app, 'update_video_preview'):
-            # NEU: Übergebe Information, ob QR-Prüfung nötig ist
-            self.app.update_video_preview(paths, run_qr_check=run_qr_check)
+            self.app.update_video_preview(
+                paths,
+                run_qr_check=run_qr_check,
+                qr_video_paths=qr_paths,
+            )
 
     def _on_qr_checkbox_toggled(self):
         """
@@ -1228,9 +1253,14 @@ class DragDropFrame:
         # Nur wenn Checkbox jetzt aktiviert ist UND Videos vorhanden sind
         if qr_check_status and self.video_paths:
             print("QR-Code-Prüfung wurde aktiviert - führe Prüfung durch...")
-            # Trigger Vorschau-Update mit erzwungener QR-Prüfung
-            if hasattr(self.app, 'run_qr_analysis'):
-                self.app.run_qr_analysis(self.video_paths.copy())
+            self._auto_qr_scanned_video_paths.clear()
+            for path in self.video_paths:
+                self._auto_qr_scanned_video_paths.add(os.path.normpath(path))
+            self._update_app_preview(
+                self.video_paths.copy(),
+                qr_video_paths=self.video_paths.copy(),
+                run_qr_check=True,
+            )
         elif not qr_check_status:
             print("QR-Code-Prüfung wurde deaktiviert")
 
@@ -1628,40 +1658,163 @@ class DragDropFrame:
         selection = self.video_tree.selection()
         if selection:
             index = self.video_tree.index(selection[0])
-            if index > 0:
-                self.video_paths[index], self.video_paths[index - 1] = self.video_paths[index - 1], self.video_paths[
-                    index]
-
-                # NEU: Aktualisiere Wasserzeichen-Index
-                if self.watermark_clip_index == index:
-                    self.watermark_clip_index = index - 1
-                elif self.watermark_clip_index == index - 1:
-                    self.watermark_clip_index = index
-
-                self._update_video_table()
-                self.video_tree.selection_set(self.video_tree.get_children()[index - 1])
-                # Vorschau aktualisieren
-                self._update_app_preview()
+            self._move_video_by_index(index, index - 1, highlight=True)
 
     def move_video_down(self):
         """Bewegt ausgewähltes Video nach unten"""
         selection = self.video_tree.selection()
         if selection:
             index = self.video_tree.index(selection[0])
-            if index < len(self.video_paths) - 1:
-                self.video_paths[index], self.video_paths[index + 1] = self.video_paths[index + 1], self.video_paths[
-                    index]
+            self._move_video_by_index(index, index + 1, highlight=True)
 
-                # NEU: Aktualisiere Wasserzeichen-Index
-                if self.watermark_clip_index == index:
-                    self.watermark_clip_index = index + 1
-                elif self.watermark_clip_index == index + 1:
-                    self.watermark_clip_index = index
+    def _move_video_by_index(self, from_index: int, to_index: int, highlight: bool = False) -> bool:
+        """Verschiebt ein Video von einem Index zu einem anderen."""
+        if from_index == to_index:
+            return False
+        if not (0 <= from_index < len(self.video_paths)):
+            return False
+        if not (0 <= to_index < len(self.video_paths)):
+            return False
 
-                self._update_video_table()
-                self.video_tree.selection_set(self.video_tree.get_children()[index + 1])
-                # Vorschau aktualisieren
-                self._update_app_preview()
+        moved_path = self.video_paths.pop(from_index)
+        self.video_paths.insert(to_index, moved_path)
+
+        if self.watermark_clip_index == from_index:
+            self.watermark_clip_index = to_index
+        elif self.watermark_clip_index is not None:
+            if from_index < to_index and from_index < self.watermark_clip_index <= to_index:
+                self.watermark_clip_index -= 1
+            elif to_index < from_index and to_index <= self.watermark_clip_index < from_index:
+                self.watermark_clip_index += 1
+
+        self._update_video_table()
+        children = self.video_tree.get_children()
+        if 0 <= to_index < len(children):
+            moved_item = children[to_index]
+            self.video_tree.selection_set(moved_item)
+            self.video_tree.focus(moved_item)
+            self.video_tree.see(moved_item)
+            if highlight:
+                self._highlight_video_row_temporarily(moved_item)
+        self._update_app_preview()
+        return True
+
+    def _hide_video_drop_indicator(self):
+        """Blendet die visuelle Einfüge-Linie für Reorder aus."""
+        if self._video_drop_indicator is not None:
+            self._video_drop_indicator.place_forget()
+        self._video_reorder_insert_index = None
+
+    def _show_video_drop_indicator_at(self, y_pos: int, insert_index: int):
+        """Zeigt die Einfüge-Linie zwischen Rows an der berechneten Position."""
+        if self._video_drop_indicator is None:
+            return
+        y_pos = max(0, y_pos)
+        self._video_drop_indicator.place(x=0, y=max(0, y_pos - 1), relwidth=1.0, height=2)
+        self._video_reorder_insert_index = insert_index
+
+    def _highlight_video_row_temporarily(self, item_id: str, duration_ms: int = 350):
+        """Zeigt kurzes visuelles Feedback nach erfolgreichem Verschieben."""
+        if self._video_row_highlight_after_id is not None:
+            try:
+                self.parent.after_cancel(self._video_row_highlight_after_id)
+            except Exception:
+                pass
+            self._video_row_highlight_after_id = None
+
+        tags = tuple(self.video_tree.item(item_id, "tags"))
+        if "recently_moved" not in tags:
+            self.video_tree.item(item_id, tags=tags + ("recently_moved",))
+
+        def _clear():
+            if not self.video_tree.winfo_exists():
+                return
+            current_tags = tuple(t for t in self.video_tree.item(item_id, "tags") if t != "recently_moved")
+            self.video_tree.item(item_id, tags=current_tags)
+            self._video_row_highlight_after_id = None
+
+        self._video_row_highlight_after_id = self.parent.after(duration_ms, _clear)
+
+    def _reset_video_reorder_drag_state(self):
+        """Setzt internen Drag&Drop-Reorder-Zustand zurück."""
+        self._video_reorder_drag_item = None
+        self._video_reorder_start_index = None
+        self._video_reorder_drag_active = False
+        self._hide_video_drop_indicator()
+
+    def _on_video_reorder_press(self, event):
+        """Erfasst potenziellen Drag-Start für internes Zeilen-Reordering."""
+        if not self.video_paths:
+            self._reset_video_reorder_drag_state()
+            return
+        region = self.video_tree.identify_region(event.x, event.y)
+        if region != "cell":
+            self._reset_video_reorder_drag_state()
+            return
+        if self.video_tree.identify_column(event.x) == "#9":
+            self._reset_video_reorder_drag_state()
+            return
+        item = self.video_tree.identify_row(event.y)
+        if not item:
+            self._reset_video_reorder_drag_state()
+            return
+        self._video_reorder_drag_item = item
+        self._video_reorder_start_index = self.video_tree.index(item)
+        self._video_reorder_drag_active = False
+
+    def _on_video_reorder_motion(self, event):
+        """Aktiviert internes Reorder-Dragging und markiert Zielzeilen."""
+        if not self._video_reorder_drag_item:
+            return
+        children = self.video_tree.get_children()
+        if not children:
+            self._hide_video_drop_indicator()
+            return
+
+        self._video_reorder_drag_active = True
+        item = self.video_tree.identify_row(event.y)
+        if item:
+            row_bbox = self.video_tree.bbox(item)
+            if row_bbox:
+                _, row_y, _, row_h = row_bbox
+                row_mid = row_y + (row_h // 2)
+                row_index = self.video_tree.index(item)
+                if event.y < row_mid:
+                    self._show_video_drop_indicator_at(row_y, row_index)
+                else:
+                    self._show_video_drop_indicator_at(row_y + row_h, row_index + 1)
+                return
+
+        first_bbox = self.video_tree.bbox(children[0])
+        if first_bbox and event.y < first_bbox[1]:
+            self._show_video_drop_indicator_at(first_bbox[1], 0)
+            return
+
+        last_bbox = self.video_tree.bbox(children[-1])
+        if last_bbox:
+            _, last_y, _, last_h = last_bbox
+            self._show_video_drop_indicator_at(last_y + last_h, len(children))
+        else:
+            self._hide_video_drop_indicator()
+
+    def _on_video_reorder_release(self, event):
+        """Verschiebt Video-Zeile auf das markierte Ziel und räumt Feedback auf."""
+        if not self._video_reorder_drag_item:
+            return
+        source_index = self._video_reorder_start_index
+        insert_index = self._video_reorder_insert_index
+        was_dragging = self._video_reorder_drag_active
+        self._hide_video_drop_indicator()
+        self._video_reorder_drag_item = None
+        self._video_reorder_start_index = None
+        self._video_reorder_drag_active = False
+
+        if not was_dragging or source_index is None or insert_index is None:
+            return
+        adjusted_target = insert_index
+        if insert_index > source_index:
+            adjusted_target -= 1
+        self._move_video_by_index(source_index, adjusted_target, highlight=True)
 
     def remove_selected_video(self):
         """Entfernt ausgewähltes Video"""
@@ -1719,6 +1872,7 @@ class DragDropFrame:
         if video_path in self.video_paths:
             index = self.video_paths.index(video_path)
             self.video_paths.pop(index)
+            self._auto_qr_scanned_video_paths.discard(os.path.normpath(video_path))
             self._import_source_ts_by_dest.pop(os.path.normpath(video_path), None)
 
             # Cache leeren
@@ -1739,6 +1893,7 @@ class DragDropFrame:
     def clear_videos(self):
         """Entfernt alle Videos"""
         self.video_paths.clear()
+        self._auto_qr_scanned_video_paths.clear()
         self._import_source_ts_by_dest.clear()
 
         if self.app and hasattr(self.app, "clear_pending_video_cuts"):
@@ -2506,6 +2661,8 @@ class DragDropFrame:
 
     def _on_watermark_checkbox_click(self, event):
         """Verarbeitet Klicks auf die Wasserzeichen-Spalte"""
+        if self._video_reorder_drag_active:
+            return
         if not self.show_watermark_column or not self.video_paths:
             return
 

@@ -307,12 +307,17 @@ class SettingsDialog:
         self.create_backup_tab()
         self._attach_tab_mousewheel(self.tab_backup)
 
-        # --- Tab 4: Version ---
+        # --- Tab 4: QR-Code Analyse ---
+        self.tab_qr_analyse = self._add_scrollable_notebook_tab("QR-Code Analyse")
+        self.create_qr_analyse_tab()
+        self._attach_tab_mousewheel(self.tab_qr_analyse)
+
+        # --- Tab 5: Version ---
         self.tab_extras = self._add_scrollable_notebook_tab("Version")
         self.create_extras_tab()
         self._attach_tab_mousewheel(self.tab_extras)
 
-        # --- Tab 5: Erweitert (Video-QR) ---
+        # --- Tab 6: Erweitert ---
         self.tab_erweitert = self._add_scrollable_notebook_tab("Erweitert")
         self.create_erweitert_tab()
         self._attach_tab_mousewheel(self.tab_erweitert)
@@ -1022,10 +1027,10 @@ class SettingsDialog:
         # Starte Thread
         threading.Thread(target=detect_cpu_info_async, daemon=True).start()
 
-    def create_erweitert_tab(self):
-        """Erstellt den Tab 'Erweitert' (QR-Code-Analyse)."""
+    def create_qr_analyse_tab(self):
+        """Erstellt den Tab 'QR-Code Analyse'."""
         qr_root_frame = ttk.LabelFrame(
-            self.tab_erweitert,
+            self.tab_qr_analyse,
             text="QR-Code Analyse",
             padding=(10, 10),
         )
@@ -1232,6 +1237,8 @@ class SettingsDialog:
             wraplength=580,
         ).pack(anchor="w", padx=20, pady=(0, 4))
 
+    def create_erweitert_tab(self):
+        """Erstellt den Tab 'Erweitert' (Speicher & Cache)."""
         cache_frame = ttk.LabelFrame(
             self.tab_erweitert,
             text="Speicher & Cache",
@@ -1245,7 +1252,8 @@ class SettingsDialog:
                 "Entfernt temporäre Vorschau-Ordner, kombinierte Preview-Dateien und "
                 "Encode-Arbeitsordner (.aerotandem_work) am konfigurierten Speicherort.\n"
                 "Importierte Videos und Fotos in der aktuellen Sitzung werden verworfen. "
-                "Formular-Eingaben und Einstellungen bleiben erhalten."
+                "Formular-Eingaben werden vor der Cache-Löschung geleert. "
+                "Gespeicherte Einstellungen bleiben erhalten."
             ),
             font=("Arial", 9),
             fg="gray",
@@ -1294,7 +1302,9 @@ class SettingsDialog:
             message=(
                 "Alle importierten Videos und Fotos sowie temporäre Vorschau-Dateien "
                 "werden gelöscht.\n\n"
-                "Formular-Eingaben und gespeicherte Einstellungen bleiben unverändert.\n\n"
+                "Zuerst wird das Formular zusammen mit den importierten Medien geleert, "
+                "danach wird der Cache gelöscht.\n"
+                "Gespeicherte Einstellungen bleiben unverändert.\n\n"
                 "Fortfahren?"
             ),
             confirm_text="Cache löschen",

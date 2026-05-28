@@ -2036,7 +2036,7 @@ class VideoGeneratorApp:
 
     def clear_application_cache(self, include_hw_cache: bool = False):
         """
-        Leert Medien/Vorschau der aktuellen Session und löscht temporäre App-Dateien.
+        Leert zuerst Formular/Medien der aktuellen Session und löscht danach Cache-Dateien.
         """
         settings = self.config.get_settings()
         speicherort = settings.get("speicherort")
@@ -2050,16 +2050,35 @@ class VideoGeneratorApp:
             import_paths=import_paths,
         )
 
+        self._clear_session_state_for_cache_cleanup()
+        return CacheCleanupService.cleanup_all(
+            base_paths_for_work=base_paths,
+            include_hw_cache=include_hw_cache,
+        )
+
+    def _clear_session_state_for_cache_cleanup(self):
+        """Leert Session-Daten ohne Bestätigungsdialog (Formular + importierte Medien)."""
         if hasattr(self, "video_preview") and self.video_preview:
             self.video_preview.cancel_creation()
             self.video_preview.clear_preview()
 
         if self.drag_drop:
             self.drag_drop.clear_all()
-        return CacheCleanupService.cleanup_all(
-            base_paths_for_work=base_paths,
-            include_hw_cache=include_hw_cache,
-        )
+
+        if self.form_fields:
+            settings = self.config.get_settings()
+            self.form_fields.tandemmaster_var.set("")
+            settings["tandemmaster"] = ""
+            self.form_fields.videospringer_var.set("")
+            settings["videospringer"] = ""
+            self.form_fields.gast_name_var.set("")
+            settings["gast_name"] = ""
+            self.config.save_settings(settings)
+
+        if hasattr(self, "progress_handler") and self.progress_handler:
+            self.progress_handler.set_status("Status: Bereit.")
+
+        self.update_watermark_column_visibility()
 
     def _is_session_reset_blocked(self):
         """True wenn Zurücksetzen nicht angeboten werden soll (laufende Erstellung / Analyse)."""

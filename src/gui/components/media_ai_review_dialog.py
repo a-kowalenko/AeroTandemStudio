@@ -390,6 +390,8 @@ class MediaAIReviewDialog(tk.Toplevel):
         self._ai_options_by_category: Dict[str, List[dict]] = {}
         self._info_labels: Dict[str, tk.Label] = {}
         self._confidence_bars: Dict[str, ttk.Progressbar] = {}
+        self._preview_containers: Dict[str, tk.Frame] = {}
+        self._deselected_categories: set[str] = set()
 
         self._create_widgets()
         self._center_over_parent(master)
@@ -458,12 +460,15 @@ class MediaAIReviewDialog(tk.Toplevel):
             c = i % grid_cols
             card = ttk.LabelFrame(cards, text=self.CATEGORY_LABELS.get(category, category), padding=(8, 8))
             card.grid(row=r, column=c, sticky="nsew", padx=4, pady=4)
+            card.grid_columnconfigure(0, weight=0, minsize=220)
             card.grid_columnconfigure(1, weight=1)
-            card.grid_rowconfigure(3, weight=1)
+            card.grid_rowconfigure(0, weight=1)
 
-            preview_container = tk.Frame(card, bg="#ffffff", relief="solid", bd=1, width=260, height=165)
-            preview_container.grid(row=0, column=0, rowspan=6, sticky="nsew", padx=(0, 12), pady=2)
+            # Oben links: Thumbnail
+            preview_container = tk.Frame(card, bg="#ffffff", relief="solid", bd=1, width=220, height=130)
+            preview_container.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 6))
             preview_container.grid_propagate(False)
+            self._preview_containers[category] = preview_container
             preview_label = tk.Label(
                 preview_container,
                 text="(kein Thumbnail)",
@@ -472,62 +477,98 @@ class MediaAIReviewDialog(tk.Toplevel):
                 bg="#ffffff",
                 anchor="center",
                 justify="center",
+                wraplength=200,
             )
             preview_label.place(relx=0.5, rely=0.5, anchor="center")
             self._preview_labels[category] = preview_label
 
-            info_title = tk.Label(card, text="Aktuelle Auswahl", font=("Arial", 10, "bold"), anchor="w")
-            info_title.grid(row=0, column=1, sticky="w", pady=(0, 4))
-
-            info_text = tk.Label(card, text="", font=("Arial", 9), fg="#333333", anchor="w", justify="left")
-            info_text.grid(row=1, column=1, sticky="w")
-            self._info_labels[category] = info_text
-
-            confidence_bar = ttk.Progressbar(card, mode="determinate", maximum=100, length=200)
-            confidence_bar.grid(row=2, column=1, sticky="ew", pady=(4, 6))
-            self._confidence_bars[category] = confidence_bar
-
+            # Oben rechts: KI-Alternativen
             list_frame = tk.Frame(card)
-            list_frame.grid(row=3, column=1, sticky="nsew")
+            list_frame.grid(row=0, column=1, sticky="nsew")
             list_frame.grid_columnconfigure(0, weight=1)
-            list_frame.grid_rowconfigure(0, weight=1)
-            listbox = tk.Listbox(
+            list_frame.grid_rowconfigure(1, weight=1)
+            tk.Label(
                 list_frame,
+                text="KI-Alternativen",
+                font=("Arial", 9, "bold"),
+                anchor="w",
+            ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+            listbox_container = tk.Frame(list_frame)
+            listbox_container.grid(row=1, column=0, columnspan=2, sticky="nsew")
+            listbox_container.grid_columnconfigure(0, weight=1)
+            listbox_container.grid_rowconfigure(0, weight=1)
+            listbox = tk.Listbox(
+                listbox_container,
                 height=5,
                 exportselection=False,
                 font=("Arial", 9),
                 activestyle="none",
             )
             listbox.grid(row=0, column=0, sticky="nsew")
-            scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=listbox.yview)
+            scrollbar = ttk.Scrollbar(listbox_container, orient="vertical", command=listbox.yview)
             scrollbar.grid(row=0, column=1, sticky="ns")
             listbox.config(yscrollcommand=scrollbar.set)
             self._listboxes[category] = listbox
             listbox.bind("<<ListboxSelect>>", lambda _evt, cat=category: self._on_listbox_select(cat))
 
-            hint_label = tk.Label(
-                card,
-                text="Tipp: KI-Vorschläge sind mit [KI] markiert.",
-                font=("Arial", 8),
-                fg="#666666",
-                anchor="w",
+            # Unten links: Infos
+            info_panel = tk.Frame(card)
+            info_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+            info_panel.grid_columnconfigure(0, weight=1)
+            tk.Label(info_panel, text="Aktuelle Auswahl", font=("Arial", 9, "bold"), anchor="w").grid(
+                row=0, column=0, sticky="w", pady=(0, 2),
             )
-            hint_label.grid(row=4, column=1, sticky="w", pady=(4, 0))
+            info_text = tk.Label(
+                info_panel,
+                text="",
+                font=("Arial", 9),
+                fg="#333333",
+                anchor="nw",
+                justify="left",
+                wraplength=210,
+            )
+            info_text.grid(row=1, column=0, sticky="nw")
+            self._info_labels[category] = info_text
+            confidence_bar = ttk.Progressbar(info_panel, mode="determinate", maximum=100, length=200)
+            confidence_bar.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+            self._confidence_bars[category] = confidence_bar
 
+            # Unten rechts: Aktionen
+            action_panel = tk.Frame(card)
+            action_panel.grid(row=1, column=1, sticky="sew")
+            action_panel.grid_columnconfigure(0, weight=1)
             choose_all_btn = tk.Button(
-                card,
+                action_panel,
                 text="Aus allen Fotos wählen...",
                 command=lambda cat=category: self._open_all_photos_dialog(cat),
                 font=("Arial", 9, "bold"),
                 bg="#2d89ef",
                 fg="white",
             )
-            choose_all_btn.grid(row=5, column=1, sticky="ew", pady=(6, 0))
+            choose_all_btn.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+            deselect_btn = tk.Button(
+                action_panel,
+                text="Kategorie abwählen",
+                command=lambda cat=category: self._deselect_category(cat),
+                font=("Arial", 9),
+                bg="#ececec",
+                fg="#333333",
+            )
+            deselect_btn.grid(row=1, column=0, sticky="ew")
 
             self._ai_options_by_category[category] = self._build_options_for_category(category, candidates)
             if candidates:
                 self._selection_indices[category] = int(candidates[0]["index"])
             self._refresh_listbox(category)
+
+        tk.Label(
+            root,
+            text="Tipp: KI-Vorschläge in der Liste sind mit [KI] markiert.",
+            font=("Arial", 8),
+            fg="#666666",
+            anchor="w",
+            bg="#f5f6f8",
+        ).pack(fill="x", pady=(4, 0))
 
         buttons = tk.Frame(root)
         buttons.pack(fill="x", pady=(10, 0))
@@ -578,10 +619,52 @@ class MediaAIReviewDialog(tk.Toplevel):
             return f"[KI] #{idx}  {basename}  ({float(score) * 100:.1f}%)"
         return f"[Manuell] #{idx}  {basename}"
 
+    def _is_category_deselected(self, category: str) -> bool:
+        return category in self._deselected_categories
+
+    def _set_category_deselected_style(self, category: str, deselected: bool) -> None:
+        container = self._preview_containers.get(category)
+        if container:
+            container.config(bg="#f0f0f0" if deselected else "#ffffff")
+        preview = self._preview_labels.get(category)
+        if preview:
+            preview.config(bg="#f0f0f0" if deselected else "#ffffff")
+
+    def _deselect_category(self, category: str) -> None:
+        self._deselected_categories.add(category)
+        self._selection_indices.pop(category, None)
+        listbox = self._listboxes.get(category)
+        if listbox:
+            listbox.selection_clear(0, tk.END)
+        self._thumb_refs.pop(category, None)
+        preview = self._preview_labels.get(category)
+        if preview:
+            preview.config(image="", text="Abgewählt")
+        info_widget = self._info_labels.get(category)
+        if info_widget:
+            info_widget.config(
+                text="Diese Kategorie wird nicht in die Preview übernommen.",
+                fg="#888888",
+            )
+        bar_widget = self._confidence_bars.get(category)
+        if bar_widget:
+            bar_widget["value"] = 0
+        self._set_category_deselected_style(category, True)
+
+    def _reactivate_category(self, category: str) -> None:
+        self._deselected_categories.discard(category)
+        self._set_category_deselected_style(category, False)
+        info_widget = self._info_labels.get(category)
+        if info_widget:
+            info_widget.config(fg="#333333")
+
     def _refresh_listbox(self, category: str) -> None:
         listbox = self._listboxes.get(category)
         if not listbox:
             return
+        if self._is_category_deselected(category):
+            return
+
         options = self._ai_options_by_category.get(category, [])
         visible = list(options)
         self._display_item_maps[category] = visible
@@ -603,12 +686,13 @@ class MediaAIReviewDialog(tk.Toplevel):
             listbox.see(select_row)
             self._on_listbox_select(category)
         else:
-            has_ai = bool(options)
             self._preview_labels[category].config(text="Kein KI-Vorschlag", image="")
             info_widget = self._info_labels.get(category)
             bar_widget = self._confidence_bars.get(category)
             if info_widget:
-                info_widget.config(text="Für diese Kategorie gibt es keinen KI-Vorschlag.\nBitte manuell auswählen.")
+                info_widget.config(
+                    text="Für diese Kategorie gibt es keinen KI-Vorschlag.\nBitte manuell auswählen.",
+                )
             if bar_widget:
                 bar_widget["value"] = 0
 
@@ -627,6 +711,7 @@ class MediaAIReviewDialog(tk.Toplevel):
             "is_ai": False,
             "category": category,
         }
+        self._reactivate_category(category)
         self._selection_indices[category] = idx
         self._update_preview(category, selected_option)
         self._listboxes[category].selection_clear(0, tk.END)
@@ -643,11 +728,12 @@ class MediaAIReviewDialog(tk.Toplevel):
         if row < 0 or row >= len(option_list):
             return
         selected_option = option_list[row]
+        self._reactivate_category(category)
         self._selection_indices[category] = int(selected_option["index"])
         self._update_preview(category, selected_option)
 
     def _update_preview(self, category: str, selected_option: dict):
-        thumb = build_pil_thumbnail(str(selected_option["path"]), max_size=250)
+        thumb = build_pil_thumbnail(str(selected_option["path"]), max_size=200)
         if thumb is None:
             return
         photo_img = ImageTk.PhotoImage(thumb)
@@ -683,6 +769,8 @@ class MediaAIReviewDialog(tk.Toplevel):
         selected = []
         seen = set()
         for category in self._preview_categories:
+            if self._is_category_deselected(category):
+                continue
             idx = self._selection_indices.get(category)
             if idx is None:
                 continue

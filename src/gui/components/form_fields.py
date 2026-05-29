@@ -670,6 +670,14 @@ class FormFields:
         self.toggle_video_mode_visibility()
         self._refresh_video_mode_buttons()
 
+    def apply_detected_video_mode(self, mode: str, *, has_photos: bool = True) -> None:
+        """Setzt video_mode nach KI-Erkennung und aktiviert ggf. das passende Foto-Produkt."""
+        if mode not in ("handcam", "outside"):
+            return
+        self._select_video_mode(mode)
+        if has_photos:
+            self.auto_check_products(has_videos=False, has_photos=True)
+
     def _refresh_video_mode_buttons(self) -> None:
         mode = self.video_mode_var.get()
         for mode_val, btn in (

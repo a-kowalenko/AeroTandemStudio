@@ -11,23 +11,19 @@ from src.utils.photo_thumbnail import build_pil_thumbnail
 
 try:
     from src.media_ai.camera_resolution import format_camera_type_label
-    from src.media_ai.series_analyzer import PREVIEW_CATEGORIES, PREVIEW_CATEGORY_LABELS
+    from src.media_ai.series_analyzer import get_preview_categories, get_preview_category_labels
 except ImportError:
     def format_camera_type_label(camera_type: str) -> str:
         normalized = (camera_type or "").strip().lower()
         return {"handcam": "Handcam", "outside": "Outside"}.get(normalized, normalized or "Unbekannt")
 
-    PREVIEW_CATEGORIES = (
-        "plane",
-        "door",
-        "exit",
-        "freefall",
-        "deployment",
-        "canopy",
-        "landing",
-        "final",
-    )
-    PREVIEW_CATEGORY_LABELS = {c: c for c in PREVIEW_CATEGORIES}
+    def get_preview_categories(camera_type: str):
+        return (
+            "boarding", "climb", "door", "exit", "freefall", "canopy", "landing", "final",
+        )
+
+    def get_preview_category_labels(camera_type: str):
+        return {c: c for c in get_preview_categories(camera_type)}
 
 
 class AllPhotosSelectionDialog(tk.Toplevel):
@@ -360,7 +356,6 @@ class AllPhotosSelectionDialog(tk.Toplevel):
 class MediaAIReviewDialog(tk.Toplevel):
     """Dialog zur manuellen Bestätigung/Anpassung der KI-Preview-Auswahl."""
 
-    CATEGORY_LABELS = PREVIEW_CATEGORY_LABELS
     PREVIEW_GRID_COLUMNS = 4
 
     def __init__(
@@ -380,9 +375,11 @@ class MediaAIReviewDialog(tk.Toplevel):
         self.transient(master)
         self.grab_set()
 
+        self._camera_type = camera_type or "handcam"
+        self._preview_categories = get_preview_categories(self._camera_type)
+        self.CATEGORY_LABELS = get_preview_category_labels(self._camera_type)
         self._category_candidates = category_candidates
         self._all_photo_paths = list(all_photo_paths or [])
-        self._camera_type = camera_type
         self.selected_indices: List[int] = []
         self.result_confirmed = False
         self._thumb_refs = {}
@@ -448,13 +445,13 @@ class MediaAIReviewDialog(tk.Toplevel):
         cards = tk.Frame(root, bg="#f5f6f8")
         cards.pack(fill="both", expand=True)
         grid_cols = self.PREVIEW_GRID_COLUMNS
-        grid_rows = (len(PREVIEW_CATEGORIES) + grid_cols - 1) // grid_cols
+        grid_rows = (len(self._preview_categories) + grid_cols - 1) // grid_cols
         for col in range(grid_cols):
             cards.grid_columnconfigure(col, weight=1, uniform="ai_cards")
         for row in range(grid_rows):
             cards.grid_rowconfigure(row, weight=1, uniform="ai_rows")
 
-        for i, category in enumerate(PREVIEW_CATEGORIES):
+        for i, category in enumerate(self._preview_categories):
             candidates = self._category_candidates.get(category, [])
 
             r = i // grid_cols
@@ -685,7 +682,7 @@ class MediaAIReviewDialog(tk.Toplevel):
     def _on_confirm(self):
         selected = []
         seen = set()
-        for category in PREVIEW_CATEGORIES:
+        for category in self._preview_categories:
             idx = self._selection_indices.get(category)
             if idx is None:
                 continue

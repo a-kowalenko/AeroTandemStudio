@@ -20,10 +20,9 @@ from src.gui.components.error_dialog import ErrorDialog
 from src.gui.components.loading_window import LoadingWindow
 from src.gui.components.media_ai_review_dialog import MediaAIReviewDialog
 from src.media_ai.camera_resolution import (
-    handcam_series_is_plausible,
+    format_camera_type_label,
     infer_camera_type_from_form_data,
     infer_camera_type_from_kunde,
-    format_camera_type_label,
 )
 from src.utils.constants import LOG_FILE, SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.media_history import MediaHistoryStore
@@ -45,7 +44,12 @@ from src.utils.photo_thumbnail import (
     build_pil_thumbnail,
     build_pil_thumbnails_parallel,
 )
-from src.media_ai import PREVIEW_CATEGORIES, SkydivePhotoAI, analyze_photo_series
+from src.media_ai import (
+    SkydivePhotoAI,
+    analyze_photo_series,
+    detect_camera_type_from_classify_fn,
+    get_preview_categories,
+)
 
 # Mit handle_drop / Pipeline abgestimmt (v. a. .mp4 für Videos)
 _DND_VIDEO_EXT = ".mp4"
@@ -163,7 +167,7 @@ class DragDropFrame:
         self.watermark_photo_indices = []  # NEU: Liste für Foto-Mehrfachauswahl
         self.show_watermark_column = False  # NEU: Steuert Sichtbarkeit der Wasserzeichen-Spalte
         self._photo_ai: Optional[SkydivePhotoAI] = None
-        self._preview_target_categories = PREVIEW_CATEGORIES
+        self._preview_target_categories: tuple[str, ...] = ()
         self._pending_ai_preview_paths: List[str] = []
         self._pending_ai_settings: Optional[Dict[str, object]] = None
         self._media_ai_qr_sync_deadline: float = 0.0
@@ -2664,13 +2668,16 @@ class DragDropFrame:
             if photo_index is not None:
                 indexed_paths.append((photo_index, photo_path))
 
+        preview_categories = get_preview_categories(camera_type)
+        self._preview_target_categories = preview_categories
+
         if not indexed_paths:
-            return {c: [] for c in self._preview_target_categories}
+            return {c: [] for c in preview_categories}
 
         max_workers_cfg = int(ai_settings.get("media_ai_parallel_workers", 0) or 0)
         default_workers = min(4, max(1, os.cpu_count() or 1))
         worker_count = max_workers_cfg if max_workers_cfg > 0 else default_workers
-        worker_pool = classifier.create_worker_pool(worker_count)
+        worker_pool = classifier.create_worker_pool(worker_count, camera_type)
 
         return analyze_photo_series(
             indexed_paths,
@@ -2678,7 +2685,7 @@ class DragDropFrame:
             worker_pool.classify_image,
             min_confidence=min_confidence,
             max_candidates=max_candidates,
-            target_categories=self._preview_target_categories,
+            target_categories=preview_categories,
             use_sampling=use_sampling,
             worker_count=worker_count,
             on_progress=on_progress,
@@ -2713,17 +2720,28 @@ class DragDropFrame:
         imported_photo_paths: List[str],
         ai_settings: Dict[str, object],
     ) -> None:
-        """Kamera-Typ ermitteln (QR → Dialog → Auto-Test) und KI asynchron starten."""
+        """Kamera-Typ ermitteln (QR/Formular → KI-Erkennung) und KI asynchron starten."""
         if not self._should_run_media_ai_for_photos():
             self._log_media_ai("Kein unbezahltes Foto-Produkt – KI-Analyse übersprungen.")
             return
 
         camera_type = self._infer_camera_type_from_context()
+        if not camera_type and self.app and hasattr(self.app, "form_fields") and self.app.form_fields:
+            mode = self.app.form_fields.video_mode_var.get()
+            if mode in ("handcam", "outside"):
+                camera_type = mode
+                self._log_media_ai(f"Kamera-Typ aus Formular-Modus: {mode}")
+
         if camera_type:
             self._start_media_ai_async(imported_photo_paths, ai_settings, camera_type=camera_type)
             return
-        self._log_media_ai("Kamera-Typ unklar – zeige Auswahl-Dialog (30 s Timeout).")
-        self._open_camera_type_choice_dialog(imported_photo_paths, ai_settings)
+
+        self._log_media_ai("Kamera-Typ unklar – starte KI-Erkennung (Handcam vs. Outside).")
+        self._start_media_ai_async(
+            imported_photo_paths,
+            ai_settings,
+            auto_detect_camera_type=True,
+        )
 
     def _open_camera_type_choice_dialog(
         self,
@@ -2816,30 +2834,24 @@ class DragDropFrame:
 
             try:
                 if auto_detect_camera_type:
-                    resolved_camera_type = "handcam"
-                    self._media_ai_active_camera_type = resolved_camera_type
-                    grouped = self._build_media_ai_candidates(
+                    classifier = self._get_photo_ai(hf_token=str(ai_settings.get("media_ai_hf_token", "") or ""))
+                    detected = detect_camera_type_from_classify_fn(
                         imported_photo_paths,
-                        ai_settings,
-                        camera_type="handcam",
-                        use_sampling=False,
-                        on_progress=_progress,
+                        classifier.classify_image,
                     )
-                    if handcam_series_is_plausible(grouped):
-                        self._log_media_ai(
-                            "Automatischer Test: Handcam plausibel (exit/freefall > 75%) – Outside übersprungen."
-                        )
-                        self._media_ai_queue.put(("success", grouped, ai_settings, resolved_camera_type))
-                        return
+                    resolved_camera_type = detected or "handcam"
+                    self._media_ai_active_camera_type = resolved_camera_type
                     self._log_media_ai(
-                        "Automatischer Test: Handcam nicht plausibel – erneute Analyse mit Outside."
+                        f"KI-Kamera-Erkennung: {format_camera_type_label(resolved_camera_type)}"
+                        + (" (Fallback handcam)" if not detected else "")
                     )
-                    resolved_camera_type = "outside"
-                    self._media_ai_active_camera_type = resolved_camera_type
+                    self._media_ai_queue.put(
+                        ("apply_mode", resolved_camera_type, ai_settings, resolved_camera_type)
+                    )
                     grouped = self._build_media_ai_candidates(
                         imported_photo_paths,
                         ai_settings,
-                        camera_type="outside",
+                        camera_type=resolved_camera_type,
                         use_sampling=False,
                         on_progress=_progress,
                     )
@@ -2886,6 +2898,13 @@ class DragDropFrame:
                     completed_count=done,
                     total=total,
                 )
+            self.parent.after(20, self._check_media_ai_async_result)
+            return
+
+        if status == "apply_mode":
+            detected_mode = payload
+            if self.app and hasattr(self.app, "form_fields") and self.app.form_fields:
+                self.app.form_fields.apply_detected_video_mode(detected_mode, has_photos=True)
             self.parent.after(20, self._check_media_ai_async_result)
             return
 

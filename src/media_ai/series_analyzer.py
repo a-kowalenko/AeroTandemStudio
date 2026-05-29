@@ -7,22 +7,92 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .classifier import HANDCAM_CLASS_NAMES
+HANDCAM_PREVIEW_CATEGORIES = (
+    "boarding",
+    "climb",
+    "door",
+    "exit",
+    "freefall",
+    "canopy",
+    "landing",
+    "final",
+)
 
-PREVIEW_CATEGORIES = HANDCAM_CLASS_NAMES
+OUTSIDE_PREVIEW_CATEGORIES = (
+    "boarding",
+    "climb",
+    "door",
+    "exit",
+    "freefall",
+    "deployment",
+    "landing",
+    "final",
+)
 
-PREVIEW_CATEGORY_LABELS = {
-    "plane": "Flugzeug",
+# Preview-Key -> Modell-Klassenname (nach Ordner-Prefix-Strip)
+PREVIEW_CLASS_ALIASES: Dict[str, str] = {
+    "final": "final_interview",
+}
+
+HANDCAM_PREVIEW_LABELS = {
+    "boarding": "Boarding",
+    "climb": "Steigflug",
     "door": "Tür",
     "exit": "Exit",
     "freefall": "Freifall",
-    "deployment": "Schirmöffnung",
     "canopy": "Schirmfahrt",
     "landing": "Landung",
     "final": "Final",
 }
 
+OUTSIDE_PREVIEW_LABELS = {
+    "boarding": "Boarding",
+    "climb": "Steigflug",
+    "door": "Tür",
+    "exit": "Exit",
+    "freefall": "Freifall",
+    "deployment": "Deployment",
+    "landing": "Landung",
+    "final": "Final",
+}
+
+# Abwärtskompatibel
+PREVIEW_CATEGORIES = HANDCAM_PREVIEW_CATEGORIES
+PREVIEW_CATEGORY_LABELS = HANDCAM_PREVIEW_LABELS
+
 ClassifyFn = Callable[[str, str], object]
+
+
+def get_preview_categories(camera_type: str) -> Tuple[str, ...]:
+    normalized = (camera_type or "").strip().lower()
+    if normalized == "outside":
+        return OUTSIDE_PREVIEW_CATEGORIES
+    return HANDCAM_PREVIEW_CATEGORIES
+
+
+def get_preview_category_labels(camera_type: str) -> Dict[str, str]:
+    normalized = (camera_type or "").strip().lower()
+    if normalized == "outside":
+        return dict(OUTSIDE_PREVIEW_LABELS)
+    return dict(HANDCAM_PREVIEW_LABELS)
+
+
+def preview_key_to_model_class(preview_key: str) -> str:
+    return PREVIEW_CLASS_ALIASES.get(preview_key, preview_key)
+
+
+def model_class_to_preview_key(model_class: str, target_categories: Tuple[str, ...]) -> Optional[str]:
+    if model_class in target_categories:
+        return model_class
+    for preview_key, alias in PREVIEW_CLASS_ALIASES.items():
+        if alias == model_class and preview_key in target_categories:
+            return preview_key
+    return None
+
+
+def score_for_preview(scores: Dict[str, float], preview_key: str) -> float:
+    model_key = preview_key_to_model_class(preview_key)
+    return float(scores.get(model_key, 0.0))
 
 
 def analyze_photo_series(
@@ -32,7 +102,7 @@ def analyze_photo_series(
     *,
     min_confidence: float,
     max_candidates: int = 3,
-    target_categories: Tuple[str, ...] = PREVIEW_CATEGORIES,
+    target_categories: Optional[Tuple[str, ...]] = None,
     use_sampling: bool = True,
     worker_count: int = 4,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
@@ -47,6 +117,9 @@ def analyze_photo_series(
     Jedes Foto wird nur einer Ziel-Kategorie zugeordnet (KI-Hauptklasse bzw.
     beste Ziel-Kategorie), nicht in alle Kacheln mit hohem Einzel-Score.
     """
+    if target_categories is None:
+        target_categories = get_preview_categories(camera_type)
+
     grouped: Dict[str, List[dict]] = {c: [] for c in target_categories}
     total_available = len(indexed_paths)
     if total_available == 0:
@@ -71,12 +144,13 @@ def analyze_photo_series(
         """Ordnet jedes Foto genau einer Ziel-Kategorie zu (Hauptklasse, nicht alle hohen Scores)."""
         scores = getattr(result, "all_scores", None) or {}
         predicted = str(getattr(result, "category", "") or "")
-        target_scores = {c: float(scores.get(c, 0.0)) for c in target_categories}
+        target_scores = {c: score_for_preview(scores, c) for c in target_categories}
         if not target_scores:
             return []
 
-        if predicted in target_categories:
-            primary = predicted
+        predicted_preview = model_class_to_preview_key(predicted, target_categories)
+        if predicted_preview:
+            primary = predicted_preview
         else:
             primary = max(target_categories, key=lambda c: target_scores[c])
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 CameraType = str  # "handcam" | "outside"
 
@@ -60,12 +60,58 @@ def infer_camera_type_from_form_data(form_data: dict) -> Optional[CameraType]:
     return None
 
 
-def handcam_series_is_plausible(grouped_candidates: Dict[str, List[dict]]) -> bool:
-    """
-    True wenn im Handcam-Testlauf mindestens exit oder freefall mit Confidence > 75% gefunden wurde.
-    """
+def series_has_core_match(
+    grouped_candidates: Dict[str, List[dict]],
+    *,
+    threshold: float = HANDCAM_AUTO_OK_THRESHOLD,
+) -> bool:
+    """True wenn exit oder freefall mit Confidence über Schwellwert gefunden wurde."""
     for category in CORE_MATCH_CATEGORIES:
         for candidate in grouped_candidates.get(category, []):
-            if float(candidate.get("score", 0.0)) > HANDCAM_AUTO_OK_THRESHOLD:
+            if float(candidate.get("score", 0.0)) > threshold:
                 return True
     return False
+
+
+def handcam_series_is_plausible(grouped_candidates: Dict[str, List[dict]]) -> bool:
+    """Abwärtskompatibel – prüft Preview-Kandidaten auf exit/freefall."""
+    return series_has_core_match(grouped_candidates)
+
+
+def detect_camera_type_from_classify_fn(
+    sample_paths: List[str],
+    classify_fn: Callable[[str, str], object],
+    *,
+    sample_limit: int = 15,
+) -> Optional[CameraType]:
+    """Dual-Model-Score: beide ONNX-Modelle auf Stichprobe, höhere Gesamt-Confidence gewinnt."""
+    from .classifier import detect_camera_type_from_samples
+
+    detected = detect_camera_type_from_samples(
+        sample_paths,
+        classify_fn,
+        sample_limit=sample_limit,
+    )
+    if detected:
+        return detected
+
+    # Fallback: ein Modell liefert plausible Kernphasen
+    from .series_analyzer import get_preview_categories, analyze_photo_series
+
+    indexed = [(i, p) for i, p in enumerate(sample_paths[:sample_limit])]
+    if not indexed:
+        return None
+
+    for camera_type in ("handcam", "outside"):
+        grouped = analyze_photo_series(
+            indexed,
+            camera_type,
+            classify_fn,
+            min_confidence=HANDCAM_AUTO_OK_THRESHOLD,
+            target_categories=get_preview_categories(camera_type),
+            use_sampling=False,
+            worker_count=1,
+        )
+        if series_has_core_match(grouped):
+            return camera_type
+    return None

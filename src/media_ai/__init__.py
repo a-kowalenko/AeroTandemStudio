@@ -14,6 +14,13 @@ from .series_analyzer import (
     get_preview_categories,
     get_preview_category_labels,
 )
+from .video_analyzer import (
+    VideoAnalysisResult,
+    VideoAnalyzer,
+    analysis_to_project_clip,
+    build_project_dict,
+    smooth_phase_labels,
+)
 
 __all__ = [
     "SkydivePhotoAI",
@@ -31,6 +38,11 @@ __all__ = [
     "handcam_series_is_plausible",
     "infer_camera_type_from_form_data",
     "infer_camera_type_from_kunde",
+    "VideoAnalyzer",
+    "VideoAnalysisResult",
+    "build_project_dict",
+    "analysis_to_project_clip",
+    "smooth_phase_labels",
 ]
 
 

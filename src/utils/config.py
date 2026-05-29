@@ -79,8 +79,10 @@ class ConfigManager:
                         settings["media_ai_min_confidence"] = 0.75
                     if "media_ai_verbose_logs" not in settings:
                         settings["media_ai_verbose_logs"] = True
-                    if "media_ai_hf_token" not in settings:
-                        settings["media_ai_hf_token"] = ""
+                    if "media_ai_video_enabled" not in settings:
+                        settings["media_ai_video_enabled"] = True
+                    if "media_ai_video_sample_fps" not in settings:
+                        settings["media_ai_video_sample_fps"] = 1.0
                     return settings
             except (json.JSONDecodeError, FileNotFoundError):
                 return self.get_default_settings()
@@ -120,7 +122,8 @@ class ConfigManager:
             "media_ai_candidates_per_category": 3,
             "media_ai_min_confidence": 0.75,
             "media_ai_verbose_logs": True,
-            "media_ai_hf_token": "",
+            "media_ai_video_enabled": True,
+            "media_ai_video_sample_fps": 1.0,
             # SD-Karten Backup Einstellungen
             "sd_backup_folder": "",
             "sd_auto_backup": False,

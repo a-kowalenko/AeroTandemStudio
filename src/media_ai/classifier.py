@@ -93,7 +93,7 @@ class SkydivePhotoAI:
     OUTPUT_NAME = "output"
 
     def __init__(self, providers: List[str] | None = None, hf_token: Optional[str] = None) -> None:
-        del hf_token
+        del hf_token  # Legacy-Parameter, ONNX läuft lokal ohne HF
 
         self.providers = providers or self._default_providers()
         self._model_paths: Dict[str, str] = {}

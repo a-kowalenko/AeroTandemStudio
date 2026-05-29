@@ -1,7 +1,7 @@
 import os
 import tkinter as tk
 from tkinter import ttk
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -353,8 +353,8 @@ class AllPhotosSelectionDialog(tk.Toplevel):
         self.destroy()
 
 
-class MediaAIReviewDialog(tk.Toplevel):
-    """Dialog zur manuellen Bestätigung/Anpassung der KI-Preview-Auswahl."""
+class MediaAIReviewPanel(tk.Frame):
+    """UI zur manuellen Bestätigung/Anpassung der KI-Preview-Auswahl (einbettbar)."""
 
     PREVIEW_GRID_COLUMNS = 4
 
@@ -365,15 +365,12 @@ class MediaAIReviewDialog(tk.Toplevel):
         all_photo_paths: Optional[List[str]] = None,
         *,
         camera_type: Optional[str] = None,
+        on_apply: Optional[Callable[[List[int]], None]] = None,
+        on_cancel: Optional[Callable[[], None]] = None,
     ):
         super().__init__(master)
-        self.withdraw()
-        self.title("KI Analyse - Preview Auswahl prüfen")
-        self.geometry("1680x980")
-        self.resizable(True, True)
-        self.minsize(1280, 820)
-        self.transient(master)
-        self.grab_set()
+        self._on_apply_cb = on_apply
+        self._on_cancel_cb = on_cancel
 
         self._camera_type = camera_type or "handcam"
         self._preview_categories = get_preview_categories(self._camera_type)
@@ -394,9 +391,6 @@ class MediaAIReviewDialog(tk.Toplevel):
         self._deselected_categories: set[str] = set()
 
         self._create_widgets()
-        self._center_over_parent(master)
-        self.deiconify()
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
     def _center_over_parent(self, master) -> None:
         self.update_idletasks()
@@ -779,10 +773,86 @@ class MediaAIReviewDialog(tk.Toplevel):
             seen.add(idx)
             selected.append(idx)
         self.selected_indices = selected
+        if self._on_apply_cb:
+            self._on_apply_cb(selected)
+            return
         self.result_confirmed = True
-        self.destroy()
+        top = self.winfo_toplevel()
+        if isinstance(top, tk.Toplevel):
+            top.destroy()
 
     def _on_cancel(self):
         self.result_confirmed = False
         self.selected_indices = []
+        if self._on_cancel_cb:
+            self._on_cancel_cb()
+            return
+        top = self.winfo_toplevel()
+        if isinstance(top, tk.Toplevel):
+            top.destroy()
+
+
+class MediaAIReviewDialog(tk.Toplevel):
+    """Modaler Dialog für die Foto-KI-Auswahl."""
+
+    def __init__(
+        self,
+        master,
+        category_candidates: Dict[str, List[dict]],
+        all_photo_paths: Optional[List[str]] = None,
+        *,
+        camera_type: Optional[str] = None,
+    ):
+        super().__init__(master)
+        self.withdraw()
+        self.title("KI Analyse - Preview Auswahl prüfen")
+        self.geometry("1680x980")
+        self.resizable(True, True)
+        self.minsize(1280, 820)
+        self.transient(master)
+        self.grab_set()
+
+        self.selected_indices: List[int] = []
+        self.result_confirmed = False
+
+        self._panel = MediaAIReviewPanel(
+            self,
+            category_candidates,
+            all_photo_paths,
+            camera_type=camera_type,
+            on_apply=self._on_panel_apply,
+            on_cancel=self._on_panel_cancel,
+        )
+        self._panel.pack(fill="both", expand=True)
+        self._center_over_parent(master)
+        self.deiconify()
+        self.protocol("WM_DELETE_WINDOW", self._on_panel_cancel)
+
+    def _on_panel_apply(self, selected: List[int]) -> None:
+        self.selected_indices = list(selected)
+        self.result_confirmed = True
         self.destroy()
+
+    def _on_panel_cancel(self) -> None:
+        self.selected_indices = []
+        self.result_confirmed = False
+        self.destroy()
+
+    def _center_over_parent(self, master) -> None:
+        self.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        try:
+            master.update_idletasks()
+            mx = master.winfo_rootx()
+            my = master.winfo_rooty()
+            mw = master.winfo_width()
+            mh = master.winfo_height()
+            x = mx + max(0, (mw - width) // 2)
+            y = my + max(0, (mh - height) // 2)
+        except Exception:
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = max(0, (sw - width) // 2)
+            y = max(0, (sh - height) // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")

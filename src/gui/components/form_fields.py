@@ -136,10 +136,25 @@ class FormFields:
         )
 
         if self._last_qr_success and self._last_kunde is not None:
-            cam = infer_camera_type_from_kunde(self._last_kunde)
+            cam = infer_camera_type_from_kunde(self._last_kunde, product="photo")
             if cam:
                 return cam
-        return infer_camera_type_from_form_data(self.get_form_data())
+        return infer_camera_type_from_form_data(self.get_form_data(), product="photo")
+
+    def infer_unpaid_video_camera_type(self):
+        """
+        Ermittelt handcam/outside für unbezahlte Video-Produkte aus QR-Kunde oder Formular.
+        """
+        from src.media_ai.camera_resolution import (
+            infer_camera_type_from_form_data,
+            infer_camera_type_from_kunde,
+        )
+
+        if self._last_qr_success and self._last_kunde is not None:
+            cam = infer_camera_type_from_kunde(self._last_kunde, product="video")
+            if cam:
+                return cam
+        return infer_camera_type_from_form_data(self.get_form_data(), product="video")
 
     def update_form_layout(self, qr_success, kunde=None):
         """
@@ -670,13 +685,16 @@ class FormFields:
         self.toggle_video_mode_visibility()
         self._refresh_video_mode_buttons()
 
-    def apply_detected_video_mode(self, mode: str, *, has_photos: bool = True) -> None:
-        """Setzt video_mode nach KI-Erkennung und aktiviert ggf. das passende Foto-Produkt."""
+    def apply_detected_camera_type(self, mode: str) -> None:
+        """Setzt nur Handcam/Outside – keine Foto/Video-Produkt-Checkboxen."""
         if mode not in ("handcam", "outside"):
             return
         self._select_video_mode(mode)
-        if has_photos:
-            self.auto_check_products(has_videos=False, has_photos=True)
+
+    def apply_detected_video_mode(self, mode: str, *, has_photos: bool = True) -> None:
+        """Legacy-Alias: nur Kamera-Typ (Produkte separat über auto_check_products)."""
+        del has_photos
+        self.apply_detected_camera_type(mode)
 
     def _refresh_video_mode_buttons(self) -> None:
         mode = self.video_mode_var.get()

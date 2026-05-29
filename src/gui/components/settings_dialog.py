@@ -8,6 +8,7 @@ import webbrowser
 from src.utils.constants import APP_VERSION, PAYPAL_LOGO_PATH
 from src.gui.components.circular_spinner import CircularSpinner
 from src.gui.components.warning_dialog import WarningDialog
+from src.media_ai.camera_resolution import format_camera_type_label
 
 
 class SettingsDialog:
@@ -25,6 +26,8 @@ class SettingsDialog:
 
     def show(self):
         """Zeigt den Einstellungs-Dialog"""
+        if self.app is not None:
+            self.app._open_settings_dialog = self
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("Einstellungen")
         self.dialog.geometry("750x750")
@@ -85,7 +88,9 @@ class SettingsDialog:
         self.media_ai_candidates_per_category_var = tk.StringVar(value="3")
         self.media_ai_min_confidence_var = tk.StringVar(value="0.75")
         self.media_ai_verbose_logs_var = tk.BooleanVar(value=True)
-        self.media_ai_hf_token_var = tk.StringVar(value="")
+        self.media_ai_video_enabled_var = tk.BooleanVar(value=True)
+        self.media_ai_video_sample_fps_var = tk.StringVar(value="1.0")
+        self.ki_detected_mode_var = tk.StringVar(value="—")
 
         self.create_widgets()
         self.load_settings()
@@ -160,6 +165,8 @@ class SettingsDialog:
         if event and event.widget is not self.dialog:
             return
         self._deactivate_tab_mousewheel()
+        if self.app is not None and getattr(self.app, "_open_settings_dialog", None) is self:
+            self.app._open_settings_dialog = None
 
     def _widget_is_descendant(self, widget, ancestor):
         w = widget
@@ -1364,6 +1371,21 @@ class SettingsDialog:
 
     def create_ki_analyse_tab(self):
         """Erstellt den Tab 'KI Analyse'."""
+        status_frame = ttk.LabelFrame(self.tab_ki_analyse, text="Aktueller KI-Status", padding=(10, 8))
+        status_frame.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            status_frame,
+            text="Erkannter Kamera-Modus (Handcam/Outside):",
+            font=("Arial", 10),
+        ).pack(side="left", padx=(5, 8))
+        self.ki_detected_mode_label = tk.Label(
+            status_frame,
+            textvariable=self.ki_detected_mode_var,
+            font=("Arial", 10, "bold"),
+            fg="#0078d4",
+        )
+        self.ki_detected_mode_label.pack(side="left", padx=5)
+
         ai_frame = ttk.LabelFrame(self.tab_ki_analyse, text="Automatische Foto-Kategorisierung", padding=(10, 10))
         ai_frame.pack(fill="x", pady=(0, 10))
         ai_frame.grid_columnconfigure(1, weight=1)
@@ -1409,30 +1431,73 @@ class SettingsDialog:
             font=("Arial", 10),
         ).grid(row=4, column=0, columnspan=2, sticky="w", padx=25, pady=(6, 2))
 
-        hf_frame = ttk.LabelFrame(self.tab_ki_analyse, text="Hugging Face (optional)", padding=(10, 10))
-        hf_frame.pack(fill="x", pady=(0, 10))
-        hf_frame.grid_columnconfigure(1, weight=1)
+        video_ai_frame = ttk.LabelFrame(
+            self.tab_ki_analyse,
+            text="Automatischer Video-Schnitt (KI)",
+            padding=(10, 10),
+        )
+        video_ai_frame.pack(fill="x", pady=(0, 10))
+        video_ai_frame.grid_columnconfigure(1, weight=1)
 
-        tk.Label(hf_frame, text="HF Token:", font=("Arial", 10)).grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        tk.Entry(
-            hf_frame,
-            textvariable=self.media_ai_hf_token_var,
-            font=("Arial", 10),
-            show="*",
-            width=40,
-        ).grid(row=0, column=1, sticky="ew", padx=5, pady=5)
+        tk.Checkbutton(
+            video_ai_frame,
+            text="Video-KI nach Import aktivieren (nach QR-Scan)",
+            variable=self.media_ai_video_enabled_var,
+            font=("Arial", 10, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 6))
 
         tk.Label(
-            hf_frame,
+            video_ai_frame,
+            text="Analyse-Framerate (Frames pro Videosekunde):",
+            font=("Arial", 10),
+        ).grid(row=1, column=0, sticky="w", padx=25, pady=5)
+        tk.Entry(
+            video_ai_frame,
+            textvariable=self.media_ai_video_sample_fps_var,
+            font=("Arial", 10),
+            width=8,
+        ).grid(row=1, column=1, sticky="w", padx=5, pady=5)
+
+        tk.Label(
+            video_ai_frame,
             text=(
-                "Optional: verhindert Rate-Limit-Warnungen und beschleunigt Modell-Downloads.\n"
-                "Leer lassen = anonymer Download."
+                "Steuert, wie viele Frames pro Sekunde für die ONNX-Klassifikation "
+                "extrahiert werden (Standard: 1,0 = Trainings-Setting). "
+                "Review-Dialog und FFmpeg-Schnitt folgen danach."
             ),
             font=("Arial", 9),
             fg="gray",
             justify="left",
             wraplength=620,
-        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 2))
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=25, pady=(0, 2))
+
+        self.refresh_ki_analyse_tab()
+
+    def refresh_ki_analyse_tab(self, detected_mode: str | None = None) -> None:
+        """Aktualisiert KI-Tab-Anzeige (z. B. nach automatischer Modus-Erkennung)."""
+        settings = self.config.get_settings()
+        if detected_mode in ("handcam", "outside"):
+            self.ki_detected_mode_var.set(format_camera_type_label(detected_mode))
+        else:
+            mode = settings.get("video_mode", "")
+            if mode in ("handcam", "outside"):
+                self.ki_detected_mode_var.set(format_camera_type_label(mode))
+            else:
+                self.ki_detected_mode_var.set("— (noch nicht erkannt)")
+
+        self.media_ai_enabled_var.set(bool(settings.get("media_ai_enabled", True)))
+        self.media_ai_video_enabled_var.set(bool(settings.get("media_ai_video_enabled", True)))
+        self.media_ai_confirm_before_apply_var.set(
+            bool(settings.get("media_ai_confirm_before_apply", True))
+        )
+        self.media_ai_candidates_per_category_var.set(
+            str(settings.get("media_ai_candidates_per_category", 3))
+        )
+        self.media_ai_min_confidence_var.set(str(settings.get("media_ai_min_confidence", 0.75)))
+        self.media_ai_verbose_logs_var.set(bool(settings.get("media_ai_verbose_logs", True)))
+        self.media_ai_video_sample_fps_var.set(
+            str(settings.get("media_ai_video_sample_fps", 1.0))
+        )
 
     def _on_clear_cache_clicked(self):
         if not self.app:
@@ -2012,7 +2077,11 @@ class SettingsDialog:
         self.media_ai_candidates_per_category_var.set(str(settings.get("media_ai_candidates_per_category", 3)))
         self.media_ai_min_confidence_var.set(str(settings.get("media_ai_min_confidence", 0.75)))
         self.media_ai_verbose_logs_var.set(bool(settings.get("media_ai_verbose_logs", True)))
-        self.media_ai_hf_token_var.set(str(settings.get("media_ai_hf_token", "")))
+        self.media_ai_video_enabled_var.set(bool(settings.get("media_ai_video_enabled", True)))
+        self.media_ai_video_sample_fps_var.set(
+            str(settings.get("media_ai_video_sample_fps", 1.0))
+        )
+        self.refresh_ki_analyse_tab()
         self._on_qr_scan_scope_changed()
         self._on_intro_enabled_toggle()
         self._on_qr_remove_video_toggle()
@@ -2082,9 +2151,23 @@ class SettingsDialog:
         qr_remove_video_after_scan = self.qr_remove_video_after_scan_var.get()
         show_prereleases = bool(self.show_prereleases_var.get())
         media_ai_enabled = bool(self.media_ai_enabled_var.get())
+        media_ai_video_enabled = bool(self.media_ai_video_enabled_var.get())
         media_ai_confirm_before_apply = bool(self.media_ai_confirm_before_apply_var.get())
         media_ai_verbose_logs = bool(self.media_ai_verbose_logs_var.get())
-        media_ai_hf_token = self.media_ai_hf_token_var.get().strip()
+
+        try:
+            media_ai_video_sample_fps = float(
+                self.media_ai_video_sample_fps_var.get().strip().replace(",", ".")
+            )
+            if media_ai_video_sample_fps < 0.1 or media_ai_video_sample_fps > 10.0:
+                raise ValueError("außerhalb Bereich")
+        except ValueError:
+            messagebox.showwarning(
+                "Ungültige Eingabe",
+                "Video-Analyse-Framerate: Dezimalzahl zwischen 0,1 und 10 (Standard: 1,0).",
+                parent=self.dialog,
+            )
+            return
 
         try:
             qr_video_scan_seconds = float(self.qr_video_scan_seconds_var.get().strip())
@@ -2239,11 +2322,12 @@ class SettingsDialog:
             current_settings["qr_remove_video_max_duration_sec"] = qr_remove_video_max_duration_sec
             current_settings["show_prereleases"] = show_prereleases
             current_settings["media_ai_enabled"] = media_ai_enabled
+            current_settings["media_ai_video_enabled"] = media_ai_video_enabled
+            current_settings["media_ai_video_sample_fps"] = media_ai_video_sample_fps
             current_settings["media_ai_confirm_before_apply"] = media_ai_confirm_before_apply
             current_settings["media_ai_candidates_per_category"] = media_ai_candidates_per_category
             current_settings["media_ai_min_confidence"] = media_ai_min_confidence
             current_settings["media_ai_verbose_logs"] = media_ai_verbose_logs
-            current_settings["media_ai_hf_token"] = media_ai_hf_token
 
             # Speichern
             self.config.save_settings(current_settings)

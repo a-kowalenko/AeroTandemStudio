@@ -20,8 +20,18 @@ def format_camera_type_label(camera_type: str) -> str:
     return CAMERA_TYPE_LABELS.get(normalized, normalized or "Unbekannt")
 
 
-def infer_camera_type_from_kunde(kunde) -> Optional[CameraType]:
-    """Leitet den Kamera-Typ aus QR-/Kunden-Produkten ab (nur unbezahlte Foto-Produkte)."""
+def infer_camera_type_from_kunde(
+    kunde,
+    *,
+    product: str = "photo",
+) -> Optional[CameraType]:
+    """Leitet den Kamera-Typ aus QR-/Kunden-Produkten ab (unbezahlte Foto- oder Video-Produkte)."""
+    if product == "video":
+        return _infer_camera_type_from_kunde_video(kunde)
+    return _infer_camera_type_from_kunde_photo(kunde)
+
+
+def _infer_camera_type_from_kunde_photo(kunde) -> Optional[CameraType]:
     if kunde is None:
         return None
     handcam_foto = bool(getattr(kunde, "handcam_foto", False))
@@ -38,10 +48,62 @@ def infer_camera_type_from_kunde(kunde) -> Optional[CameraType]:
     return None
 
 
-def infer_camera_type_from_form_data(form_data: dict) -> Optional[CameraType]:
+def _infer_camera_type_from_kunde_video(kunde) -> Optional[CameraType]:
+    if kunde is None:
+        return None
+    handcam_video = bool(getattr(kunde, "handcam_video", False))
+    outside_video = bool(getattr(kunde, "outside_video", False))
+    handcam_unpaid = handcam_video and not bool(getattr(kunde, "ist_bezahlt_handcam_video", False))
+    outside_unpaid = outside_video and not bool(getattr(kunde, "ist_bezahlt_outside_video", False))
+
+    if handcam_unpaid and not outside_unpaid:
+        return "handcam"
+    if outside_unpaid and not handcam_unpaid:
+        return "outside"
+    if handcam_unpaid and outside_unpaid:
+        return None
+    return None
+
+
+def infer_camera_type_from_form_data(
+    form_data: dict,
+    *,
+    product: str = "photo",
+) -> Optional[CameraType]:
     """Leitet den Kamera-Typ aus aktuellen Formularwerten ab."""
+    if product == "video":
+        return _infer_camera_type_from_form_data_video(form_data)
+    return _infer_camera_type_from_form_data_photo(form_data)
+
+
+def _infer_camera_type_from_form_data_photo(form_data: dict) -> Optional[CameraType]:
     handcam_unpaid = bool(form_data.get("handcam_foto")) and not bool(form_data.get("ist_bezahlt_handcam_foto"))
     outside_unpaid = bool(form_data.get("outside_foto")) and not bool(form_data.get("ist_bezahlt_outside_foto"))
+
+    if handcam_unpaid and not outside_unpaid:
+        return "handcam"
+    if outside_unpaid and not handcam_unpaid:
+        return "outside"
+    if handcam_unpaid and outside_unpaid:
+        mode = form_data.get("video_mode")
+        if mode in ("handcam", "outside"):
+            return mode
+        return None
+
+    mode = form_data.get("video_mode")
+    if mode in ("handcam", "outside"):
+        if handcam_unpaid or outside_unpaid:
+            return mode
+    return None
+
+
+def _infer_camera_type_from_form_data_video(form_data: dict) -> Optional[CameraType]:
+    handcam_unpaid = bool(form_data.get("handcam_video")) and not bool(
+        form_data.get("ist_bezahlt_handcam_video")
+    )
+    outside_unpaid = bool(form_data.get("outside_video")) and not bool(
+        form_data.get("ist_bezahlt_outside_video")
+    )
 
     if handcam_unpaid and not outside_unpaid:
         return "handcam"

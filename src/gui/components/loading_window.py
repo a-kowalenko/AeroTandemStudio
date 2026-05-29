@@ -16,6 +16,7 @@ class LoadingWindow(tk.Toplevel):
         on_cancel: Optional[Callable[[], None]] = None,
         *,
         detail_mode: bool = False,
+        grab_focus: bool = True,
     ):
         super().__init__(master)
         self.title("Verarbeitung")
@@ -28,7 +29,8 @@ class LoadingWindow(tk.Toplevel):
         self.resizable(False, False)
 
         self.transient(master)
-        self.grab_set()
+        if grab_focus:
+            self.grab_set()
 
         master_x = master.winfo_x()
         master_y = master.winfo_y()
@@ -121,6 +123,50 @@ class LoadingWindow(tk.Toplevel):
                 completed_count=0,
                 total=1,
             )
+
+        self.update_idletasks()
+
+    @staticmethod
+    def _format_mmss(seconds: float) -> str:
+        seconds = max(0.0, float(seconds))
+        minutes = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{minutes:02d}:{secs:02d}"
+
+    def update_video_ai_progress(
+        self,
+        status: str,
+        *,
+        videos_done: int,
+        videos_total: int,
+        seconds_done: float,
+        seconds_total: float,
+        filename: str,
+    ) -> None:
+        """Fortschritt Video-KI: Videos + analysierte Gesamtzeit."""
+        videos_total = max(1, int(videos_total))
+        videos_done = max(0, min(int(videos_done), videos_total))
+        seconds_total = max(0.1, float(seconds_total))
+        seconds_done = max(0.0, min(float(seconds_done), seconds_total))
+
+        current_video = min(videos_done + 1, videos_total) if videos_done < videos_total else videos_total
+        progress_text = (
+            f"Video {current_video}/{videos_total}  ·  "
+            f"{self._format_mmss(seconds_done)}/{self._format_mmss(seconds_total)}"
+        )
+        percent = min(100.0, max(0.0, (seconds_done / seconds_total) * 100.0))
+
+        if self._detail_mode:
+            self.status_label.config(text=status)
+            self.progress_label.config(text=progress_text)
+            self.file_label.config(text=filename or "—")
+            if self._active_label_packed:
+                self.active_label.pack_forget()
+                self._active_label_packed = False
+            self.progress.config(mode="determinate", maximum=100)
+            self.progress["value"] = percent
+        else:
+            self.update_text(f"{status}\n{progress_text}\n{filename}")
 
         self.update_idletasks()
 

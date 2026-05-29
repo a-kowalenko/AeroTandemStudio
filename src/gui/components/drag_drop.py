@@ -12,7 +12,7 @@ import threading
 import shutil
 import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from src.gui.components.camera_type_dialog import CameraTypeChoiceDialog
 from src.gui.components.form_fields import VIDEO_MODE_UNSET
@@ -46,10 +46,16 @@ from src.utils.photo_thumbnail import (
 )
 from src.media_ai import (
     SkydivePhotoAI,
+    VideoAnalyzer,
     analyze_photo_series,
+    build_project_dict,
     detect_camera_type_from_classify_fn,
     get_preview_categories,
 )
+from src.media_ai.video_analyzer import VideoAnalysisProgress
+from src.ui.unified_media_ai_dialog import UnifiedMediaAIDialog
+from src.ui.video_preview_dialog import VideoCutReviewDialog
+from src.video.video_cutter import VideoCutExporter, export_clips_for_reimport, segments_from_project_clips
 
 # Mit handle_drop / Pipeline abgestimmt (v. a. .mp4 für Videos)
 _DND_VIDEO_EXT = ".mp4"
@@ -169,7 +175,10 @@ class DragDropFrame:
         self._photo_ai: Optional[SkydivePhotoAI] = None
         self._preview_target_categories: tuple[str, ...] = ()
         self._pending_ai_preview_paths: List[str] = []
+        self._pending_ai_video_paths: List[str] = []
         self._pending_ai_settings: Optional[Dict[str, object]] = None
+        self._video_ai_queue: Optional[queue.Queue] = None
+        self._video_cut_project: Optional[dict] = None
         self._media_ai_qr_sync_deadline: float = 0.0
         self._media_ai_video_qr_started = False
         self._media_ai_video_qr_finished = False
@@ -179,6 +188,14 @@ class DragDropFrame:
         self._media_ai_queue: Optional[queue.Queue] = None
         self._media_ai_busy = False
         self._media_ai_active_camera_type: Optional[str] = None
+        self._unified_ai_queue: Optional[queue.Queue] = None
+        self._unified_ai_active = False
+        self._unified_has_photos = False
+        self._unified_video_paths: List[str] = []
+        self._unified_ai_settings: Optional[Dict[str, object]] = None
+        self._unified_sample_interval: float = 1.0
+        self._unified_done_var: Optional[tk.BooleanVar] = None
+        self._unified_dialog: Optional[UnifiedMediaAIDialog] = None
         self._camera_type_dialog: Optional[CameraTypeChoiceDialog] = None
         self._wm_auto_select_running = False
         self.is_encoding = False  # NEU: Steuert Sichtbarkeit der Progress-Spalte vs. Datum/Uhrzeit
@@ -199,6 +216,25 @@ class DragDropFrame:
         self._video_row_highlight_after_id = None
         self._video_drop_indicator = None
         self.create_widgets()
+        if self.app and getattr(self.app, "root", None):
+            self.app.root.after(2500, self._warmup_media_ai_models)
+
+    def _warmup_media_ai_models(self) -> None:
+        """ONNX im Hintergrund laden, damit der erste KI-Lauf schneller startet."""
+        settings = self._get_media_ai_settings()
+        if not bool(settings.get("media_ai_enabled", True)) and not bool(
+            settings.get("media_ai_video_enabled", True)
+        ):
+            return
+
+        def worker() -> None:
+            try:
+                self._get_photo_ai()
+                self._log_media_ai("KI-Modelle im Hintergrund vorbereitet.")
+            except Exception as exc:
+                self._log_media_ai(f"KI-Vorladung übersprungen: {exc}")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def create_widgets(self):
         # Oberer Frame für Label und Checkbox in einer Reihe
@@ -585,7 +621,12 @@ class DragDropFrame:
         """Schreibt Import-Fehler in die App-Logdatei und auf die Konsole."""
         line = f"[{datetime.now().isoformat(timespec='seconds')}] {message}"
         if exc is not None:
-            line += f"\n{traceback.format_exc()}"
+            if isinstance(exc, BaseException):
+                line += "\n" + "".join(
+                    traceback.format_exception(type(exc), exc, exc.__traceback__)
+                )
+            else:
+                line += f"\n{exc!r}"
         print(line)
         try:
             os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -1178,8 +1219,19 @@ class DragDropFrame:
             self.app.form_fields.auto_check_products(new_videos_added, new_photos_added)
             if hasattr(self.app, 'update_watermark_column_visibility'):
                 self.app.update_watermark_column_visibility()
+            if new_photos_added or new_videos_added:
+                photo_ai = new_photos_added and self._should_run_media_ai_for_photos()
+                video_ai = new_videos_added and self._should_run_media_ai_for_videos()
+                if photo_ai or video_ai:
+                    self._media_ai_qr_sync_deadline = time.time() + 1.2
+                    self._media_ai_video_qr_started = False
+                    self._media_ai_video_qr_finished = False
+                    self._media_ai_photo_qr_started = False
+                    self._media_ai_photo_qr_finished = False
             if new_photos_added:
                 self._queue_or_run_auto_preview_selection(imported_photo_paths)
+            if new_videos_added:
+                self._queue_or_run_auto_video_ai_analysis(imported_video_paths)
 
         if new_videos_added:
             auto_qr_video_paths = getattr(self, "_pending_video_qr_paths", [])
@@ -2596,11 +2648,12 @@ class DragDropFrame:
     def _get_media_ai_settings(self) -> Dict[str, object]:
         default_settings: Dict[str, object] = {
             "media_ai_enabled": True,
+            "media_ai_video_enabled": True,
             "media_ai_confirm_before_apply": True,
             "media_ai_candidates_per_category": 3,
             "media_ai_min_confidence": 0.75,
             "media_ai_verbose_logs": True,
-            "media_ai_hf_token": "",
+            "media_ai_video_sample_fps": 1.0,
         }
         if not self.app or not hasattr(self.app, "config"):
             return default_settings
@@ -2611,12 +2664,37 @@ class DragDropFrame:
     def _log_media_ai(self, message: str) -> None:
         print(f"[MediaAI] {message}")
 
-    def _get_photo_ai(self, hf_token: str = "") -> SkydivePhotoAI:
-        token = hf_token.strip() if hf_token else ""
+    def _is_video_preview_busy(self) -> bool:
+        """True solange die Video-Vorschau Clips kodiert (Dateisperre vermeiden)."""
+        if not self.app or not getattr(self.app, "video_preview", None):
+            return False
+        thread = getattr(self.app.video_preview, "processing_thread", None)
+        return thread is not None and thread.is_alive()
+
+    def _notify_media_ai_camera_detected(self, camera_type: str) -> None:
+        """Formular/Config und offenen Settings-KI-Tab nach Erkennung aktualisieren."""
+        if camera_type not in ("handcam", "outside"):
+            return
+        if self.app and hasattr(self.app, "persist_detected_video_mode"):
+            self.app.persist_detected_video_mode(camera_type)
+        if self.app and hasattr(self.app, "refresh_open_settings_ki_tab"):
+            self.app.refresh_open_settings_ki_tab(camera_type)
+
+    def _get_photo_ai(self) -> SkydivePhotoAI:
         if self._photo_ai is None:
             self._log_media_ai("Initialisiere Handcam-Klassifikator (ONNX)...")
-            self._photo_ai = SkydivePhotoAI(hf_token=token or None)
+            self._photo_ai = SkydivePhotoAI()
         return self._photo_ai
+
+    @staticmethod
+    def _video_sample_interval_seconds(ai_settings: Dict[str, object]) -> float:
+        """Sekunden zwischen KI-Frames aus Einstellung „Frames pro Videosekunde“."""
+        try:
+            fps = float(ai_settings.get("media_ai_video_sample_fps", 1.0))
+        except (TypeError, ValueError):
+            fps = 1.0
+        fps = max(0.1, min(10.0, fps))
+        return 1.0 / fps
 
     def _find_photo_index_by_path(self, photo_path: str) -> Optional[int]:
         norm_photo_path = os.path.normpath(photo_path)
@@ -2626,23 +2704,600 @@ class DragDropFrame:
         return None
 
     def _should_run_media_ai_for_photos(self) -> bool:
-        """True wenn KI-Analyse laufen soll (unbezahltes Foto-Produkt oder Modus noch ungewählt)."""
+        """True wenn Foto-KI laufen soll (unbezahltes Foto-Produkt, Typ unklar oder Fotos ohne Produkt)."""
         if not self.app or not hasattr(self.app, "is_photo_preview_mode_active"):
             return False
         if self.app.is_photo_preview_mode_active():
             return True
         ff = getattr(self.app, "form_fields", None)
-        if ff is not None:
-            mode = ff.video_mode_var.get()
-            return mode == VIDEO_MODE_UNSET or mode not in ("handcam", "outside")
+        if ff is None:
+            return bool(self.photo_paths)
+        mode = ff.video_mode_var.get()
+        if mode == VIDEO_MODE_UNSET or mode not in ("handcam", "outside"):
+            return bool(self.photo_paths)
+        if self.photo_paths and not (ff.handcam_foto_var.get() or ff.outside_foto_var.get()):
+            return True
         return False
 
-    def _infer_camera_type_from_context(self) -> Optional[str]:
+    def _should_run_media_ai_for_videos(self) -> bool:
+        """True wenn Video-KI laufen soll (unbezahltes Video-Produkt, Typ unklar oder Videos ohne Produkt)."""
+        if not self.app or not hasattr(self.app, "is_video_preview_mode_active"):
+            return False
+        if self.app.is_video_preview_mode_active():
+            return True
+        ff = getattr(self.app, "form_fields", None)
+        if ff is None:
+            return bool(self.video_paths)
+        mode = ff.video_mode_var.get()
+        if mode == VIDEO_MODE_UNSET or mode not in ("handcam", "outside"):
+            return bool(self.video_paths)
+        if self.video_paths and not (ff.handcam_video_var.get() or ff.outside_video_var.get()):
+            return True
+        return False
+
+    def _apply_detected_camera_type_and_products(self, mode: str) -> None:
+        """KI setzt nur den Typ; Foto/Video-Produkte nach importierten Medien."""
+        if not self.app or not getattr(self.app, "form_fields", None):
+            return
+        ff = self.app.form_fields
+        ff.apply_detected_camera_type(mode)
+        has_videos = bool(self.video_paths)
+        has_photos = bool(self.photo_paths)
+        ff.auto_check_products(has_videos, has_photos)
+        self._notify_media_ai_camera_detected(mode)
+        if has_videos and has_photos:
+            self._log_media_ai(
+                f"Kamera-Typ {format_camera_type_label(mode)} – "
+                f"Foto- und Video-Produkt gesetzt (importierte Medien)."
+            )
+        elif has_photos:
+            self._log_media_ai(
+                f"Kamera-Typ {format_camera_type_label(mode)} – Foto-Produkt gesetzt."
+            )
+        elif has_videos:
+            self._log_media_ai(
+                f"Kamera-Typ {format_camera_type_label(mode)} – Video-Produkt gesetzt."
+            )
+
+    def apply_media_ai_preview_indices_public(self, selected_indices: List[int]) -> None:
+        self._apply_media_ai_preview_indices(selected_indices)
+
+    def _get_loading_master(self) -> tk.Misc:
+        if self.app and hasattr(self.app, "root") and self.app.root:
+            return self.app.root
+        return self.parent
+
+    def _destroy_media_ai_loading_window(self) -> None:
+        if not self._media_ai_loading_window:
+            return
+        try:
+            self._media_ai_loading_window.destroy()
+        except Exception:
+            pass
+        self._media_ai_loading_window = None
+
+    def _ensure_video_ai_loading_window(
+        self,
+        video_paths: List[str],
+        *,
+        camera_type: Optional[str] = None,
+        grab_focus: bool = False,
+        status: Optional[str] = None,
+    ) -> Optional[LoadingWindow]:
+        """Video-KI-Ladedialog: über Hauptfenster, ohne Modal-Grab (für Stapel unter Review)."""
+        master = self._get_loading_master()
+        ordered = self._video_paths_in_import_order(video_paths)
+        if not ordered:
+            ordered = [p for p in video_paths if p and os.path.isfile(p)]
+        if not ordered:
+            return self._media_ai_loading_window
+
+        label = status or self._media_ai_status_with_camera("Video-KI läuft", camera_type)
+        if (
+            not self._media_ai_loading_window
+            or not self._media_ai_loading_window.winfo_exists()
+        ):
+            self._media_ai_loading_window = LoadingWindow(
+                master,
+                text=label,
+                detail_mode=True,
+                grab_focus=grab_focus,
+            )
+
+        from src.media_ai.video_analyzer import probe_video_duration_sec
+
+        total_sec = sum(probe_video_duration_sec(p) for p in ordered) or float(len(ordered))
+        lw = self._media_ai_loading_window
+        if lw and hasattr(lw, "update_video_ai_progress"):
+            lw.update_video_ai_progress(
+                label,
+                videos_done=0,
+                videos_total=len(ordered),
+                seconds_done=0.0,
+                seconds_total=total_sec,
+                filename="Initialisiere Modell...",
+            )
+        return lw
+
+    def _stack_review_above_loading(self, review_dialog: tk.Toplevel) -> None:
+        """Review-Dialog vorne, Ladedialog darüber Hauptfenster aber darunter Review."""
+        master = self._get_loading_master()
+        lw = self._media_ai_loading_window
+        try:
+            review_dialog.transient(master)
+            if lw and lw.winfo_exists():
+                lw.transient(master)
+                lw.lift(master)
+                review_dialog.lift(lw)
+            else:
+                review_dialog.lift(master)
+            review_dialog.focus_force()
+        except tk.TclError:
+            pass
+
+    def _unified_queue_put(self, msg: tuple) -> None:
+        if self._unified_ai_active and self._unified_ai_queue is not None:
+            self._unified_ai_queue.put(msg)
+
+    def _ensure_photo_ai_loading_window(
+        self,
+        photo_count: int,
+        *,
+        status: str = "Foto-KI läuft",
+    ) -> None:
+        """Ladedialog für Foto-KI (modal über Hauptfenster)."""
+        master = self._get_loading_master()
+        total = max(1, int(photo_count))
+        if (
+            not self._media_ai_loading_window
+            or not self._media_ai_loading_window.winfo_exists()
+        ):
+            self._media_ai_loading_window = LoadingWindow(
+                master,
+                text=status,
+                detail_mode=True,
+                grab_focus=True,
+            )
+        self._media_ai_loading_window.update_qr_progress(
+            status,
+            "",
+            "Initialisiere Modell...",
+            completed_count=0,
+            total=total,
+        )
+
+    def _open_unified_review_dialog_if_needed(self) -> None:
+        if self._unified_dialog and self._unified_dialog.winfo_exists():
+            return
+        master = self._get_loading_master()
+        ai_settings = self._unified_ai_settings or self._get_media_ai_settings()
+        self._unified_dialog = UnifiedMediaAIDialog(
+            master,
+            self,
+            ai_settings,
+            sample_interval=self._unified_sample_interval,
+        )
+        lw = self._media_ai_loading_window
+        if lw and lw.winfo_exists():
+            try:
+                lw.grab_release()
+            except tk.TclError:
+                pass
+        self._stack_review_above_loading(self._unified_dialog)
+
+    def handle_unified_video_apply(
+        self,
+        exported_project: dict,
+        active_clips: List[dict],
+        dialog: UnifiedMediaAIDialog,
+    ) -> None:
+        self._video_cut_project = exported_project
+
+        def on_done(success: bool) -> None:
+            if success:
+                dialog.result_confirmed = True
+            if dialog.winfo_exists():
+                dialog.grab_release()
+                dialog.destroy()
+            self._end_unified_workflow()
+
+        self.apply_video_cut_review_and_reimport(active_clips, on_finished=on_done)
+
+    def apply_video_cut_review_and_reimport(
+        self,
+        active_clips: List[dict],
+        *,
+        on_finished: Optional[Callable[[bool], None]] = None,
+    ) -> None:
+        """Trimmt jeden Clip (aktive Phasen) und importiert die Ergebnisse neu."""
+        import tempfile
+
+        master = self._get_loading_master()
+        original_paths = [
+            str(c.get("path", "")).strip()
+            for c in active_clips
+            if str(c.get("path", "")).strip()
+        ]
+        norm_originals = {os.path.normpath(p) for p in original_paths}
+
+        loading = LoadingWindow(
+            master,
+            text="Schnitte werden erstellt…",
+            detail_mode=True,
+            grab_focus=True,
+        )
+        result_queue: queue.Queue = queue.Queue()
+
+        def worker() -> None:
+            try:
+                base_dir = self._ensure_working_temp_dir()
+                if not base_dir:
+                    base_dir = tempfile.mkdtemp(prefix="aero_ki_trim_")
+                out_dir = os.path.join(base_dir, "ki_trim_import")
+                os.makedirs(out_dir, exist_ok=True)
+
+                def progress(percent: float, label: str) -> None:
+                    result_queue.put(("progress", percent, label))
+
+                paths = export_clips_for_reimport(
+                    active_clips,
+                    out_dir,
+                    progress_callback=progress,
+                )
+                result_queue.put(("ok", paths))
+            except Exception as exc:
+                result_queue.put(("error", exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll() -> None:
+            terminal_msg: Optional[tuple] = None
+            try:
+                while True:
+                    msg = result_queue.get_nowait()
+                    if msg[0] == "progress" and loading.winfo_exists():
+                        _, percent, label = msg
+                        if hasattr(loading, "update_qr_progress"):
+                            loading.update_qr_progress(
+                                "Schnitte werden erstellt…",
+                                f"{percent:.0f}%",
+                                label,
+                                completed_count=int(percent),
+                                total=100,
+                            )
+                        continue
+                    terminal_msg = msg
+                    break
+            except queue.Empty:
+                if loading.winfo_exists():
+                    loading.after(120, poll)
+                return
+
+            if terminal_msg is None:
+                return
+
+            msg = terminal_msg
+            try:
+                loading.destroy()
+            except Exception:
+                pass
+
+            if msg[0] == "error":
+                messagebox.showerror(
+                    "Video-Schnitt",
+                    f"Schnitte konnten nicht erstellt werden:\n{msg[1]}",
+                    parent=master,
+                )
+                if on_finished:
+                    on_finished(False)
+                return
+
+            new_paths: List[str] = msg[1]
+            self._log_media_ai(
+                f"Video-Schnitt: {len(new_paths)} Clip(s) erstellt, ersetze Import."
+            )
+
+            for path in list(self.video_paths):
+                if os.path.normpath(path) in norm_originals:
+                    self.remove_video(path, update_preview=False)
+
+            self.add_files(new_paths, [])
+            messagebox.showinfo(
+                "Video-Schnitt",
+                f"{len(new_paths)} geschnittene Clip(s) wurden neu importiert.",
+                parent=master,
+            )
+            if on_finished:
+                on_finished(True)
+
+        loading.after(120, poll)
+
+    def _start_unified_media_ai_workflow(
+        self,
+        photo_paths: List[str],
+        video_paths: List[str],
+        ai_settings: Dict[str, object],
+    ) -> None:
+        self._media_ai_busy = True
+        self._unified_ai_active = True
+        self._unified_ai_queue = queue.Queue()
+        self._unified_dialog = None
+        self._unified_has_photos = bool(photo_paths)
+        self._unified_ai_settings = ai_settings
+        self._unified_sample_interval = self._video_sample_interval_seconds(ai_settings)
+
+        raw_video_paths = list(video_paths)
+        video_paths = self._video_paths_in_import_order(raw_video_paths)
+        if not video_paths:
+            video_paths = [p for p in raw_video_paths if p and os.path.isfile(p)]
+        self._unified_video_paths = list(video_paths)
+
+        self._log_media_ai(
+            f"Vereinter Workflow: {len(photo_paths)} Foto(s), {len(video_paths)} Video(s)."
+        )
+        if not video_paths:
+            self._log_media_ai("Warnung: Keine auflösbaren Video-Pfade für KI-Analyse.")
+
+        if photo_paths:
+            self._ensure_photo_ai_loading_window(
+                len(photo_paths),
+                status="Foto-KI analysiert…",
+            )
+        elif video_paths:
+            self._ensure_video_ai_loading_window(
+                video_paths,
+                grab_focus=True,
+                status="Video-KI analysiert…",
+            )
+
+        self._unified_done_var = tk.BooleanVar(self.parent, value=False)
+
+        def poll_unified() -> None:
+            if not self._unified_ai_active:
+                return
+            try:
+                while True:
+                    msg = self._unified_ai_queue.get_nowait()
+                    self._dispatch_unified_ai_message(msg)
+            except queue.Empty:
+                pass
+            if self._unified_ai_active:
+                host = (
+                    self._unified_dialog
+                    if self._unified_dialog and self._unified_dialog.winfo_exists()
+                    else self.parent
+                )
+                host.after(120, poll_unified)
+
+        self.parent.after(120, poll_unified)
+        threading.Thread(
+            target=self._unified_media_ai_worker,
+            args=(
+                photo_paths,
+                video_paths,
+                ai_settings,
+                self._unified_sample_interval,
+            ),
+            daemon=True,
+        ).start()
+
+        self.parent.wait_variable(self._unified_done_var)
+        self._unified_ai_active = False
+        self._finish_unified_media_ai_workflow()
+
+    def _finish_unified_media_ai_workflow(self) -> None:
+        self._unified_ai_active = False
+        self._destroy_media_ai_loading_window()
+        self._unified_ai_queue = None
+        self._unified_dialog = None
+        self._unified_has_photos = False
+        self._unified_video_paths = []
+        self._unified_ai_settings = None
+        self._unified_done_var = None
+        self._media_ai_busy = False
+        self._media_ai_active_camera_type = None
+        self._pending_ai_settings = None
+        self.parent.after(0, self._maybe_start_pending_media_ai)
+
+    def _end_unified_workflow(self) -> None:
+        self._unified_ai_active = False
+        done_var = self._unified_done_var
+        if done_var is not None:
+            done_var.set(True)
+
+    def _dispatch_unified_ai_message(self, msg: tuple) -> None:
+        kind = msg[0]
+
+        if kind == "photo_progress":
+            done, total, basename = msg[1], msg[2], msg[3]
+            lw = self._media_ai_loading_window
+            if lw and lw.winfo_exists():
+                lw.update_qr_progress(
+                    "Foto-KI läuft",
+                    f"Analysiert: {done}/{total}",
+                    basename,
+                    completed_count=done,
+                    total=max(1, total),
+                )
+            return
+
+        if kind == "apply_mode":
+            camera_type = str(msg[1])
+            self._media_ai_active_camera_type = camera_type
+            self._apply_detected_camera_type_and_products(camera_type)
+            if self._unified_video_paths:
+                self._ensure_video_ai_loading_window(
+                    self._unified_video_paths,
+                    grab_focus=False,
+                    camera_type=camera_type,
+                    status=self._media_ai_status_with_camera("Video-KI läuft", camera_type),
+                )
+            dialog = self._unified_dialog
+            if dialog and dialog.winfo_exists():
+                if self._is_video_preview_busy():
+                    dialog.set_video_progress(
+                        "Video-Vorschau wird vorbereitet – KI startet danach automatisch…"
+                    )
+                else:
+                    dialog.set_video_progress("Video-KI analysiert im Hintergrund…")
+            return
+
+        if kind == "video_progress":
+            info: VideoAnalysisProgress = msg[1]
+            dialog = self._unified_dialog
+            if dialog and dialog.winfo_exists():
+                dialog.set_video_progress(
+                    f"Video {info.videos_done}/{info.videos_total} · "
+                    f"{int(info.seconds_done // 60):02d}:{int(info.seconds_done % 60):02d} / "
+                    f"{int(info.seconds_total // 60):02d}:{int(info.seconds_total % 60):02d}"
+                )
+            lw = self._media_ai_loading_window
+            if lw and lw.winfo_exists():
+                cam = self._media_ai_active_camera_type
+                basename = (
+                    os.path.basename(info.current_video) if info.current_video else "—"
+                )
+                lw.update_video_ai_progress(
+                    self._media_ai_status_with_camera("Video-KI läuft", cam),
+                    videos_done=info.videos_done,
+                    videos_total=info.videos_total,
+                    seconds_done=info.seconds_done,
+                    seconds_total=info.seconds_total,
+                    filename=basename,
+                )
+            return
+
+        if kind == "error":
+            self._destroy_media_ai_loading_window()
+            parent = (
+                self._unified_dialog
+                if self._unified_dialog and self._unified_dialog.winfo_exists()
+                else self._get_loading_master()
+            )
+            messagebox.showerror("KI-Analyse", str(msg[1]), parent=parent)
+            self._end_unified_workflow()
+            return
+
+        if kind == "photo_ready" and self._unified_has_photos:
+            self._open_unified_review_dialog_if_needed()
+
+        if kind == "video_ready":
+            self._open_unified_review_dialog_if_needed()
+
+        dialog = self._unified_dialog
+        if not dialog or not dialog.winfo_exists():
+            return
+
+        if kind == "photo_ready":
+            grouped, camera_type, settings = msg[1], msg[2], msg[3]
+            if bool(settings.get("media_ai_confirm_before_apply", True)):
+                dialog.show_photo_ready(grouped, camera_type)
+            else:
+                selected = self._select_indices_from_candidates(grouped)
+                self._apply_media_ai_preview_indices(selected)
+                dialog.set_photo_progress("Foto-Auswahl übernommen.")
+            self._stack_review_above_loading(dialog)
+            return
+
+        if kind == "video_ready":
+            project, camera_type = msg[1], msg[2]
+            self._destroy_media_ai_loading_window()
+            dialog.show_video_ready(project, camera_type)
+            self._stack_review_above_loading(dialog)
+            return
+
+    def _unified_media_ai_worker(
+        self,
+        photo_paths: List[str],
+        video_paths: List[str],
+        ai_settings: Dict[str, object],
+        sample_interval: float,
+    ) -> None:
+        video_thread_started = threading.Event()
+
+        def start_video_analysis(camera_type: str) -> None:
+            if video_thread_started.is_set() or not video_paths:
+                return
+            video_thread_started.set()
+
+            def video_worker() -> None:
+                try:
+                    while self._unified_ai_active and self._is_video_preview_busy():
+                        time.sleep(0.35)
+
+                    paths = self._video_paths_in_import_order(video_paths)
+                    if not paths:
+                        paths = [p for p in video_paths if p and os.path.isfile(p)]
+                    if not paths:
+                        raise RuntimeError(
+                            "Keine lesbaren Video-Dateien für die KI-Analyse gefunden."
+                        )
+
+                    analyzer = VideoAnalyzer(
+                        camera_type,
+                        ai=self._get_photo_ai(),
+                        sample_interval_seconds=sample_interval,
+                    )
+
+                    def on_progress(info: VideoAnalysisProgress) -> None:
+                        self._unified_queue_put(("video_progress", info))
+
+                    results = analyzer.analyze_videos(paths, on_progress=on_progress)
+                    project = build_project_dict(
+                        camera_type,
+                        results,
+                        sample_interval=sample_interval,
+                    )
+                    self._unified_queue_put(("video_ready", project, camera_type))
+                except Exception as exc:
+                    self._unified_queue_put(("error", exc))
+
+            threading.Thread(target=video_worker, daemon=True).start()
+
+        try:
+            camera_type = self._infer_camera_type_from_context()
+            if not camera_type and self.app and self.app.form_fields:
+                mode = self.app.form_fields.video_mode_var.get()
+                if mode in ("handcam", "outside"):
+                    camera_type = mode
+
+            if camera_type:
+                self._unified_queue_put(("apply_mode", camera_type))
+                start_video_analysis(camera_type)
+            else:
+                classifier = self._get_photo_ai()
+                detected = detect_camera_type_from_classify_fn(
+                    photo_paths,
+                    classifier.classify_image,
+                )
+                camera_type = detected or "handcam"
+                self._unified_queue_put(("apply_mode", camera_type))
+                start_video_analysis(camera_type)
+
+            def photo_progress(done: int, total: int, basename: str) -> None:
+                self._unified_queue_put(("photo_progress", done, total, basename))
+
+            if photo_paths:
+                grouped = self._build_media_ai_candidates(
+                    photo_paths,
+                    ai_settings,
+                    camera_type=camera_type,
+                    use_sampling=False,
+                    on_progress=photo_progress,
+                )
+                self._unified_queue_put(("photo_ready", grouped, camera_type, ai_settings))
+        except Exception as exc:
+            self._unified_queue_put(("error", exc))
+
+    def _infer_camera_type_from_context(self, *, product: str = "photo") -> Optional[str]:
         """Schritt 1: Kamera-Typ aus QR/Formular (handcam | outside | None)."""
         if self.app and hasattr(self.app, "form_fields") and self.app.form_fields:
-            cam = self.app.form_fields.infer_unpaid_photo_camera_type()
+            if product == "video":
+                cam = self.app.form_fields.infer_unpaid_video_camera_type()
+            else:
+                cam = self.app.form_fields.infer_unpaid_photo_camera_type()
             if cam:
-                self._log_media_ai(f"Kamera-Typ aus QR/Formular: {cam}")
+                self._log_media_ai(f"Kamera-Typ aus QR/Formular ({product}): {cam}")
                 return cam
         return None
 
@@ -2658,9 +3313,7 @@ class DragDropFrame:
         min_confidence = float(ai_settings.get("media_ai_min_confidence", 0.75))
         max_candidates = int(ai_settings.get("media_ai_candidates_per_category", 3))
         verbose = bool(ai_settings.get("media_ai_verbose_logs", True))
-        hf_token = str(ai_settings.get("media_ai_hf_token", "") or "")
-
-        classifier = self._get_photo_ai(hf_token=hf_token)
+        classifier = self._get_photo_ai()
         path_to_index = {os.path.normpath(p): i for i, p in enumerate(self.photo_paths)}
         indexed_paths: List[Tuple[int, str]] = []
         for photo_path in imported_photo_paths:
@@ -2733,6 +3386,7 @@ class DragDropFrame:
                 self._log_media_ai(f"Kamera-Typ aus Formular-Modus: {mode}")
 
         if camera_type:
+            self._apply_detected_camera_type_and_products(camera_type)
             self._start_media_ai_async(imported_photo_paths, ai_settings, camera_type=camera_type)
             return
 
@@ -2834,7 +3488,7 @@ class DragDropFrame:
 
             try:
                 if auto_detect_camera_type:
-                    classifier = self._get_photo_ai(hf_token=str(ai_settings.get("media_ai_hf_token", "") or ""))
+                    classifier = self._get_photo_ai()
                     detected = detect_camera_type_from_classify_fn(
                         imported_photo_paths,
                         classifier.classify_image,
@@ -2903,8 +3557,7 @@ class DragDropFrame:
 
         if status == "apply_mode":
             detected_mode = payload
-            if self.app and hasattr(self.app, "form_fields") and self.app.form_fields:
-                self.app.form_fields.apply_detected_video_mode(detected_mode, has_photos=True)
+            self._apply_detected_camera_type_and_products(detected_mode)
             self.parent.after(20, self._check_media_ai_async_result)
             return
 
@@ -2941,6 +3594,346 @@ class DragDropFrame:
             selected_indices = self._select_indices_from_candidates(grouped_candidates)
         self._apply_media_ai_preview_indices(selected_indices)
         self._media_ai_active_camera_type = None
+        self.parent.after(0, self._maybe_start_pending_media_ai)
+
+    def _resolve_camera_type_and_start_video_ai(
+        self,
+        imported_video_paths: List[str],
+        ai_settings: Dict[str, object],
+    ) -> None:
+        if not self._should_run_media_ai_for_videos():
+            self._log_media_ai("Kein unbezahltes Video-Produkt – Video-KI-Analyse übersprungen.")
+            return
+
+        imported_video_paths = self._video_paths_in_import_order(imported_video_paths)
+        if not imported_video_paths:
+            self._log_media_ai("Keine Video-Pfade für KI-Analyse verfügbar.")
+            return
+
+        camera_type = self._infer_camera_type_from_context(product="video")
+        if not camera_type and self.app and hasattr(self.app, "form_fields") and self.app.form_fields:
+            mode = self.app.form_fields.video_mode_var.get()
+            if mode in ("handcam", "outside"):
+                camera_type = mode
+                self._log_media_ai(f"Kamera-Typ aus Formular-Modus (Video): {mode}")
+
+        if camera_type:
+            self._apply_detected_camera_type_and_products(camera_type)
+            self._start_video_ai_async(imported_video_paths, ai_settings, camera_type=camera_type)
+            return
+
+        self._log_media_ai("Kamera-Typ unklar – Video-KI mit Handcam/Outside-Erkennung.")
+        self._start_video_ai_async(
+            imported_video_paths,
+            ai_settings,
+            auto_detect_camera_type=True,
+        )
+
+    def _sample_frame_paths_for_camera_detection(
+        self,
+        video_paths: List[str],
+        *,
+        limit: int = 5,
+    ) -> List[str]:
+        import tempfile
+
+        import cv2
+
+        samples: List[str] = []
+        for path in video_paths[:limit]:
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                continue
+            try:
+                ok, frame = cap.read()
+            finally:
+                cap.release()
+            if not ok or frame is None:
+                continue
+            tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+            tmp.close()
+            if cv2.imwrite(tmp.name, frame):
+                samples.append(tmp.name)
+        return samples
+
+    def _start_video_ai_async(
+        self,
+        imported_video_paths: List[str],
+        ai_settings: Dict[str, object],
+        *,
+        camera_type: Optional[str] = None,
+        auto_detect_camera_type: bool = False,
+    ) -> None:
+        if self._media_ai_busy:
+            self._log_media_ai("Analyse bereits aktiv – Video-KI wird übersprungen.")
+            return
+
+        ordered_paths = self._video_paths_in_import_order(imported_video_paths)
+        if not ordered_paths:
+            self._log_media_ai("Keine gültigen Video-Pfade für KI-Analyse.")
+            return
+
+        self._media_ai_busy = True
+        self._media_ai_active_camera_type = camera_type
+        self._video_ai_queue = queue.Queue()
+        loading_master = (
+            self.app.root
+            if self.app and hasattr(self.app, "root") and self.app.root
+            else self.parent
+        )
+        if auto_detect_camera_type:
+            status = "Video-KI läuft (Kamera-Erkennung…)"
+        else:
+            status = self._media_ai_status_with_camera("Video-KI läuft", camera_type)
+        self._media_ai_loading_window = LoadingWindow(
+            loading_master,
+            text=status,
+            detail_mode=True,
+        )
+        if self._media_ai_loading_window:
+            from src.media_ai.video_analyzer import probe_video_duration_sec
+
+            total_sec = sum(probe_video_duration_sec(p) for p in ordered_paths) or float(
+                len(ordered_paths)
+            )
+            if hasattr(self._media_ai_loading_window, "update_video_ai_progress"):
+                self._media_ai_loading_window.update_video_ai_progress(
+                    status,
+                    videos_done=0,
+                    videos_total=len(ordered_paths),
+                    seconds_done=0.0,
+                    seconds_total=total_sec,
+                    filename="Initialisiere Modell...",
+                )
+            else:
+                self._media_ai_loading_window.update_qr_progress(
+                    status,
+                    "",
+                    "Initialisiere Modell...",
+                    completed_count=0,
+                    total=max(1, len(ordered_paths)),
+                )
+
+        def _worker():
+            resolved_camera_type = camera_type
+            temp_samples: List[str] = []
+
+            def _progress(info) -> None:
+                self._video_ai_queue.put(
+                    (
+                        "progress",
+                        (info, resolved_camera_type),
+                        ai_settings,
+                        resolved_camera_type,
+                    )
+                )
+
+            try:
+                if auto_detect_camera_type:
+                    temp_samples = self._sample_frame_paths_for_camera_detection(ordered_paths)
+                    classifier = self._get_photo_ai()
+                    detected = detect_camera_type_from_classify_fn(
+                        temp_samples or ordered_paths,
+                        classifier.classify_image,
+                    )
+                    resolved_camera_type = detected or "handcam"
+                    self._media_ai_active_camera_type = resolved_camera_type
+                    self._log_media_ai(
+                        f"Video-KI Kamera-Erkennung: {format_camera_type_label(resolved_camera_type)}"
+                        + (" (Fallback handcam)" if not detected else "")
+                    )
+                    self._video_ai_queue.put(
+                        ("apply_mode", resolved_camera_type, ai_settings, resolved_camera_type)
+                    )
+
+                if not resolved_camera_type:
+                    raise RuntimeError("Kamera-Typ fehlt für Video-KI-Analyse.")
+
+                sample_interval = self._video_sample_interval_seconds(ai_settings)
+                analyzer = VideoAnalyzer(
+                    resolved_camera_type,
+                    ai=self._get_photo_ai(),
+                    sample_interval_seconds=sample_interval,
+                )
+                self._log_media_ai(
+                    f"Video-KI Sampling: {1.0 / sample_interval:.2f} Frame(s)/s "
+                    f"(Intervall {sample_interval:.2f}s)"
+                )
+                results = analyzer.analyze_videos(ordered_paths, on_progress=_progress)
+                project = build_project_dict(
+                    resolved_camera_type,
+                    results,
+                    sample_interval=sample_interval,
+                )
+                self._video_ai_queue.put(("success", project, ai_settings, resolved_camera_type))
+            except Exception as exc:
+                self._log_media_ai(f"Video-KI Worker-Fehler: {exc!r}")
+                self._video_ai_queue.put(("error", exc, ai_settings, resolved_camera_type))
+            finally:
+                for sample_path in temp_samples:
+                    try:
+                        os.remove(sample_path)
+                    except OSError:
+                        pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self.parent.after(120, self._check_video_ai_async_result)
+
+    def _check_video_ai_async_result(self) -> None:
+        if self._video_ai_queue is None:
+            self._media_ai_busy = False
+            return
+        try:
+            status, payload, ai_settings, camera_type = self._video_ai_queue.get_nowait()
+        except queue.Empty:
+            self.parent.after(120, self._check_video_ai_async_result)
+            return
+
+        if status == "progress":
+            info, progress_camera_type = payload
+            if self._media_ai_loading_window:
+                cam = progress_camera_type or self._media_ai_active_camera_type
+                basename = os.path.basename(info.current_video) if info.current_video else "—"
+                if hasattr(self._media_ai_loading_window, "update_video_ai_progress"):
+                    self._media_ai_loading_window.update_video_ai_progress(
+                        self._media_ai_status_with_camera("Video-KI läuft", cam),
+                        videos_done=info.videos_done,
+                        videos_total=info.videos_total,
+                        seconds_done=info.seconds_done,
+                        seconds_total=info.seconds_total,
+                        filename=basename,
+                    )
+                else:
+                    self._media_ai_loading_window.update_qr_progress(
+                        self._media_ai_status_with_camera("Video-KI läuft", cam),
+                        f"Video {info.videos_done}/{info.videos_total}",
+                        basename,
+                        completed_count=info.videos_done,
+                        total=info.videos_total,
+                    )
+            self.parent.after(20, self._check_video_ai_async_result)
+            return
+
+        if status == "apply_mode":
+            detected_mode = payload
+            self._apply_detected_camera_type_and_products(detected_mode)
+            self.parent.after(20, self._check_video_ai_async_result)
+            return
+
+        if status == "error":
+            self._destroy_media_ai_loading_window()
+            self._media_ai_busy = False
+            self._video_ai_queue = None
+            err_text = str(payload) if payload is not None else "Unbekannter Fehler"
+            self._log_import_message("Video-KI-Analyse konnte nicht abgeschlossen werden", payload)
+            self._log_media_ai(f"Video-KI fehlgeschlagen: {err_text}")
+            messagebox.showerror(
+                "Video-KI",
+                f"Die Video-KI-Analyse ist fehlgeschlagen:\n\n{err_text}",
+                parent=self.parent,
+            )
+            self._media_ai_active_camera_type = None
+            self.parent.after(0, self._maybe_start_pending_media_ai)
+            return
+
+        self._destroy_media_ai_loading_window()
+        self._media_ai_busy = False
+        self._video_ai_queue = None
+
+        project = payload
+        self._media_ai_active_camera_type = camera_type
+        self._open_video_cut_review_dialog(project, camera_type)
+        self._media_ai_active_camera_type = None
+        self.parent.after(0, self._maybe_start_pending_media_ai)
+
+    def _video_paths_in_import_order(self, imported_video_paths: List[str]) -> List[str]:
+        """Behält die Tabellen-/Import-Reihenfolge bei (Arbeitskopien bevorzugt)."""
+        if not imported_video_paths:
+            return []
+
+        norm_imported = {os.path.normpath(p) for p in imported_video_paths}
+        ordered: List[str] = []
+        seen: set[str] = set()
+
+        def add(path: str) -> None:
+            norm = os.path.normpath(path)
+            if norm in seen:
+                return
+            if os.path.isfile(path):
+                seen.add(norm)
+                ordered.append(path)
+
+        for path in self.video_paths:
+            norm = os.path.normpath(path)
+            if norm in norm_imported:
+                add(path)
+
+        for path in imported_video_paths:
+            add(path)
+
+        if ordered:
+            return ordered
+
+        for path in self.video_paths:
+            add(path)
+        return ordered
+
+    def _default_video_cut_output_path(self) -> str:
+        settings = self.app.config.get_settings() if self.app and hasattr(self.app, "config") else {}
+        base_dir = str(settings.get("speicherort") or "").strip()
+        if not base_dir:
+            base_dir = (
+                self.app.video_preview.temp_dir
+                if self.app and getattr(self.app, "video_preview", None)
+                else os.getcwd()
+            )
+        form = self.app.form_fields.get_form_data() if self.app and self.app.form_fields else {}
+        name = (
+            str(form.get("videospringer") or "").strip()
+            or str(form.get("nachname") or "").strip()
+            or "kunde"
+        )
+        safe_name = re.sub(r'[<>:"/\\|?*]', "_", name)
+        return os.path.join(base_dir, f"{safe_name}_ki_schnitt.mp4")
+
+    def _open_video_cut_review_dialog(self, project: dict, camera_type: str) -> None:
+        master = (
+            self.app.root
+            if self.app and hasattr(self.app, "root") and self.app.root
+            else self.parent
+        )
+
+        def _on_apply(exported_project: dict, active_clips: List[dict]) -> None:
+            self._video_cut_project = exported_project
+            self.apply_video_cut_review_and_reimport(active_clips)
+
+        sample_interval = self._video_sample_interval_seconds(self._get_media_ai_settings())
+        dialog = VideoCutReviewDialog(
+            master,
+            project,
+            on_apply=_on_apply,
+            title=f"KI-Videoschnitt – Review ({format_camera_type_label(camera_type)})",
+            sample_interval=sample_interval,
+        )
+        dialog.show()
+
+    def _queue_or_run_auto_video_ai_analysis(self, imported_video_paths: List[str]) -> None:
+        if not imported_video_paths:
+            return
+        if not self._should_run_media_ai_for_videos():
+            self._pending_ai_video_paths = []
+            return
+        ai_settings = self._get_media_ai_settings()
+        if not bool(ai_settings.get("media_ai_enabled", True)) or not bool(
+            ai_settings.get("media_ai_video_enabled", True)
+        ):
+            self._log_media_ai("Video-KI deaktiviert – Analyse wird übersprungen.")
+            self._pending_ai_video_paths = []
+            return
+
+        self._pending_ai_video_paths = list(imported_video_paths)
+        self._pending_ai_settings = ai_settings
+        self._maybe_start_pending_media_ai()
 
     def _queue_or_run_auto_preview_selection(self, imported_photo_paths: List[str]) -> None:
         if not imported_photo_paths:
@@ -2959,22 +3952,16 @@ class DragDropFrame:
         # KI startet erst, wenn alle tatsächlich gestarteten QR-Suchen beendet sind.
         self._pending_ai_preview_paths = list(imported_photo_paths)
         self._pending_ai_settings = ai_settings
-        self._media_ai_qr_sync_deadline = time.time() + 1.2
-        self._media_ai_video_qr_started = False
-        self._media_ai_video_qr_finished = False
-        self._media_ai_photo_qr_started = False
-        self._media_ai_photo_qr_finished = False
         self._maybe_start_pending_media_ai()
 
     def _maybe_start_pending_media_ai(self) -> None:
-        if not self._pending_ai_preview_paths:
+        if not self._pending_ai_preview_paths and not self._pending_ai_video_paths:
             return
+        if self._media_ai_busy:
+            self.parent.after(140, self._maybe_start_pending_media_ai)
+            return
+
         ai_settings = self._pending_ai_settings or self._get_media_ai_settings()
-        if not bool(ai_settings.get("media_ai_enabled", True)):
-            self._pending_ai_preview_paths = []
-            self._pending_ai_settings = None
-            self._log_media_ai("Feature deaktiviert - vorgemerkte KI-Analyse verworfen.")
-            return
 
         video_running = self._media_ai_video_qr_started and not self._media_ai_video_qr_finished
         photo_running = self._media_ai_photo_qr_started and not self._media_ai_photo_qr_finished
@@ -2982,7 +3969,6 @@ class DragDropFrame:
             self.parent.after(140, self._maybe_start_pending_media_ai)
             return
 
-        # Kurze Grace-Phase: gibt QR-Läufen Zeit, wirklich zu starten.
         if (
             not self._media_ai_video_qr_started
             and not self._media_ai_photo_qr_started
@@ -2991,11 +3977,51 @@ class DragDropFrame:
             self.parent.after(140, self._maybe_start_pending_media_ai)
             return
 
-        paths = list(self._pending_ai_preview_paths)
+        photo_enabled = bool(ai_settings.get("media_ai_enabled", True))
+        video_enabled = bool(ai_settings.get("media_ai_enabled", True)) and bool(
+            ai_settings.get("media_ai_video_enabled", True)
+        )
+        photo_paths: List[str] = []
+        video_paths: List[str] = []
+
+        has_photo_pending = bool(self._pending_ai_preview_paths) and photo_enabled
+        has_video_pending = bool(self._pending_ai_video_paths) and video_enabled
+        both_pending = has_photo_pending and has_video_pending
+
+        if has_photo_pending and (both_pending or self._should_run_media_ai_for_photos()):
+            photo_paths = list(self._pending_ai_preview_paths)
+        elif self._pending_ai_preview_paths:
+            self._pending_ai_preview_paths = []
+
+        if has_video_pending and (both_pending or self._should_run_media_ai_for_videos()):
+            video_paths = self._video_paths_in_import_order(list(self._pending_ai_video_paths))
+        elif self._pending_ai_video_paths:
+            self._pending_ai_video_paths = []
+
         self._pending_ai_preview_paths = []
+        self._pending_ai_video_paths = []
+
+        if photo_paths and video_paths:
+            self._log_media_ai("Starte vereinten Foto- und Video-KI-Workflow.")
+            self._start_unified_media_ai_workflow(photo_paths, video_paths, ai_settings)
+            return
+
+        if photo_paths:
+            self._log_media_ai("Starte Foto-KI nach Abschluss der QR-Suchen.")
+            self._resolve_camera_type_and_start_media_ai(photo_paths, ai_settings)
+            return
+
+        if video_paths:
+            if self._is_video_preview_busy():
+                self._log_media_ai("Video-Vorschau läuft – Video-KI wartet auf Abschluss...")
+                self.parent.after(250, self._maybe_start_pending_media_ai)
+                return
+
+            self._log_media_ai("Starte Video-KI nach Abschluss der QR-Suchen.")
+            self._resolve_camera_type_and_start_video_ai(video_paths, ai_settings)
+            return
+
         self._pending_ai_settings = None
-        self._log_media_ai("Starte KI-Analyse nach Abschluss aller gestarteten QR-Suchen.")
-        self._resolve_camera_type_and_start_media_ai(paths, ai_settings)
 
     def on_video_qr_analysis_started(self) -> None:
         self._media_ai_video_qr_started = True

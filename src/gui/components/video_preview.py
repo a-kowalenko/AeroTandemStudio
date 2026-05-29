@@ -2020,6 +2020,12 @@ class VideoPreview:
             callback = self.pending_restart_callback
             self.pending_restart_callback = None
             callback()
+            return
+
+        if self.app and hasattr(self.app, "drag_drop"):
+            drag_drop = self.app.drag_drop
+            if hasattr(drag_drop, "_maybe_start_pending_media_ai"):
+                self.parent.after(0, drag_drop._maybe_start_pending_media_ai)
 
     def _stop_combine_indeterminate_if_any(self):
         if not getattr(self, "_combine_indeterminate_active", False):

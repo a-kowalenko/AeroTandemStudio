@@ -1046,6 +1046,11 @@ class VideoGeneratorApp:
             print("QR-Prüfung übersprungen - keine neuen Clips für Auto-Scan.")
             if self.video_preview:
                 self.video_preview.update_preview(video_paths)
+            if (
+                self.drag_drop
+                and hasattr(self.drag_drop, "on_video_qr_analysis_finished")
+            ):
+                self.drag_drop.on_video_qr_analysis_finished()
 
     def _reset_qr_cancel_event(self):
         self._qr_cancel_event = threading.Event()
@@ -2218,6 +2223,35 @@ class VideoGeneratorApp:
         foto_gewaehlt = form_data.get("handcam_foto", False) or form_data.get("outside_foto", False)
         foto_bezahlt = form_data.get("ist_bezahlt_handcam_foto", False) or form_data.get("ist_bezahlt_outside_foto", False)
         return bool(foto_gewaehlt and not foto_bezahlt)
+
+    def is_video_preview_mode_active(self) -> bool:
+        """True, wenn Video-Produkt gewählt und noch nicht bezahlt ist."""
+        form_data = self.form_fields.get_form_data()
+        video_gewaehlt = form_data.get("handcam_video", False) or form_data.get("outside_video", False)
+        video_bezahlt = form_data.get("ist_bezahlt_handcam_video", False) or form_data.get(
+            "ist_bezahlt_outside_video", False
+        )
+        return bool(video_gewaehlt and not video_bezahlt)
+
+    def persist_detected_video_mode(self, mode: str) -> None:
+        """Speichert erkannten Handcam/Outside-Modus in der Config."""
+        if mode not in ("handcam", "outside") or not self.config:
+            return
+        settings = self.config.get_settings()
+        settings["video_mode"] = mode
+        self.config.save_settings(settings)
+
+    def refresh_open_settings_ki_tab(self, detected_mode: str | None = None) -> None:
+        """Aktualisiert den KI-Tab im geöffneten Einstellungs-Dialog."""
+        dlg = getattr(self, "_open_settings_dialog", None)
+        if dlg is None:
+            return
+        dialog = getattr(dlg, "dialog", None)
+        if dialog is None or not dialog.winfo_exists():
+            self._open_settings_dialog = None
+            return
+        if hasattr(dlg, "refresh_ki_analyse_tab"):
+            dlg.refresh_ki_analyse_tab(detected_mode)
 
     def update_watermark_column_visibility(self):
         """Aktualisiert die Sichtbarkeit der Wasserzeichen-Spalte basierend auf Kunde-Status"""

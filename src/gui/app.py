@@ -1210,6 +1210,8 @@ class VideoGeneratorApp:
             return
 
         self._reset_qr_cancel_event()
+        if self.drag_drop and hasattr(self.drag_drop, "on_video_qr_analysis_started"):
+            self.drag_drop.on_video_qr_analysis_started()
         paths_to_scan = self._video_paths_for_qr_scan(video_paths)
         total = len(paths_to_scan)
         self._show_qr_loading_dialog(
@@ -1268,9 +1270,13 @@ class VideoGeneratorApp:
             and self.form_fields.has_qr_kunde_layout()
         ):
             print("Foto-QR-Suche übersprungen: Formular bereits durch QR-Scan befüllt.")
+            if self.drag_drop and hasattr(self.drag_drop, "on_photo_qr_analysis_finished"):
+                self.drag_drop.on_photo_qr_analysis_finished()
             return
 
         self._reset_qr_cancel_event()
+        if self.drag_drop and hasattr(self.drag_drop, "on_photo_qr_analysis_started"):
+            self.drag_drop.on_photo_qr_analysis_started()
         total = len(photo_paths)
         scan_opts = self._qr_photo_scan_kwargs()
         use_parallel = (
@@ -1484,6 +1490,7 @@ class VideoGeneratorApp:
         Überprüft alle 100ms, ob ein Ergebnis in der Queue liegt.
         Diese Funktion läuft im Haupt-Thread und kann die GUI sicher aktualisieren.
         """
+        notify_video_qr_finished = False
         try:
             # Versuchen, ein Ergebnis zu holen, ohne zu blockieren
             status, result = self.analysis_queue.get_nowait()
@@ -1507,6 +1514,7 @@ class VideoGeneratorApp:
                                      f"Ein unerwarteter Fehler bei der Videoanalyse ist aufgetreten:\n{result}")
                 # Kein _restore_button_state - Preview läuft parallel!
                 self.form_fields.update_form_layout(False, None)
+            notify_video_qr_finished = True
 
 
         except queue.Empty:
@@ -1521,6 +1529,14 @@ class VideoGeneratorApp:
             messagebox.showerror("Fehler", f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}")
             # Kein _restore_button_state - Preview läuft parallel!
             self.form_fields.update_form_layout(False, None)
+            notify_video_qr_finished = True
+        finally:
+            if (
+                notify_video_qr_finished
+                and self.drag_drop
+                and hasattr(self.drag_drop, "on_video_qr_analysis_finished")
+            ):
+                self.drag_drop.on_video_qr_analysis_finished()
 
     def _check_photo_analysis_result(self, photo_path: str):
         """Legacy-Polling für Einzelfoto-QR (wird nicht mehr direkt aufgerufen)."""
@@ -1528,6 +1544,7 @@ class VideoGeneratorApp:
 
     def _check_photo_batch_analysis_result(self):
         """Überprüft alle 100ms, ob ein Ergebnis der Foto-QR-Analyse in der Queue liegt."""
+        notify_drag_drop = False
         try:
             status, result = self.analysis_queue.get_nowait()
 
@@ -1548,8 +1565,10 @@ class VideoGeneratorApp:
                     source_path,
                     batch_scan=batch_mode,
                 )
+                notify_drag_drop = True
             elif status == "cancelled":
                 print("Foto-QR-Suche vom Benutzer abgebrochen.")
+                notify_drag_drop = True
             elif status == "error":
                 messagebox.showerror(
                     "Analyse-Fehler",
@@ -1557,6 +1576,7 @@ class VideoGeneratorApp:
                 )
                 if not batch_mode:
                     self.form_fields.update_form_layout(False, None)
+                notify_drag_drop = True
 
         except queue.Empty:
             self.root.after(100, self._check_photo_batch_analysis_result)
@@ -1570,6 +1590,11 @@ class VideoGeneratorApp:
                 "Fehler",
                 f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}",
             )
+            notify_drag_drop = True
+
+        finally:
+            if notify_drag_drop and self.drag_drop and hasattr(self.drag_drop, "on_photo_qr_analysis_finished"):
+                self.drag_drop.on_photo_qr_analysis_finished()
 
     def _get_media_duration_seconds(self, media_path: str):
         """Ermittelt die Medien-Dauer in Sekunden (ffprobe)."""
@@ -1701,7 +1726,6 @@ class VideoGeneratorApp:
             if not (self.video_preview and self.video_preview.processing_thread):
                 self._restore_button_state()
             self.form_fields.update_form_layout(False, None)
-
     def _process_photo_analysis_result(
         self,
         kunde,
@@ -1745,7 +1769,6 @@ class VideoGeneratorApp:
             print(f"Fehler in _process_photo_analysis_result: {e}")
             if not batch_scan:
                 self.form_fields.update_form_layout(False, None)
-
     def erstelle_video(self):
         """Bereitet die Videoerstellung mit Intro vor"""
         # Formulardaten sammeln
@@ -1753,6 +1776,14 @@ class VideoGeneratorApp:
 
         # Server-Upload Einstellung hinzufügen
         form_data["upload_to_server"] = self.upload_to_server_var.get()
+
+        if form_data.get("video_mode", "") not in ("handcam", "outside"):
+            messagebox.showwarning(
+                "Fehlende Eingabe",
+                "Bitte wählen Sie Handcam oder Outside aus.",
+                parent=self.root,
+            )
+            return
 
         # Prüfe Server-Verbindung wenn Upload aktiviert
         if form_data["upload_to_server"] and not self.server_connected:
@@ -2181,6 +2212,13 @@ class VideoGeneratorApp:
         if self.form_fields:
             self.form_fields.auto_check_products(has_videos, has_photos)
 
+    def is_photo_preview_mode_active(self) -> bool:
+        """True, wenn Foto-Produkt gewählt und noch nicht bezahlt ist."""
+        form_data = self.form_fields.get_form_data()
+        foto_gewaehlt = form_data.get("handcam_foto", False) or form_data.get("outside_foto", False)
+        foto_bezahlt = form_data.get("ist_bezahlt_handcam_foto", False) or form_data.get("ist_bezahlt_outside_foto", False)
+        return bool(foto_gewaehlt and not foto_bezahlt)
+
     def update_watermark_column_visibility(self):
         """Aktualisiert die Sichtbarkeit der Wasserzeichen-Spalte basierend auf Kunde-Status"""
         form_data = self.form_fields.get_form_data()
@@ -2214,7 +2252,7 @@ class VideoGeneratorApp:
         # --- NEU: Foto-Logik ---
         foto_gewaehlt = form_data.get("handcam_foto", False) or form_data.get("outside_foto", False)
         foto_bezahlt = form_data.get("ist_bezahlt_handcam_foto", False) or form_data.get("ist_bezahlt_outside_foto", False)
-        foto_wm_sichtbar = foto_gewaehlt and not foto_bezahlt
+        foto_wm_sichtbar = self.is_photo_preview_mode_active()
 
         print(f"🔍 Foto-Wasserzeichen-Spalte Update:")
         print(f"   Foto gewählt: {foto_gewaehlt}, Foto bezahlt: {foto_bezahlt}")

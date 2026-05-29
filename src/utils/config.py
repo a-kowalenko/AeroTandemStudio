@@ -69,6 +69,18 @@ class ConfigManager:
                         settings["qr_remove_video_max_duration_sec"] = 10
                     if "show_prereleases" not in settings:
                         settings["show_prereleases"] = False
+                    if "media_ai_enabled" not in settings:
+                        settings["media_ai_enabled"] = True
+                    if "media_ai_confirm_before_apply" not in settings:
+                        settings["media_ai_confirm_before_apply"] = True
+                    if "media_ai_candidates_per_category" not in settings:
+                        settings["media_ai_candidates_per_category"] = 3
+                    if "media_ai_min_confidence" not in settings:
+                        settings["media_ai_min_confidence"] = 0.75
+                    if "media_ai_verbose_logs" not in settings:
+                        settings["media_ai_verbose_logs"] = True
+                    if "media_ai_hf_token" not in settings:
+                        settings["media_ai_hf_token"] = ""
                     return settings
             except (json.JSONDecodeError, FileNotFoundError):
                 return self.get_default_settings()
@@ -103,6 +115,12 @@ class ConfigManager:
             "qr_remove_video_after_scan": False,
             "qr_remove_video_max_duration_sec": 10,
             "show_prereleases": False,
+            "media_ai_enabled": True,
+            "media_ai_confirm_before_apply": True,
+            "media_ai_candidates_per_category": 3,
+            "media_ai_min_confidence": 0.75,
+            "media_ai_verbose_logs": True,
+            "media_ai_hf_token": "",
             # SD-Karten Backup Einstellungen
             "sd_backup_folder": "",
             "sd_auto_backup": False,

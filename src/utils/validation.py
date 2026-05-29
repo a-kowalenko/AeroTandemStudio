@@ -5,6 +5,10 @@ def validate_form_data(form_data, video_paths):
     """Validiert die Formulardaten und gibt Fehlermeldungen zurück"""
     errors = []
 
+    video_mode = form_data.get("video_mode", "")
+    if video_mode not in ("handcam", "outside"):
+        errors.append("Bitte wählen Sie Handcam oder Outside aus")
+
     required_fields = [
         ("tandemmaster", "Tandemmaster"),
         ("datum", "Datum"),

@@ -80,6 +80,12 @@ class SettingsDialog:
         self.qr_remove_photo_after_scan_var = tk.BooleanVar(value=False)
         self.qr_remove_video_after_scan_var = tk.BooleanVar(value=False)
         self.qr_remove_video_max_duration_sec_var = tk.StringVar(value="10")
+        self.media_ai_enabled_var = tk.BooleanVar(value=True)
+        self.media_ai_confirm_before_apply_var = tk.BooleanVar(value=True)
+        self.media_ai_candidates_per_category_var = tk.StringVar(value="3")
+        self.media_ai_min_confidence_var = tk.StringVar(value="0.75")
+        self.media_ai_verbose_logs_var = tk.BooleanVar(value=True)
+        self.media_ai_hf_token_var = tk.StringVar(value="")
 
         self.create_widgets()
         self.load_settings()
@@ -310,8 +316,8 @@ class SettingsDialog:
         self.create_backup_tab()
         self._attach_tab_mousewheel(self.tab_backup)
 
-        # --- Tab 4: QR Analyse ---
-        self.tab_qr_analyse = self._add_scrollable_notebook_tab("QR Analyse")
+        # --- Tab 4: QR ---
+        self.tab_qr_analyse = self._add_scrollable_notebook_tab("QR")
         self.create_qr_analyse_tab()
         self._attach_tab_mousewheel(self.tab_qr_analyse)
 
@@ -324,6 +330,11 @@ class SettingsDialog:
         self.tab_erweitert = self._add_scrollable_notebook_tab("Erweitert")
         self.create_erweitert_tab()
         self._attach_tab_mousewheel(self.tab_erweitert)
+
+        # --- Tab 7: KI ---
+        self.tab_ki_analyse = self._add_scrollable_notebook_tab("KI")
+        self.create_ki_analyse_tab()
+        self._attach_tab_mousewheel(self.tab_ki_analyse)
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_settings_notebook_tab_changed)
         self.dialog.bind("<Destroy>", self._on_settings_dialog_destroy, add="+")
@@ -1351,6 +1362,78 @@ class SettingsDialog:
         )
         self.clear_cache_button.pack(anchor="w", padx=5, pady=(0, 4))
 
+    def create_ki_analyse_tab(self):
+        """Erstellt den Tab 'KI Analyse'."""
+        ai_frame = ttk.LabelFrame(self.tab_ki_analyse, text="Automatische Foto-Kategorisierung", padding=(10, 10))
+        ai_frame.pack(fill="x", pady=(0, 10))
+        ai_frame.grid_columnconfigure(1, weight=1)
+
+        tk.Checkbutton(
+            ai_frame,
+            text="KI-Analyse nach Foto-Import aktivieren",
+            variable=self.media_ai_enabled_var,
+            font=("Arial", 10, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 6))
+
+        tk.Checkbutton(
+            ai_frame,
+            text="Auswahl vor dem Setzen der Preview-Fotos bestätigen",
+            variable=self.media_ai_confirm_before_apply_var,
+            font=("Arial", 10),
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=25, pady=2)
+
+        tk.Label(ai_frame, text="Kandidaten pro Kategorie:", font=("Arial", 10)).grid(
+            row=2, column=0, sticky="w", padx=25, pady=5
+        )
+        tk.Entry(
+            ai_frame,
+            textvariable=self.media_ai_candidates_per_category_var,
+            font=("Arial", 10),
+            width=6,
+        ).grid(row=2, column=1, sticky="w", padx=5, pady=5)
+
+        tk.Label(ai_frame, text="Mindest-Confidence (0.0 - 1.0):", font=("Arial", 10)).grid(
+            row=3, column=0, sticky="w", padx=25, pady=5
+        )
+        tk.Entry(
+            ai_frame,
+            textvariable=self.media_ai_min_confidence_var,
+            font=("Arial", 10),
+            width=8,
+        ).grid(row=3, column=1, sticky="w", padx=5, pady=5)
+
+        tk.Checkbutton(
+            ai_frame,
+            text="Ausführliche KI-Logs in Konsole ausgeben",
+            variable=self.media_ai_verbose_logs_var,
+            font=("Arial", 10),
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=25, pady=(6, 2))
+
+        hf_frame = ttk.LabelFrame(self.tab_ki_analyse, text="Hugging Face (optional)", padding=(10, 10))
+        hf_frame.pack(fill="x", pady=(0, 10))
+        hf_frame.grid_columnconfigure(1, weight=1)
+
+        tk.Label(hf_frame, text="HF Token:", font=("Arial", 10)).grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        tk.Entry(
+            hf_frame,
+            textvariable=self.media_ai_hf_token_var,
+            font=("Arial", 10),
+            show="*",
+            width=40,
+        ).grid(row=0, column=1, sticky="ew", padx=5, pady=5)
+
+        tk.Label(
+            hf_frame,
+            text=(
+                "Optional: verhindert Rate-Limit-Warnungen und beschleunigt Modell-Downloads.\n"
+                "Leer lassen = anonymer Download."
+            ),
+            font=("Arial", 9),
+            fg="gray",
+            justify="left",
+            wraplength=620,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 2))
+
     def _on_clear_cache_clicked(self):
         if not self.app:
             messagebox.showerror(
@@ -1924,6 +2007,12 @@ class SettingsDialog:
             str(settings.get("qr_remove_video_max_duration_sec", 10))
         )
         self.show_prereleases_var.set(bool(settings.get("show_prereleases", False)))
+        self.media_ai_enabled_var.set(bool(settings.get("media_ai_enabled", True)))
+        self.media_ai_confirm_before_apply_var.set(bool(settings.get("media_ai_confirm_before_apply", True)))
+        self.media_ai_candidates_per_category_var.set(str(settings.get("media_ai_candidates_per_category", 3)))
+        self.media_ai_min_confidence_var.set(str(settings.get("media_ai_min_confidence", 0.75)))
+        self.media_ai_verbose_logs_var.set(bool(settings.get("media_ai_verbose_logs", True)))
+        self.media_ai_hf_token_var.set(str(settings.get("media_ai_hf_token", "")))
         self._on_qr_scan_scope_changed()
         self._on_intro_enabled_toggle()
         self._on_qr_remove_video_toggle()
@@ -1992,6 +2081,10 @@ class SettingsDialog:
         qr_remove_photo_after_scan = self.qr_remove_photo_after_scan_var.get()
         qr_remove_video_after_scan = self.qr_remove_video_after_scan_var.get()
         show_prereleases = bool(self.show_prereleases_var.get())
+        media_ai_enabled = bool(self.media_ai_enabled_var.get())
+        media_ai_confirm_before_apply = bool(self.media_ai_confirm_before_apply_var.get())
+        media_ai_verbose_logs = bool(self.media_ai_verbose_logs_var.get())
+        media_ai_hf_token = self.media_ai_hf_token_var.get().strip()
 
         try:
             qr_video_scan_seconds = float(self.qr_video_scan_seconds_var.get().strip())
@@ -2042,6 +2135,30 @@ class SettingsDialog:
             messagebox.showwarning(
                 "Ungültige Eingabe",
                 "Maximale Clip-Länge: positive Zahl bis 300 Sekunden.",
+                parent=self.dialog,
+            )
+            return
+
+        try:
+            media_ai_candidates_per_category = int(self.media_ai_candidates_per_category_var.get().strip())
+            if media_ai_candidates_per_category < 1 or media_ai_candidates_per_category > 10:
+                raise ValueError("außerhalb Bereich")
+        except ValueError:
+            messagebox.showwarning(
+                "Ungültige Eingabe",
+                "KI-Kandidaten pro Kategorie: ganze Zahl zwischen 1 und 10.",
+                parent=self.dialog,
+            )
+            return
+
+        try:
+            media_ai_min_confidence = float(self.media_ai_min_confidence_var.get().strip())
+            if media_ai_min_confidence < 0.0 or media_ai_min_confidence > 1.0:
+                raise ValueError("außerhalb Bereich")
+        except ValueError:
+            messagebox.showwarning(
+                "Ungültige Eingabe",
+                "KI Mindest-Confidence: Zahl zwischen 0.0 und 1.0.",
                 parent=self.dialog,
             )
             return
@@ -2121,6 +2238,12 @@ class SettingsDialog:
             current_settings["qr_remove_video_after_scan"] = qr_remove_video_after_scan
             current_settings["qr_remove_video_max_duration_sec"] = qr_remove_video_max_duration_sec
             current_settings["show_prereleases"] = show_prereleases
+            current_settings["media_ai_enabled"] = media_ai_enabled
+            current_settings["media_ai_confirm_before_apply"] = media_ai_confirm_before_apply
+            current_settings["media_ai_candidates_per_category"] = media_ai_candidates_per_category
+            current_settings["media_ai_min_confidence"] = media_ai_min_confidence
+            current_settings["media_ai_verbose_logs"] = media_ai_verbose_logs
+            current_settings["media_ai_hf_token"] = media_ai_hf_token
 
             # Speichern
             self.config.save_settings(current_settings)

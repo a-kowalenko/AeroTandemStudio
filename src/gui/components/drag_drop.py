@@ -10,9 +10,21 @@ import subprocess
 import time
 import threading
 import shutil
-from typing import List, Optional
+import queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional, Tuple
 
+from src.gui.components.camera_type_dialog import CameraTypeChoiceDialog
+from src.gui.components.form_fields import VIDEO_MODE_UNSET
 from src.gui.components.error_dialog import ErrorDialog
+from src.gui.components.loading_window import LoadingWindow
+from src.gui.components.media_ai_review_dialog import MediaAIReviewDialog
+from src.media_ai.camera_resolution import (
+    handcam_series_is_plausible,
+    infer_camera_type_from_form_data,
+    infer_camera_type_from_kunde,
+    format_camera_type_label,
+)
 from src.utils.constants import LOG_FILE, SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.media_history import MediaHistoryStore
 from src.utils.natural_sort import natural_sort_key, sort_paths_by_basename
@@ -33,6 +45,7 @@ from src.utils.photo_thumbnail import (
     build_pil_thumbnail,
     build_pil_thumbnails_parallel,
 )
+from src.media_ai import PREVIEW_CATEGORIES, SkydivePhotoAI, analyze_photo_series
 
 # Mit handle_drop / Pipeline abgestimmt (v. a. .mp4 für Videos)
 _DND_VIDEO_EXT = ".mp4"
@@ -149,6 +162,20 @@ class DragDropFrame:
         self.watermark_clip_index = None  # NEU: Index des Clips für Wasserzeichen
         self.watermark_photo_indices = []  # NEU: Liste für Foto-Mehrfachauswahl
         self.show_watermark_column = False  # NEU: Steuert Sichtbarkeit der Wasserzeichen-Spalte
+        self._photo_ai: Optional[SkydivePhotoAI] = None
+        self._preview_target_categories = PREVIEW_CATEGORIES
+        self._pending_ai_preview_paths: List[str] = []
+        self._pending_ai_settings: Optional[Dict[str, object]] = None
+        self._media_ai_qr_sync_deadline: float = 0.0
+        self._media_ai_video_qr_started = False
+        self._media_ai_video_qr_finished = False
+        self._media_ai_photo_qr_started = False
+        self._media_ai_photo_qr_finished = False
+        self._media_ai_loading_window: Optional[LoadingWindow] = None
+        self._media_ai_queue: Optional[queue.Queue] = None
+        self._media_ai_busy = False
+        self._media_ai_active_camera_type: Optional[str] = None
+        self._camera_type_dialog: Optional[CameraTypeChoiceDialog] = None
         self._wm_auto_select_running = False
         self.is_encoding = False  # NEU: Steuert Sichtbarkeit der Progress-Spalte vs. Datum/Uhrzeit
         # Unix-Zeit der Quelldatei beim Import-Kopieren (Key: normpath der Kopie im temp_dir)
@@ -640,6 +667,7 @@ class DragDropFrame:
         cancelled: bool,
         pil_photo_cache=None,
         imported_video_paths: Optional[List[str]] = None,
+        imported_photo_paths: Optional[List[str]] = None,
         error_message: Optional[str] = None,
         unreadable_paths: Optional[List[str]] = None,
         videos_imported: int = 0,
@@ -654,6 +682,7 @@ class DragDropFrame:
                 cancelled,
                 pil_photo_cache,
                 imported_video_paths=imported_video_paths or [],
+                imported_photo_paths=imported_photo_paths or [],
                 error_message=error_message,
                 unreadable_paths=unreadable_paths or [],
                 videos_imported=videos_imported,
@@ -1012,6 +1041,7 @@ class DragDropFrame:
                 cancelled=cancelled,
                 pil_photo_cache=cache_snapshot,
                 imported_video_paths=imported_paths if not cancelled else [],
+                imported_photo_paths=photo_batch_paths if not cancelled else [],
                 unreadable_paths=unreadable_paths,
                 videos_imported=len(imported_paths) if not cancelled else 0,
                 photos_imported=len(photo_batch_paths) if not cancelled else 0,
@@ -1064,6 +1094,7 @@ class DragDropFrame:
         pil_photo_cache=None,
         *,
         imported_video_paths: Optional[List[str]] = None,
+        imported_photo_paths: Optional[List[str]] = None,
         error_message: Optional[str] = None,
         unreadable_paths: Optional[List[str]] = None,
         videos_imported: int = 0,
@@ -1072,6 +1103,7 @@ class DragDropFrame:
         dialog.destroy()
         unreadable_paths = unreadable_paths or []
         imported_video_paths = imported_video_paths or []
+        imported_photo_paths = imported_photo_paths or []
 
         self._update_drop_label_after_import(
             new_videos_added=new_videos_added,
@@ -1133,21 +1165,29 @@ class DragDropFrame:
                         auto_qr_video_paths.append(path)
                         self._auto_qr_scanned_video_paths.add(norm_path)
 
-            self.parent.after(
-                0,
-                lambda: self._update_app_preview(qr_video_paths=auto_qr_video_paths),
-            )
+            self._pending_video_qr_paths = auto_qr_video_paths
 
         if new_photos_added:
             self._update_photo_preview(pil_photo_cache)
-            # Foto-QR nur direkt starten, wenn kein Video-QR parallel läuft
-            if not (new_videos_added and self.qr_check_enabled.get()):
-                self._maybe_run_photo_qr_search()
 
         if (new_videos_added or new_photos_added) and self.app and hasattr(self.app, 'form_fields'):
             self.app.form_fields.auto_check_products(new_videos_added, new_photos_added)
             if hasattr(self.app, 'update_watermark_column_visibility'):
                 self.app.update_watermark_column_visibility()
+            if new_photos_added:
+                self._queue_or_run_auto_preview_selection(imported_photo_paths)
+
+        if new_videos_added:
+            auto_qr_video_paths = getattr(self, "_pending_video_qr_paths", [])
+            self.parent.after(
+                0,
+                lambda paths=auto_qr_video_paths: self._update_app_preview(qr_video_paths=paths),
+            )
+
+        if new_photos_added:
+            # Foto-QR nur direkt starten, wenn kein Video-QR parallel läuft
+            if not (new_videos_added and self.qr_check_enabled.get()):
+                self._maybe_run_photo_qr_search()
 
         # Wenn ausschließlich Fotos hinzugefügt wurden, automatisch
         # auf Foto-Tab (links) und Foto Vorschau (rechts) wechseln.
@@ -2548,6 +2588,416 @@ class DragDropFrame:
         """Löscht die Foto-Wasserzeichen-Auswahl"""
         self.watermark_photo_indices = []
         self._update_photo_table()
+
+    def _get_media_ai_settings(self) -> Dict[str, object]:
+        default_settings: Dict[str, object] = {
+            "media_ai_enabled": True,
+            "media_ai_confirm_before_apply": True,
+            "media_ai_candidates_per_category": 3,
+            "media_ai_min_confidence": 0.75,
+            "media_ai_verbose_logs": True,
+            "media_ai_hf_token": "",
+        }
+        if not self.app or not hasattr(self.app, "config"):
+            return default_settings
+        cfg = self.app.config.get_settings()
+        default_settings.update({k: cfg.get(k, v) for k, v in default_settings.items()})
+        return default_settings
+
+    def _log_media_ai(self, message: str) -> None:
+        print(f"[MediaAI] {message}")
+
+    def _get_photo_ai(self, hf_token: str = "") -> SkydivePhotoAI:
+        token = hf_token.strip() if hf_token else ""
+        if self._photo_ai is None:
+            self._log_media_ai("Initialisiere Handcam-Klassifikator (ONNX)...")
+            self._photo_ai = SkydivePhotoAI(hf_token=token or None)
+        return self._photo_ai
+
+    def _find_photo_index_by_path(self, photo_path: str) -> Optional[int]:
+        norm_photo_path = os.path.normpath(photo_path)
+        for idx, existing_path in enumerate(self.photo_paths):
+            if os.path.normpath(existing_path) == norm_photo_path:
+                return idx
+        return None
+
+    def _should_run_media_ai_for_photos(self) -> bool:
+        """True wenn KI-Analyse laufen soll (unbezahltes Foto-Produkt oder Modus noch ungewählt)."""
+        if not self.app or not hasattr(self.app, "is_photo_preview_mode_active"):
+            return False
+        if self.app.is_photo_preview_mode_active():
+            return True
+        ff = getattr(self.app, "form_fields", None)
+        if ff is not None:
+            mode = ff.video_mode_var.get()
+            return mode == VIDEO_MODE_UNSET or mode not in ("handcam", "outside")
+        return False
+
+    def _infer_camera_type_from_context(self) -> Optional[str]:
+        """Schritt 1: Kamera-Typ aus QR/Formular (handcam | outside | None)."""
+        if self.app and hasattr(self.app, "form_fields") and self.app.form_fields:
+            cam = self.app.form_fields.infer_unpaid_photo_camera_type()
+            if cam:
+                self._log_media_ai(f"Kamera-Typ aus QR/Formular: {cam}")
+                return cam
+        return None
+
+    def _build_media_ai_candidates(
+        self,
+        imported_photo_paths: List[str],
+        ai_settings: Dict[str, object],
+        camera_type: str,
+        *,
+        use_sampling: bool = False,
+        on_progress=None,
+    ):
+        min_confidence = float(ai_settings.get("media_ai_min_confidence", 0.75))
+        max_candidates = int(ai_settings.get("media_ai_candidates_per_category", 3))
+        verbose = bool(ai_settings.get("media_ai_verbose_logs", True))
+        hf_token = str(ai_settings.get("media_ai_hf_token", "") or "")
+
+        classifier = self._get_photo_ai(hf_token=hf_token)
+        path_to_index = {os.path.normpath(p): i for i, p in enumerate(self.photo_paths)}
+        indexed_paths: List[Tuple[int, str]] = []
+        for photo_path in imported_photo_paths:
+            photo_index = path_to_index.get(os.path.normpath(photo_path))
+            if photo_index is not None:
+                indexed_paths.append((photo_index, photo_path))
+
+        if not indexed_paths:
+            return {c: [] for c in self._preview_target_categories}
+
+        max_workers_cfg = int(ai_settings.get("media_ai_parallel_workers", 0) or 0)
+        default_workers = min(4, max(1, os.cpu_count() or 1))
+        worker_count = max_workers_cfg if max_workers_cfg > 0 else default_workers
+        worker_pool = classifier.create_worker_pool(worker_count)
+
+        return analyze_photo_series(
+            indexed_paths,
+            camera_type,
+            worker_pool.classify_image,
+            min_confidence=min_confidence,
+            max_candidates=max_candidates,
+            target_categories=self._preview_target_categories,
+            use_sampling=use_sampling,
+            worker_count=worker_count,
+            on_progress=on_progress,
+            on_log=self._log_media_ai if verbose else None,
+        )
+
+    def _select_indices_from_candidates(self, grouped_candidates: Dict[str, List[Dict[str, object]]]) -> List[int]:
+        selected_indices: List[int] = []
+        seen_indices = set()
+        for category in self._preview_target_categories:
+            candidates = grouped_candidates.get(category, [])
+            if not candidates:
+                continue
+            candidate_index = int(candidates[0]["index"])
+            if candidate_index in seen_indices:
+                continue
+            seen_indices.add(candidate_index)
+            selected_indices.append(candidate_index)
+        return selected_indices
+
+    def _apply_media_ai_preview_indices(self, selected_indices: List[int]) -> None:
+        if not selected_indices:
+            self._log_media_ai("Keine Preview-Indizes aus KI-Auswahl verfügbar.")
+            return
+        self._log_media_ai(f"Setze Preview-Auswahl auf Indizes: {selected_indices}")
+        self.clear_photo_watermark_selection()
+        if self.app and hasattr(self.app, "set_photo_watermark_for_indices"):
+            self.app.set_photo_watermark_for_indices(selected_indices, True)
+
+    def _resolve_camera_type_and_start_media_ai(
+        self,
+        imported_photo_paths: List[str],
+        ai_settings: Dict[str, object],
+    ) -> None:
+        """Kamera-Typ ermitteln (QR → Dialog → Auto-Test) und KI asynchron starten."""
+        if not self._should_run_media_ai_for_photos():
+            self._log_media_ai("Kein unbezahltes Foto-Produkt – KI-Analyse übersprungen.")
+            return
+
+        camera_type = self._infer_camera_type_from_context()
+        if camera_type:
+            self._start_media_ai_async(imported_photo_paths, ai_settings, camera_type=camera_type)
+            return
+        self._log_media_ai("Kamera-Typ unklar – zeige Auswahl-Dialog (30 s Timeout).")
+        self._open_camera_type_choice_dialog(imported_photo_paths, ai_settings)
+
+    def _open_camera_type_choice_dialog(
+        self,
+        imported_photo_paths: List[str],
+        ai_settings: Dict[str, object],
+    ) -> None:
+        master = (
+            self.app.root
+            if self.app and hasattr(self.app, "root") and self.app.root
+            else self.parent
+        )
+
+        def _on_user_choice(cam: str) -> None:
+            self._log_media_ai(f"Kamera-Typ vom Benutzer gewählt: {cam}")
+            self._start_media_ai_async(imported_photo_paths, ai_settings, camera_type=cam)
+
+        def _on_timeout() -> None:
+            self._log_media_ai("Kamera-Typ Timeout – starte automatischen Handcam/Outside-Test.")
+            self._start_media_ai_async(
+                imported_photo_paths,
+                ai_settings,
+                auto_detect_camera_type=True,
+            )
+
+        self._camera_type_dialog = CameraTypeChoiceDialog(
+            master,
+            on_choice=_on_user_choice,
+            on_timeout=_on_timeout,
+        )
+
+    def _media_ai_status_with_camera(self, base: str, camera_type: Optional[str] = None) -> str:
+        cam = camera_type or self._media_ai_active_camera_type
+        if cam in ("handcam", "outside"):
+            return f"{base} ({format_camera_type_label(cam)})"
+        return base
+
+    def _start_media_ai_async(
+        self,
+        imported_photo_paths: List[str],
+        ai_settings: Dict[str, object],
+        *,
+        camera_type: Optional[str] = None,
+        auto_detect_camera_type: bool = False,
+    ) -> None:
+        if self._media_ai_busy:
+            self._log_media_ai("Analyse bereits aktiv - neuer Lauf wird übersprungen.")
+            return
+
+        self._media_ai_busy = True
+        self._media_ai_active_camera_type = camera_type
+        self._media_ai_queue = queue.Queue()
+        loading_master = (
+            self.app.root
+            if self.app and hasattr(self.app, "root") and self.app.root
+            else self.parent
+        )
+        if auto_detect_camera_type:
+            status = "KI-Analyse läuft (Kamera-Erkennung…)"
+        else:
+            status = self._media_ai_status_with_camera("KI-Analyse läuft", camera_type)
+        self._media_ai_loading_window = LoadingWindow(
+            loading_master,
+            text=status,
+            detail_mode=True,
+        )
+        if self._media_ai_loading_window:
+            progress_hint = ""
+            if camera_type in ("handcam", "outside"):
+                progress_hint = f"Typ: {format_camera_type_label(camera_type)}"
+            self._media_ai_loading_window.update_qr_progress(
+                status,
+                progress_hint,
+                "Initialisiere Modell...",
+                completed_count=0,
+                total=max(1, len(imported_photo_paths)),
+            )
+
+        def _worker():
+            resolved_camera_type = camera_type
+
+            def _progress(done: int, total: int, basename: str) -> None:
+                self._media_ai_queue.put(
+                    (
+                        "progress",
+                        (done, total, basename, resolved_camera_type),
+                        ai_settings,
+                        resolved_camera_type,
+                    )
+                )
+
+            try:
+                if auto_detect_camera_type:
+                    resolved_camera_type = "handcam"
+                    self._media_ai_active_camera_type = resolved_camera_type
+                    grouped = self._build_media_ai_candidates(
+                        imported_photo_paths,
+                        ai_settings,
+                        camera_type="handcam",
+                        use_sampling=False,
+                        on_progress=_progress,
+                    )
+                    if handcam_series_is_plausible(grouped):
+                        self._log_media_ai(
+                            "Automatischer Test: Handcam plausibel (exit/freefall > 75%) – Outside übersprungen."
+                        )
+                        self._media_ai_queue.put(("success", grouped, ai_settings, resolved_camera_type))
+                        return
+                    self._log_media_ai(
+                        "Automatischer Test: Handcam nicht plausibel – erneute Analyse mit Outside."
+                    )
+                    resolved_camera_type = "outside"
+                    self._media_ai_active_camera_type = resolved_camera_type
+                    grouped = self._build_media_ai_candidates(
+                        imported_photo_paths,
+                        ai_settings,
+                        camera_type="outside",
+                        use_sampling=False,
+                        on_progress=_progress,
+                    )
+                    self._media_ai_queue.put(("success", grouped, ai_settings, resolved_camera_type))
+                    return
+
+                if not camera_type:
+                    raise RuntimeError("Kamera-Typ fehlt für KI-Analyse.")
+                resolved_camera_type = camera_type
+                grouped = self._build_media_ai_candidates(
+                    imported_photo_paths,
+                    ai_settings,
+                    camera_type=camera_type,
+                    use_sampling=False,
+                    on_progress=_progress,
+                )
+                self._media_ai_queue.put(("success", grouped, ai_settings, resolved_camera_type))
+            except Exception as exc:
+                self._media_ai_queue.put(("error", exc, ai_settings, resolved_camera_type))
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self.parent.after(120, self._check_media_ai_async_result)
+
+    def _check_media_ai_async_result(self) -> None:
+        if self._media_ai_queue is None:
+            self._media_ai_busy = False
+            return
+        try:
+            status, payload, ai_settings, camera_type = self._media_ai_queue.get_nowait()
+        except queue.Empty:
+            self.parent.after(120, self._check_media_ai_async_result)
+            return
+
+        if status == "progress":
+            done, total, basename, progress_camera_type = payload
+            if self._media_ai_loading_window:
+                cam = progress_camera_type or self._media_ai_active_camera_type
+                self._media_ai_loading_window.update_qr_progress(
+                    self._media_ai_status_with_camera("KI-Analyse läuft", cam),
+                    f"Analysiert: {done}/{total} · Typ: {format_camera_type_label(cam)}"
+                    if cam in ("handcam", "outside")
+                    else f"Analysiert: {done}/{total}",
+                    basename,
+                    completed_count=done,
+                    total=total,
+                )
+            self.parent.after(20, self._check_media_ai_async_result)
+            return
+
+        if self._media_ai_loading_window:
+            try:
+                self._media_ai_loading_window.destroy()
+            except Exception:
+                pass
+            self._media_ai_loading_window = None
+        self._media_ai_busy = False
+        self._media_ai_queue = None
+
+        if status == "error":
+            self._log_import_message("Media AI Analyse konnte nicht abgeschlossen werden", payload)
+            self._media_ai_active_camera_type = None
+            return
+
+        grouped_candidates = payload
+        self._media_ai_active_camera_type = camera_type
+        if bool(ai_settings.get("media_ai_confirm_before_apply", True)):
+            review_dialog = MediaAIReviewDialog(
+                self.parent,
+                grouped_candidates,
+                self.photo_paths,
+                camera_type=camera_type,
+            )
+            self.parent.wait_window(review_dialog)
+            if not review_dialog.result_confirmed:
+                self._log_media_ai("Auswahl-Dialog abgebrochen - keine Preview gesetzt.")
+                self._media_ai_active_camera_type = None
+                return
+            selected_indices = review_dialog.selected_indices
+        else:
+            selected_indices = self._select_indices_from_candidates(grouped_candidates)
+        self._apply_media_ai_preview_indices(selected_indices)
+        self._media_ai_active_camera_type = None
+
+    def _queue_or_run_auto_preview_selection(self, imported_photo_paths: List[str]) -> None:
+        if not imported_photo_paths:
+            return
+        if not self._should_run_media_ai_for_photos():
+            self._pending_ai_preview_paths = []
+            return
+        ai_settings = self._get_media_ai_settings()
+        if not bool(ai_settings.get("media_ai_enabled", True)):
+            self._log_media_ai("Feature deaktiviert - KI-Analyse wird uebersprungen.")
+            self._pending_ai_preview_paths = []
+            self._pending_ai_settings = None
+            return
+
+        # QR-Abschluss-Synchronisierung:
+        # KI startet erst, wenn alle tatsächlich gestarteten QR-Suchen beendet sind.
+        self._pending_ai_preview_paths = list(imported_photo_paths)
+        self._pending_ai_settings = ai_settings
+        self._media_ai_qr_sync_deadline = time.time() + 1.2
+        self._media_ai_video_qr_started = False
+        self._media_ai_video_qr_finished = False
+        self._media_ai_photo_qr_started = False
+        self._media_ai_photo_qr_finished = False
+        self._maybe_start_pending_media_ai()
+
+    def _maybe_start_pending_media_ai(self) -> None:
+        if not self._pending_ai_preview_paths:
+            return
+        ai_settings = self._pending_ai_settings or self._get_media_ai_settings()
+        if not bool(ai_settings.get("media_ai_enabled", True)):
+            self._pending_ai_preview_paths = []
+            self._pending_ai_settings = None
+            self._log_media_ai("Feature deaktiviert - vorgemerkte KI-Analyse verworfen.")
+            return
+
+        video_running = self._media_ai_video_qr_started and not self._media_ai_video_qr_finished
+        photo_running = self._media_ai_photo_qr_started and not self._media_ai_photo_qr_finished
+        if video_running or photo_running:
+            self.parent.after(140, self._maybe_start_pending_media_ai)
+            return
+
+        # Kurze Grace-Phase: gibt QR-Läufen Zeit, wirklich zu starten.
+        if (
+            not self._media_ai_video_qr_started
+            and not self._media_ai_photo_qr_started
+            and time.time() < self._media_ai_qr_sync_deadline
+        ):
+            self.parent.after(140, self._maybe_start_pending_media_ai)
+            return
+
+        paths = list(self._pending_ai_preview_paths)
+        self._pending_ai_preview_paths = []
+        self._pending_ai_settings = None
+        self._log_media_ai("Starte KI-Analyse nach Abschluss aller gestarteten QR-Suchen.")
+        self._resolve_camera_type_and_start_media_ai(paths, ai_settings)
+
+    def on_video_qr_analysis_started(self) -> None:
+        self._media_ai_video_qr_started = True
+        self._media_ai_video_qr_finished = False
+
+    def on_video_qr_analysis_finished(self) -> None:
+        self._media_ai_video_qr_started = True
+        self._media_ai_video_qr_finished = True
+        self._log_media_ai("Video-QR-Abschluss empfangen.")
+        self._maybe_start_pending_media_ai()
+
+    def on_photo_qr_analysis_started(self) -> None:
+        self._media_ai_photo_qr_started = True
+        self._media_ai_photo_qr_finished = False
+
+    def on_photo_qr_analysis_finished(self) -> None:
+        """Wird von app.py nach Foto-QR-Batchabschluss aufgerufen."""
+        self._media_ai_photo_qr_started = True
+        self._media_ai_photo_qr_finished = True
+        self._log_media_ai("Foto-QR-Abschluss empfangen.")
+        self._maybe_start_pending_media_ai()
 
     # --- NEUE ÖFFENTLICHE METHODEN FÜR WASSERZEICHEN-STEUERUNG ---
 

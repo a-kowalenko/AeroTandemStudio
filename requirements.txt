@@ -13,8 +13,13 @@ pyzbar
 # Logging
 proglog
 
-# Bildverarbeitung
+# Bildverarbeitung / Media-AI
 Pillow
+onnxruntime
+
+# Training Handcam-Klassifikator (train_handcam.py)
+torch
+torchvision
 
 # System Utilities (Platform specific)
 pywin32; sys_platform == 'win32'

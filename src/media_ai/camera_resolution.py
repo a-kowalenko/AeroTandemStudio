@@ -1,0 +1,71 @@
+"""Hilfsfunktionen zur Ermittlung des Foto-Kamera-Typs (Handcam vs. Outside)."""
+
+from __future__ import annotations
+
+from typing import Dict, List, Optional
+
+CameraType = str  # "handcam" | "outside"
+
+HANDCAM_AUTO_OK_THRESHOLD = 0.75
+CORE_MATCH_CATEGORIES = ("exit", "freefall")
+
+CAMERA_TYPE_LABELS = {
+    "handcam": "Handcam",
+    "outside": "Outside",
+}
+
+
+def format_camera_type_label(camera_type: str) -> str:
+    normalized = (camera_type or "").strip().lower()
+    return CAMERA_TYPE_LABELS.get(normalized, normalized or "Unbekannt")
+
+
+def infer_camera_type_from_kunde(kunde) -> Optional[CameraType]:
+    """Leitet den Kamera-Typ aus QR-/Kunden-Produkten ab (nur unbezahlte Foto-Produkte)."""
+    if kunde is None:
+        return None
+    handcam_foto = bool(getattr(kunde, "handcam_foto", False))
+    outside_foto = bool(getattr(kunde, "outside_foto", False))
+    handcam_unpaid = handcam_foto and not bool(getattr(kunde, "ist_bezahlt_handcam_foto", False))
+    outside_unpaid = outside_foto and not bool(getattr(kunde, "ist_bezahlt_outside_foto", False))
+
+    if handcam_unpaid and not outside_unpaid:
+        return "handcam"
+    if outside_unpaid and not handcam_unpaid:
+        return "outside"
+    if handcam_unpaid and outside_unpaid:
+        return None
+    return None
+
+
+def infer_camera_type_from_form_data(form_data: dict) -> Optional[CameraType]:
+    """Leitet den Kamera-Typ aus aktuellen Formularwerten ab."""
+    handcam_unpaid = bool(form_data.get("handcam_foto")) and not bool(form_data.get("ist_bezahlt_handcam_foto"))
+    outside_unpaid = bool(form_data.get("outside_foto")) and not bool(form_data.get("ist_bezahlt_outside_foto"))
+
+    if handcam_unpaid and not outside_unpaid:
+        return "handcam"
+    if outside_unpaid and not handcam_unpaid:
+        return "outside"
+    if handcam_unpaid and outside_unpaid:
+        mode = form_data.get("video_mode")
+        if mode in ("handcam", "outside"):
+            return mode
+        return None
+
+    mode = form_data.get("video_mode")
+    if mode in ("handcam", "outside"):
+        if handcam_unpaid or outside_unpaid:
+            return mode
+    return None
+
+
+def handcam_series_is_plausible(grouped_candidates: Dict[str, List[dict]]) -> bool:
+    """
+    True wenn im Handcam-Testlauf mindestens exit oder freefall mit Confidence > 75% gefunden wurde.
+    """
+    for category in CORE_MATCH_CATEGORIES:
+        for candidate in grouped_candidates.get(category, []):
+            if float(candidate.get("score", 0.0)) > HANDCAM_AUTO_OK_THRESHOLD:
+                return True
+    return False

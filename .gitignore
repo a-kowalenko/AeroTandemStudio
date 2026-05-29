@@ -18,6 +18,9 @@
 /dependency_installer/vlc/
 /dependency_installer/ffmpeg/
 
+/trainingsdata/
+/trainingsdata/**
+
 # Build artifacts (automatisch generiert - NICHT committen)
 version_info.txt        # Automatisch von build.py generiert
 version_info.rc         # Nur Referenz, nicht verwendet

@@ -14,13 +14,6 @@ from .series_analyzer import (
     get_preview_categories,
     get_preview_category_labels,
 )
-from .video_analyzer import (
-    VideoAnalysisResult,
-    VideoAnalyzer,
-    analysis_to_project_clip,
-    build_project_dict,
-    smooth_phase_labels,
-)
 
 __all__ = [
     "SkydivePhotoAI",
@@ -43,20 +36,31 @@ __all__ = [
     "build_project_dict",
     "analysis_to_project_clip",
     "smooth_phase_labels",
+    "enforce_phase_sequence",
+    "find_anchor_run",
+    "get_phase_order",
 ]
+
+_LAZY_IMPORTS = {
+    "SkydivePhotoAI": (".classifier", "SkydivePhotoAI"),
+    "HANDCAM_PROMPTS": (".classifier", "HANDCAM_PROMPTS"),
+    "OUTSIDE_PROMPTS": (".classifier", "OUTSIDE_PROMPTS"),
+    "VideoAnalyzer": (".video_analyzer", "VideoAnalyzer"),
+    "VideoAnalysisResult": (".video_analyzer", "VideoAnalysisResult"),
+    "build_project_dict": (".video_analyzer", "build_project_dict"),
+    "analysis_to_project_clip": (".video_analyzer", "analysis_to_project_clip"),
+    "smooth_phase_labels": (".video_analyzer", "smooth_phase_labels"),
+    "enforce_phase_sequence": (".video_analyzer", "enforce_phase_sequence"),
+    "find_anchor_run": (".video_analyzer", "find_anchor_run"),
+    "get_phase_order": (".video_analyzer", "get_phase_order"),
+}
 
 
 def __getattr__(name: str):
-    if name == "SkydivePhotoAI":
-        from .classifier import SkydivePhotoAI
+    if name in _LAZY_IMPORTS:
+        module_name, attr_name = _LAZY_IMPORTS[name]
+        import importlib
 
-        return SkydivePhotoAI
-    if name == "HANDCAM_PROMPTS":
-        from .classifier import HANDCAM_PROMPTS
-
-        return HANDCAM_PROMPTS
-    if name == "OUTSIDE_PROMPTS":
-        from .classifier import OUTSIDE_PROMPTS
-
-        return OUTSIDE_PROMPTS
+        module = importlib.import_module(module_name, __name__)
+        return getattr(module, attr_name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

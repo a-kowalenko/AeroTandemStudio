@@ -2776,6 +2776,22 @@ class DragDropFrame:
             pass
         self._media_ai_loading_window = None
 
+    def _ensure_media_ai_loading_window(self, *, grab_focus: bool = True) -> LoadingWindow:
+        """Gemeinsamer Ladedialog für Foto- und Video-KI (Abschnitte untereinander)."""
+        master = self._get_loading_master()
+        if (
+            not self._media_ai_loading_window
+            or not self._media_ai_loading_window.winfo_exists()
+        ):
+            self._media_ai_loading_window = LoadingWindow(
+                master,
+                text="KI-Analyse",
+                detail_mode=True,
+                grab_focus=grab_focus,
+                media_ai_dual=True,
+            )
+        return self._media_ai_loading_window
+
     def _ensure_video_ai_loading_window(
         self,
         video_paths: List[str],
@@ -2785,7 +2801,6 @@ class DragDropFrame:
         status: Optional[str] = None,
     ) -> Optional[LoadingWindow]:
         """Video-KI-Ladedialog: über Hauptfenster, ohne Modal-Grab (für Stapel unter Review)."""
-        master = self._get_loading_master()
         ordered = self._video_paths_in_import_order(video_paths)
         if not ordered:
             ordered = [p for p in video_paths if p and os.path.isfile(p)]
@@ -2793,21 +2808,11 @@ class DragDropFrame:
             return self._media_ai_loading_window
 
         label = status or self._media_ai_status_with_camera("Video-KI läuft", camera_type)
-        if (
-            not self._media_ai_loading_window
-            or not self._media_ai_loading_window.winfo_exists()
-        ):
-            self._media_ai_loading_window = LoadingWindow(
-                master,
-                text=label,
-                detail_mode=True,
-                grab_focus=grab_focus,
-            )
+        lw = self._ensure_media_ai_loading_window(grab_focus=grab_focus)
 
         from src.media_ai.video_analyzer import probe_video_duration_sec
 
         total_sec = sum(probe_video_duration_sec(p) for p in ordered) or float(len(ordered))
-        lw = self._media_ai_loading_window
         if lw and hasattr(lw, "update_video_ai_progress"):
             lw.update_video_ai_progress(
                 label,
@@ -2846,19 +2851,9 @@ class DragDropFrame:
         status: str = "Foto-KI läuft",
     ) -> None:
         """Ladedialog für Foto-KI (modal über Hauptfenster)."""
-        master = self._get_loading_master()
         total = max(1, int(photo_count))
-        if (
-            not self._media_ai_loading_window
-            or not self._media_ai_loading_window.winfo_exists()
-        ):
-            self._media_ai_loading_window = LoadingWindow(
-                master,
-                text=status,
-                detail_mode=True,
-                grab_focus=True,
-            )
-        self._media_ai_loading_window.update_qr_progress(
+        lw = self._ensure_media_ai_loading_window(grab_focus=True)
+        lw.update_qr_progress(
             status,
             "",
             "Initialisiere Modell...",
@@ -3179,6 +3174,12 @@ class DragDropFrame:
             return
 
         if kind == "photo_ready" and self._unified_has_photos:
+            lw = self._media_ai_loading_window
+            if lw and lw.winfo_exists():
+                if self._unified_video_paths and hasattr(lw, "set_media_ai_section_active"):
+                    lw.set_media_ai_section_active("photo", False)
+                else:
+                    self._destroy_media_ai_loading_window()
             self._open_unified_review_dialog_if_needed()
 
         if kind == "video_ready":

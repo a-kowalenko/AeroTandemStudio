@@ -302,6 +302,16 @@ TandemIntro/
 
 ## 🛠️ Entwicklung
 
+### Foto-KI-Modell trainieren
+
+Trainingsdaten: `trainingsdata/photo/{handcam,outside}/<klassen_ordner>/`.  
+Full-Training und Fine-Tuning (`--finetune`) sind in [`docs/photo_training.md`](docs/photo_training.md) beschrieben.
+
+```powershell
+python train_photo_classifier.py --camera handcam
+python train_photo_classifier.py --camera handcam --finetune
+```
+
 ### Technologie-Stack
 
 - **GUI:** Tkinter / TkinterDnD2

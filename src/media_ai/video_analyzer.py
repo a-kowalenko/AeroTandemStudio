@@ -5,13 +5,14 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from functools import lru_cache
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 from PIL import Image
 
-from .classifier import SkydivePhotoAI, _strip_class_prefix
+from .classifier import SkydivePhotoAI, _load_class_names, _strip_class_prefix
 
 _FOLDER_PREFIX_RE = re.compile(r"^\d+_")
 UNKNOWN_PHASE = "unknown"
@@ -80,6 +81,161 @@ def smooth_phase_labels(labels: List[str], min_stable_seconds: int = DEFAULT_MIN
                         result[k] = replacement
                     changed = True
             i = j
+    return result
+
+
+@dataclass(frozen=True)
+class PhaseRun:
+    """Zusammenhängender Phasen-Block in der Sample-Timeline."""
+
+    phase: str
+    start: int
+    end: int
+    mean_confidence: float = 0.0
+
+    @property
+    def length(self) -> int:
+        return self.end - self.start
+
+
+@lru_cache(maxsize=4)
+def get_phase_order(camera_type: str) -> Tuple[str, ...]:
+    """Normalisierte Phasenreihenfolge aus dem Klassifikator (00_… -> semantic)."""
+    raw_names = _load_class_names((camera_type or "handcam").strip().lower())
+    return tuple(normalize_phase_name(name) for name in raw_names)
+
+
+def get_phase_index(phase: str, phase_order: Sequence[str]) -> int:
+    """Index in der vorgeschriebenen Reihenfolge; ``unknown`` -> -1."""
+    if not phase or phase == UNKNOWN_PHASE:
+        return -1
+    try:
+        return phase_order.index(phase)
+    except ValueError:
+        return -1
+
+
+def _parse_phase_runs(
+    labels: List[str],
+    confidences: Optional[List[float]] = None,
+) -> List[PhaseRun]:
+    if not labels:
+        return []
+
+    confidences = confidences or [0.0] * len(labels)
+    runs: List[PhaseRun] = []
+    i = 0
+    while i < len(labels):
+        j = i
+        while j < len(labels) and labels[j] == labels[i]:
+            j += 1
+        slice_conf = confidences[i:j]
+        mean_conf = sum(slice_conf) / len(slice_conf) if slice_conf else 0.0
+        runs.append(PhaseRun(labels[i], i, j, mean_conf))
+        i = j
+    return runs
+
+
+def find_anchor_run(
+    labels: List[str],
+    confidences: List[float],
+    *,
+    camera_type: str = "handcam",
+    sample_interval: float = DEFAULT_SAMPLE_INTERVAL,
+    min_stable_seconds: int = DEFAULT_MIN_STABLE_SECONDS,
+) -> Optional[PhaseRun]:
+    """
+    Stabilster Phasen-Run: maximale ``Dauer × mittlere Confidence``.
+    Nur Runs mit bekannter Phase und mindestens ``min_stable_seconds`` Samples.
+    """
+    phase_order = get_phase_order(camera_type)
+    min_samples = max(1, int(min_stable_seconds))
+    best: Optional[PhaseRun] = None
+    best_score = -1.0
+
+    for run in _parse_phase_runs(labels, confidences):
+        if run.phase == UNKNOWN_PHASE:
+            continue
+        if get_phase_index(run.phase, phase_order) < 0:
+            continue
+        if run.length < min_samples:
+            continue
+
+        duration_sec = run.length * sample_interval
+        score = duration_sec * run.mean_confidence
+        if score > best_score:
+            best_score = score
+            best = run
+        elif score == best_score and best is not None:
+            if run.length > best.length or (
+                run.length == best.length and run.mean_confidence > best.mean_confidence
+            ):
+                best = run
+
+    return best
+
+
+def enforce_phase_sequence(
+    labels: List[str],
+    confidences: List[float],
+    *,
+    camera_type: str = "handcam",
+    sample_interval: float = DEFAULT_SAMPLE_INTERVAL,
+    min_stable_seconds: int = DEFAULT_MIN_STABLE_SECONDS,
+) -> List[str]:
+    """
+    Erzwingt monotone Phasenreihenfolge pro Clip, verankert an der stabilsten Phase.
+    ``unknown``-Samples bleiben unverändert.
+    """
+    if not labels:
+        return []
+
+    phase_order = get_phase_order(camera_type)
+    anchor = find_anchor_run(
+        labels,
+        confidences,
+        camera_type=camera_type,
+        sample_interval=sample_interval,
+        min_stable_seconds=min_stable_seconds,
+    )
+    if anchor is None:
+        return list(labels)
+
+    anchor_idx = get_phase_index(anchor.phase, phase_order)
+    if anchor_idx < 0:
+        return list(labels)
+
+    result = list(labels)
+
+    def _phase_at(idx: int) -> str:
+        return phase_order[idx]
+
+    prev_idx = -1
+    for i in range(anchor.start):
+        if result[i] == UNKNOWN_PHASE:
+            continue
+        raw_idx = get_phase_index(result[i], phase_order)
+        if raw_idx < 0:
+            continue
+        new_idx = max(prev_idx, min(raw_idx, anchor_idx))
+        result[i] = _phase_at(new_idx)
+        prev_idx = new_idx
+
+    for i in range(anchor.start, anchor.end):
+        if result[i] != UNKNOWN_PHASE:
+            result[i] = anchor.phase
+
+    prev_idx = anchor_idx
+    for i in range(anchor.end, len(result)):
+        if result[i] == UNKNOWN_PHASE:
+            continue
+        raw_idx = get_phase_index(result[i], phase_order)
+        if raw_idx < 0:
+            continue
+        new_idx = max(prev_idx, raw_idx)
+        result[i] = _phase_at(new_idx)
+        prev_idx = new_idx
+
     return result
 
 
@@ -197,6 +353,13 @@ class VideoAnalyzer:
             cap.release()
 
         smoothed = smooth_phase_labels(raw_labels, self.min_stable_seconds)
+        smoothed = enforce_phase_sequence(
+            smoothed,
+            confidences,
+            camera_type=self.camera_type,
+            sample_interval=self.sample_interval_seconds,
+            min_stable_seconds=self.min_stable_seconds,
+        )
         keyed = list(zip(sample_times, smoothed))
         timeline = {float(t): phase for t, phase in keyed}
         dominant = _dominant_phase(smoothed)

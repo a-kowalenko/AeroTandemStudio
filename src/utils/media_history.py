@@ -196,6 +196,36 @@ class MediaHistoryStore:
         cur.execute(f"DELETE FROM processed_files WHERE id IN ({placeholders})", ids)
         self.conn.commit()
 
+    def delete_by_hashes(self, identity_hashes: List[str]) -> None:
+        """Entfernt Historie-Einträge anhand identity_hash (z. B. Import-Rollback)."""
+        if not identity_hashes:
+            return
+        cur = self.conn.cursor()
+        placeholders = ",".join("?" for _ in identity_hashes)
+        cur.execute(
+            f"DELETE FROM processed_files WHERE identity_hash IN ({placeholders})",
+            identity_hashes,
+        )
+        self.conn.commit()
+
+    def mark_imported_batch(self, file_paths: List[str]) -> None:
+        """Setzt imported_at für erfolgreich importierte Dateien."""
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        for path in file_paths:
+            ident = self.compute_identity(path)
+            if not ident:
+                continue
+            identity_hash, size_bytes = ident
+            filename = os.path.basename(path)
+            media_type = get_media_type_from_filename(filename)
+            self.upsert(
+                identity_hash=identity_hash,
+                filename=filename,
+                size_bytes=size_bytes,
+                media_type=media_type,
+                imported_at=now,
+            )
+
     def purge_all(self):
         cur = self.conn.cursor()
         cur.execute("DELETE FROM processed_files")

@@ -24,6 +24,10 @@ from src.utils.media_datetime import (
 from src.utils.hardware_acceleration import HardwareAccelerationDetector
 from src.video.parallel_processor import ParallelVideoProcessor
 from src.video.processor import VideoProcessor
+from src.utils.preview_encode_target import (
+    all_clips_match_preview_target,
+    clip_matches_preview_target,
+)
 from typing import List, Dict, Callable  # NEU
 
 
@@ -1325,21 +1329,33 @@ class VideoPreview:
                 return False
         return True
 
+    def _clip_matches_preview_target(self, fmt: dict) -> bool:
+        return clip_matches_preview_target(fmt)
+
+    def _all_clips_match_preview_target(self, format_info: dict) -> bool:
+        return all_clips_match_preview_target(format_info)
+
+    def _stream_copy_encoding_plan(self):
+        return {
+            "strategy": "stream_copy_only",
+            "needs_clip_reencoding": False,
+            "needs_combined_reencoding": False,
+            "target_codec": None,
+            "fallback_reason": None,
+        }
+
     def _resolve_encoding_plan(self, selected_codec, encoding_strategy, format_info,
                                reencode_matching_clips=False):
         """Bestimmt Clip- vs. Combined-Encoding anhand Codec, Strategie und Kompatibilität."""
         compatible = format_info.get("compatible", True)
         force_codec = selected_codec != "auto"
 
+        if self._all_clips_match_preview_target(format_info):
+            return self._stream_copy_encoding_plan()
+
         if not force_codec:
             if compatible:
-                return {
-                    "strategy": "stream_copy_only",
-                    "needs_clip_reencoding": False,
-                    "needs_combined_reencoding": False,
-                    "target_codec": None,
-                    "fallback_reason": None,
-                }
+                return self._stream_copy_encoding_plan()
             return {
                 "strategy": "per_clip",
                 "needs_clip_reencoding": True,
@@ -1463,21 +1479,27 @@ class VideoPreview:
         if self.hw_accel_enabled:
             cmd.extend(["-pix_fmt", "yuv420p"])
 
+        preview_crf = 18
+        if self.app and hasattr(self.app, 'config'):
+            try:
+                preview_crf = int(self.app.config.get_settings().get("preview_encode_crf", 18))
+            except (TypeError, ValueError):
+                preview_crf = 18
+        preview_crf = max(0, min(51, preview_crf))
+
         if not self.hw_accel_enabled:
             encoder = encoding_params.get('encoder', 'libx264')
             cmd.extend(["-g", "30", "-keyint_min", "30"])
             if encoder == 'libx264':
                 cmd.extend([
-                    "-preset", "veryfast",
-                    "-crf", "26",
-                    "-tune", "fastdecode",
-                    "-x264-params", "ref=1:me=dia:subme=1:trellis=0"
+                    "-preset", "medium",
+                    "-crf", str(preview_crf),
                 ])
             elif encoder == 'libx265':
+                hevc_crf = min(51, preview_crf + 2)
                 cmd.extend([
-                    "-preset", "veryfast",
-                    "-crf", "28",
-                    "-x265-params", "ref=1:me=dia"
+                    "-preset", "medium",
+                    "-crf", str(hevc_crf),
                 ])
             elif encoder == 'libvpx-vp9':
                 cmd.extend([
@@ -1498,7 +1520,7 @@ class VideoPreview:
 
         cmd.extend([
             "-c:a", tp['audio_codec'],
-            "-b:a", "96k",
+            "-b:a", "128k",
             "-ar", str(tp['audio_sample_rate']),
             "-ac", str(tp['audio_channels'])
         ])
@@ -2385,6 +2407,12 @@ class VideoPreview:
             }
 
         if total <= 1:
+            if self._clip_matches_preview_target(first_format):
+                return {
+                    "compatible": True,
+                    "details": "Einzelclip bereits 1080p H.264 30fps",
+                    "formats": formats,
+                }
             single_ok = not VideoProcessor.pix_fmt_needs_reencode_for_browser(
                 first_format.get('pix_fmt'), first_format.get('codec_name', 'h264')
             )

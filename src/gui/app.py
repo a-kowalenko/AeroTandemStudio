@@ -2826,7 +2826,7 @@ class VideoGeneratorApp:
         try:
             self.sd_card_monitor = SDCardMonitor(
                 self.config,
-                on_backup_complete=self.on_sd_backup_complete,
+                on_backup_complete=self._on_sd_backup_complete_threadsafe,
                 on_progress_update=self.on_sd_progress_update,
                 on_status_change=self.on_sd_status_change
             )
@@ -3082,6 +3082,13 @@ class VideoGeneratorApp:
                     self.sd_status_indicator.hide()
                 self.progress_handler.set_status("Status: Bereit.")
 
+    def _on_sd_backup_complete_threadsafe(self, backup_path, success, error_message=None, backup_info=None):
+        """Marshalled Callback vom SD-Monitor-Thread auf den Tk-Hauptthread."""
+        self.root.after(
+            0,
+            lambda: self.on_sd_backup_complete(backup_path, success, error_message, backup_info),
+        )
+
     def on_sd_backup_complete(self, backup_path, success, error_message=None, backup_info=None):
         """
         Wird aufgerufen wenn SD-Karten Backup abgeschlossen ist
@@ -3159,11 +3166,10 @@ class VideoGeneratorApp:
         def _notify_import_active(active):
             ind = self.sd_status_indicator
             if ind:
-                self.root.after(0, lambda a=active: ind.set_auto_import_active(a))
+                ind.set_auto_import_active(active)
 
         _notify_import_active(True)
 
-        # QR-Check Status merken und temporär deaktivieren
         qr_check_was_enabled = False
         photo_qr_check_was_enabled = False
         if self.drag_drop and hasattr(self.drag_drop, 'qr_check_enabled'):
@@ -3177,9 +3183,37 @@ class VideoGeneratorApp:
                 print("Foto-QR-Prüfung temporär deaktiviert für Auto-Import")
                 self.drag_drop.photo_qr_check_enabled.set(False)
 
-        # Flag für finally-Block
-        videos_imported = False
-        photos_imported = False
+        pending_video_count = 0
+        pending_photo_count = 0
+
+        def _on_import_complete(success, videos_imported, photos_imported, error, cancelled):
+            _notify_import_active(False)
+            if self.drag_drop:
+                if qr_check_was_enabled and hasattr(self.drag_drop, 'qr_check_enabled'):
+                    self.drag_drop.qr_check_enabled.set(True)
+                if photo_qr_check_was_enabled and hasattr(self.drag_drop, 'photo_qr_check_enabled'):
+                    self.drag_drop.photo_qr_check_enabled.set(True)
+
+            if not success or cancelled:
+                if error and not cancelled:
+                    messagebox.showerror(
+                        "Import Fehler",
+                        f"Fehler beim Importieren der Dateien:\n{error}",
+                        parent=self.root,
+                    )
+                return
+
+            if videos_imported > 0:
+                self._switch_to_predominant_tab(videos_imported, photos_imported)
+                if qr_check_was_enabled and self.drag_drop:
+                    video_paths = self.drag_drop.get_video_paths()
+                    if video_paths:
+                        self.run_qr_analysis(video_paths.copy())
+            elif photos_imported > 0:
+                self._switch_to_predominant_tab(videos_imported, photos_imported)
+                if photo_qr_check_was_enabled and self.drag_drop:
+                    if not (videos_imported > 0 and qr_check_was_enabled):
+                        self.drag_drop._maybe_run_photo_qr_search()
 
         try:
             # Sammle alle Dateien aus dem Backup-Ordner
@@ -3254,57 +3288,22 @@ class VideoGeneratorApp:
                 video_files = filtered_videos
                 photo_files = filtered_photos
 
-            # Importiere gefilterte Dateien
             if video_files or photo_files:
                 video_files = sort_paths_by_basename(video_files)
                 photo_files = sort_paths_by_basename(photo_files)
-                # Füge Dateien zum Drag&Drop hinzu
+                pending_video_count = len(video_files)
+                pending_photo_count = len(photo_files)
                 if self.drag_drop:
-                    self.drag_drop.add_files(video_files, photo_files)
-
-                if video_files:
-                    videos_imported = True
-                if photo_files:
-                    photos_imported = True
-
-                # Füge zur Historie hinzu wenn Option aktiviert
-                if skip_processed:
-                    history_store = MediaHistoryStore.instance()
-                    now = datetime.now().isoformat()
-
-                    # Videos zur Historie hinzufügen
-                    for file_path in video_files:
-                        identity = history_store.compute_identity(file_path)
-                        if identity:
-                            identity_hash, size_bytes = identity
-                            filename = os.path.basename(file_path)
-                            history_store.upsert(
-                                identity_hash=identity_hash,
-                                filename=filename,
-                                size_bytes=size_bytes,
-                                media_type='video',
-                                imported_at=now
-                            )
-
-                    # Fotos zur Historie hinzufügen
-                    for file_path in photo_files:
-                        identity = history_store.compute_identity(file_path)
-                        if identity:
-                            identity_hash, size_bytes = identity
-                            filename = os.path.basename(file_path)
-                            history_store.upsert(
-                                identity_hash=identity_hash,
-                                filename=filename,
-                                size_bytes=size_bytes,
-                                media_type='photo',
-                                imported_at=now
-                            )
-
-                print(f"Auto-Import: {len(video_files)} Videos und {len(photo_files)} Fotos importiert")
-
-                # Öffne passenden Tab (Video oder Foto) basierend auf Mehrheit
-                self._switch_to_predominant_tab(len(video_files), len(photo_files))
-
+                    self.drag_drop.add_files(
+                        video_files,
+                        photo_files,
+                        on_complete=_on_import_complete,
+                        record_history_after_import=skip_processed,
+                    )
+                print(
+                    f"Auto-Import gestartet: {pending_video_count} Videos, "
+                    f"{pending_photo_count} Fotos"
+                )
             else:
                 # Keine neuen Dateien gefunden
                 print("Keine neuen Dateien zum Importieren gefunden")
@@ -3323,34 +3322,17 @@ class VideoGeneratorApp:
 
         except Exception as e:
             print(f"Fehler beim Importieren aus Backup: {e}")
+            _notify_import_active(False)
+            if self.drag_drop:
+                if qr_check_was_enabled and hasattr(self.drag_drop, 'qr_check_enabled'):
+                    self.drag_drop.qr_check_enabled.set(True)
+                if photo_qr_check_was_enabled and hasattr(self.drag_drop, 'photo_qr_check_enabled'):
+                    self.drag_drop.photo_qr_check_enabled.set(True)
             messagebox.showerror(
                 "Import Fehler",
                 f"Fehler beim Importieren der Dateien:\n{str(e)}",
                 parent=self.root
             )
-
-        finally:
-            _notify_import_active(False)
-            # QR-Check Status wiederherstellen
-            if self.drag_drop:
-                if qr_check_was_enabled and hasattr(self.drag_drop, 'qr_check_enabled'):
-                    print("QR-Code-Prüfung wieder aktiviert nach Auto-Import")
-                    self.drag_drop.qr_check_enabled.set(True)
-
-                    if videos_imported:
-                        print("Starte QR-Analyse für erstes importiertes Video")
-                        video_paths = self.drag_drop.get_video_paths()
-                        if video_paths:
-                            paths_copy = video_paths.copy()
-                            self.root.after(0, lambda: self.run_qr_analysis(paths_copy))
-
-                if photo_qr_check_was_enabled and hasattr(self.drag_drop, 'photo_qr_check_enabled'):
-                    print("Foto-QR-Prüfung wieder aktiviert nach Auto-Import")
-                    self.drag_drop.photo_qr_check_enabled.set(True)
-
-                    if photos_imported and not (videos_imported and qr_check_was_enabled):
-                        print("Starte Foto-QR-Suche nach Auto-Import")
-                        self.drag_drop._maybe_run_photo_qr_search()
 
     def _switch_to_predominant_tab(self, video_count: int, photo_count: int):
         """

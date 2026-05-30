@@ -644,6 +644,9 @@ class DragDropFrame:
         unreadable_paths: Optional[List[str]] = None,
         videos_imported: int = 0,
         photos_imported: int = 0,
+        on_complete=None,
+        record_history_after_import: bool = False,
+        history_source_paths: Optional[List[str]] = None,
     ) -> None:
         self.parent.after(
             0,
@@ -658,23 +661,56 @@ class DragDropFrame:
                 unreadable_paths=unreadable_paths or [],
                 videos_imported=videos_imported,
                 photos_imported=photos_imported,
+                on_complete=on_complete,
+                record_history_after_import=record_history_after_import,
+                history_source_paths=history_source_paths or [],
             ),
         )
 
-    def add_files(self, new_videos, new_photos):
+    def add_files(
+        self,
+        new_videos,
+        new_photos,
+        *,
+        on_complete=None,
+        record_history_after_import: bool = False,
+    ):
         """
         Importiert neue Videos und Fotos.
+
+        Args:
+            on_complete: Optional callback(success, videos_imported, photos_imported, error, cancelled)
+            record_history_after_import: imported_at erst nach erfolgreichem Kopieren setzen
         """
         if not new_videos and not new_photos:
+            if on_complete:
+                self.parent.after(0, lambda: on_complete(True, 0, 0, None, False))
             return
 
-        # Start async import
         dialog = ImportProgressDialog(self.parent)
-        t = threading.Thread(target=self._async_add_files, args=(new_videos, new_photos, dialog))
+        history_sources = list(new_videos) + list(new_photos)
+        t = threading.Thread(
+            target=self._async_add_files,
+            args=(new_videos, new_photos, dialog),
+            kwargs={
+                "on_complete": on_complete,
+                "record_history_after_import": record_history_after_import,
+                "history_source_paths": history_sources,
+            },
+        )
         t.daemon = True
         t.start()
 
-    def _async_add_files(self, new_videos, new_photos, dialog):
+    def _async_add_files(
+        self,
+        new_videos,
+        new_photos,
+        dialog,
+        *,
+        on_complete=None,
+        record_history_after_import: bool = False,
+        history_source_paths=None,
+    ):
         new_videos_added = False
         new_photos_added = False
         imported_paths = []
@@ -975,13 +1011,8 @@ class DragDropFrame:
                     self._unregister_imported_photo(p)
                     self._import_source_ts_by_dest.pop(os.path.normpath(p), None)
 
-                history_store = MediaHistoryStore.instance()
-                conn = history_store.get_connection()
-                if conn:
-                    cursor = conn.cursor()
-                    for h in imported_history_hashes:
-                        cursor.execute("DELETE FROM media_history WHERE id_hash = ?", (h,))
-                    conn.commit()
+                if imported_history_hashes:
+                    MediaHistoryStore.instance().delete_by_hashes(imported_history_hashes)
             else:
                 imported_paths = sort_paths_by_basename(imported_paths)
                 photo_batch_paths = sort_paths_by_basename(photo_batch_paths)
@@ -1015,6 +1046,9 @@ class DragDropFrame:
                 unreadable_paths=unreadable_paths,
                 videos_imported=len(imported_paths) if not cancelled else 0,
                 photos_imported=len(photo_batch_paths) if not cancelled else 0,
+                on_complete=on_complete,
+                record_history_after_import=record_history_after_import,
+                history_source_paths=history_source_paths,
             )
 
         except Exception as e:
@@ -1027,6 +1061,9 @@ class DragDropFrame:
                 imported_video_paths=[],
                 error_message=str(e),
                 unreadable_paths=unreadable_paths,
+                on_complete=on_complete,
+                record_history_after_import=record_history_after_import,
+                history_source_paths=history_source_paths,
             )
 
     def _update_drop_label_after_import(
@@ -1068,10 +1105,27 @@ class DragDropFrame:
         unreadable_paths: Optional[List[str]] = None,
         videos_imported: int = 0,
         photos_imported: int = 0,
+        on_complete=None,
+        record_history_after_import: bool = False,
+        history_source_paths: Optional[List[str]] = None,
     ):
         dialog.destroy()
         unreadable_paths = unreadable_paths or []
         imported_video_paths = imported_video_paths or []
+        history_source_paths = history_source_paths or []
+
+        def _invoke_on_complete(success: bool):
+            if on_complete:
+                try:
+                    on_complete(
+                        success,
+                        videos_imported,
+                        photos_imported,
+                        error_message,
+                        cancelled,
+                    )
+                except Exception as cb_err:
+                    self._log_import_message("Import on_complete callback failed", cb_err)
 
         self._update_drop_label_after_import(
             new_videos_added=new_videos_added,
@@ -1099,13 +1153,11 @@ class DragDropFrame:
             except Exception as dialog_err:
                 self._log_import_message("Import-Fehlerdialog konnte nicht geöffnet werden", dialog_err)
                 messagebox.showerror("Import fehlgeschlagen", error_message, parent=self.parent)
+            _invoke_on_complete(False)
             return
 
         if cancelled:
-            # Revert photo paths that were appended during the run
-            # For a proper rollback we should probably rebuild or reload but we will leave this simple logic as we didn't store old photo_paths.
-            # In a real scenario we'd do a deep copy before. 
-            pass
+            _invoke_on_complete(False)
             return
 
         if not new_videos_added and not new_photos_added:
@@ -1116,7 +1168,14 @@ class DragDropFrame:
                     f"Es konnten keine Dateien importiert werden.\nNicht lesbar: {names}",
                     parent=self.parent,
                 )
+            _invoke_on_complete(False)
             return
+
+        if record_history_after_import and history_source_paths:
+            try:
+                MediaHistoryStore.instance().mark_imported_batch(history_source_paths)
+            except Exception as hist_err:
+                self._log_import_message("Historie nach Import konnte nicht gesetzt werden", hist_err)
 
         self._update_video_table()
         self._update_photo_table()
@@ -1176,6 +1235,10 @@ class DragDropFrame:
                     self.app.preview_notebook.select(self.app.video_tab)
             except Exception as e:
                 print(f"⚠️ Fehler beim Wechsel auf Video Vorschau-Tab: {e}")
+
+        if on_complete:
+            _invoke_on_complete(True)
+            return
 
     def _import_video(self, source_path):
         """
@@ -2020,12 +2083,11 @@ class DragDropFrame:
             self.watermark_photo_indices = updated_wm
 
         hs = MediaHistoryStore.instance()
-        conn = hs.get_connection()
-        cursor = conn.cursor() if conn else None
+        hashes_to_delete = []
         for p in batch_paths:
             ident = hs.compute_identity(p)
-            if ident and cursor:
-                cursor.execute("DELETE FROM media_history WHERE id_hash = ?", (ident[0],))
+            if ident:
+                hashes_to_delete.append(ident[0])
             try:
                 if os.path.isfile(p):
                     os.remove(p)
@@ -2033,8 +2095,8 @@ class DragDropFrame:
                 pass
             self._unregister_imported_photo(p)
             self._import_source_ts_by_dest.pop(os.path.normpath(p), None)
-        if conn:
-            conn.commit()
+        if hashes_to_delete:
+            hs.delete_by_hashes(hashes_to_delete)
 
     def reset(self):
         """Setzt die Komponente zurück"""

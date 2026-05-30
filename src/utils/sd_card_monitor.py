@@ -38,7 +38,8 @@ except ImportError:
 
 LINUX_API_AVAILABLE = True
 
-from src.utils.media_history import MediaHistoryStore, get_media_type_from_filename  # NEU
+from src.utils.media_history import MediaHistoryStore, get_media_type_from_filename
+from src.utils.dji_media_paths import filter_media_paths_for_backup  # NEU
 from src.utils.file_utils import normalize_server_path
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 
@@ -378,34 +379,35 @@ class SDCardMonitor:
             valid_photo_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.gif', '.webp', '.heic', '.raw', '.cr2', '.nef', '.arw', '.dng'}
             valid_extensions = valid_video_extensions | valid_photo_extensions
 
-            files_info = []
-            total_size = 0
-
+            exclude_timelapse = settings.get("sd_exclude_timelapse_videos", True)
+            all_paths = []
             for root, dirs, files in os.walk(dcim_source):
                 for file in files:
                     file_lower = file.lower()
                     file_ext = os.path.splitext(file_lower)[1]
-
                     if file_ext in valid_extensions:
-                        file_path = os.path.join(root, file)
+                        all_paths.append(os.path.join(root, file))
+            filtered_paths, _ = filter_media_paths_for_backup(
+                all_paths, dcim_source, exclude_timelapse_videos=exclude_timelapse,
+            )
 
-                        try:
-                            size_bytes = os.path.getsize(file_path)
-
-                            # Performance: Für den Größenlimit-Dialog keine teuren
-                            # Hash-/Historienprüfungen durchführen. Der eigentliche
-                            # Backup-Schritt filtert Duplikate weiterhin korrekt.
-
-                            files_info.append({
-                                'path': file_path,
-                                'filename': file,
-                                'size_bytes': size_bytes,
-                                'is_video': file_ext in valid_video_extensions
-                            })
-                            total_size += size_bytes
-                        except Exception as e:
-                            print(f"Fehler beim Lesen von {file_path}: {e}")
-                            continue
+            files_info = []
+            total_size = 0
+            for file_path in filtered_paths:
+                file = os.path.basename(file_path)
+                file_ext = os.path.splitext(file.lower())[1]
+                try:
+                    size_bytes = os.path.getsize(file_path)
+                    files_info.append({
+                        'path': file_path,
+                        'filename': file,
+                        'size_bytes': size_bytes,
+                        'is_video': file_ext in valid_video_extensions
+                    })
+                    total_size += size_bytes
+                except Exception as e:
+                    print(f"Fehler beim Lesen von {file_path}: {e}")
+                    continue
 
             if not files_info:
                 return None  # Keine Dateien, normal fortfahren
@@ -523,6 +525,17 @@ class SDCardMonitor:
 
             if not media_files:
                 error_msg = "Keine Mediendateien auf der SD-Karte gefunden"
+                print(error_msg)
+                return None, error_msg, [], None
+
+            exclude_timelapse = settings.get("sd_exclude_timelapse_videos", True)
+            media_files, timelapse_skipped = filter_media_paths_for_backup(
+                media_files, dcim_source, exclude_timelapse_videos=exclude_timelapse,
+            )
+            if timelapse_skipped:
+                print(f"DJI Timelapse-Filter: {timelapse_skipped} Video(s) in DJI_* übersprungen")
+            if not media_files:
+                error_msg = "Keine Mediendateien nach Timelapse-Filter übrig"
                 print(error_msg)
                 return None, error_msg, [], None
 

@@ -53,6 +53,7 @@ class SettingsDialog:
         self.sd_skip_processed_manual_var = tk.BooleanVar()
         self.sd_size_limit_enabled_var = tk.BooleanVar()  # NEU: Größen-Limit
         self.sd_size_limit_mb_var = tk.StringVar(value="2000")  # NEU: Limit in MB
+        self.sd_exclude_timelapse_var = tk.BooleanVar(value=True)
         self.sd_pc_name_var = tk.StringVar()
         # Variable für Hardware-Beschleunigung
         self.hardware_acceleration_var = tk.BooleanVar()
@@ -616,6 +617,13 @@ class SettingsDialog:
             font=("Arial", 10)
         )
 
+        self.sd_exclude_timelapse_checkbox = tk.Checkbutton(
+            backup_frame,
+            text="DJI Timelapse-Videos in DJI_* überspringen (Fotos aus TIMELAPSE importieren)",
+            variable=self.sd_exclude_timelapse_var,
+            font=("Arial", 10),
+        )
+
         # NEU: Nur-neue-Dateien Checkbox + Verlauf-Button (gleiche Ebene)
         row_idx = 8
         self.sd_skip_checkbox = tk.Checkbutton(
@@ -1004,6 +1012,7 @@ class SettingsDialog:
 
             # 3. SD-Karte leeren
             self.sd_clear_checkbox.grid(row=9, column=0, sticky="w", padx=30, pady=2)
+            self.sd_exclude_timelapse_checkbox.grid(row=10, column=0, sticky="w", padx=30, pady=2)
         else:
             # Verstecke und deaktiviere alle abhängigen Checkboxen
             self.sd_pc_name_frame.grid_forget()
@@ -1014,6 +1023,7 @@ class SettingsDialog:
             self.sd_size_limit_checkbox.grid_forget()
             self.sd_size_limit_frame.grid_forget()
             self.sd_clear_checkbox.grid_forget()
+            self.sd_exclude_timelapse_checkbox.grid_forget()
             self.sd_skip_manual_checkbox.grid_forget()
             self.sd_auto_import_var.set(False)
             self.sd_server_backup_enabled_var.set(False)
@@ -1876,6 +1886,7 @@ class SettingsDialog:
         self.sd_skip_processed_manual_var.set(settings.get("sd_skip_processed_manual", False))  # NEU
         self.sd_size_limit_enabled_var.set(settings.get("sd_size_limit_enabled", False))  # NEU
         self.sd_size_limit_mb_var.set(str(settings.get("sd_size_limit_mb", 2000)))  # NEU
+        self.sd_exclude_timelapse_var.set(settings.get("sd_exclude_timelapse_videos", True))
 
         pc_name = settings.get("sd_pc_name", "")
         if not pc_name:
@@ -2090,6 +2101,7 @@ class SettingsDialog:
             current_settings["sd_skip_processed_manual"] = sd_skip_processed_manual  # NEU
             current_settings["sd_size_limit_enabled"] = sd_size_limit_enabled  # NEU
             current_settings["sd_size_limit_mb"] = sd_size_limit_mb  # NEU
+            current_settings["sd_exclude_timelapse_videos"] = self.sd_exclude_timelapse_var.get()
             current_settings["sd_pc_name"] = self.sd_pc_name_var.get().strip()
 
             # Hardware-Beschleunigung

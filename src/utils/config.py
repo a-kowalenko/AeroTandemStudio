@@ -59,6 +59,10 @@ class ConfigManager:
                         settings["encoding_strategy"] = "per_clip"
                     if "reencode_matching_clips" not in settings:
                         settings["reencode_matching_clips"] = False
+                    if "sd_exclude_timelapse_videos" not in settings:
+                        settings["sd_exclude_timelapse_videos"] = True
+                    if "preview_encode_crf" not in settings:
+                        settings["preview_encode_crf"] = 18
                     if "intro_enabled" not in settings:
                         settings["intro_enabled"] = True
                     if "qr_remove_photo_after_scan" not in settings:
@@ -116,6 +120,8 @@ class ConfigManager:
             "sd_skip_processed_manual": False,  # Auch manuellen Import prüfen
             "sd_size_limit_enabled": False,  # Größen-Limit aktivieren
             "sd_size_limit_mb": 2000,  # Größen-Limit in MB
+            "sd_exclude_timelapse_videos": True,  # DJI Timelapse-Videos in DJI_* überspringen
+            "preview_encode_crf": 18,  # CRF für Preview-Re-Encode (niedriger = besser)
             # Hardware-Beschleunigung
             "hardware_acceleration_enabled": True,  # Hardware-Beschleunigung standardmäßig aktiviert
             # Paralleles Processing

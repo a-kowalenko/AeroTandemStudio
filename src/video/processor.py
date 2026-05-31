@@ -271,6 +271,21 @@ class VideoProcessor:
             return False
         return str(pix_fmt) not in cls._browser_safe_pix_fmts(vcodec)
 
+    @staticmethod
+    def _pix_fmts_compatible_for_mux(pix_a, pix_b, vcodec) -> bool:
+        """True wenn zwei pix_fmt für Stream-Copy-Mux zusammenpassen (nicht nur identisch)."""
+        if not pix_a or not pix_b:
+            return pix_a == pix_b
+        a, b = str(pix_a), str(pix_b)
+        if a == b:
+            return True
+        vcodec = VideoProcessor._normalize_vcodec_name(vcodec)
+        if vcodec == 'h264' and {a, b} <= {'yuv420p', 'yuvj420p'}:
+            return True
+        if vcodec == 'hevc' and {a, b} <= {'yuv420p', 'yuv420p10le'}:
+            return True
+        return False
+
     def _probe_video_stream_summary(self, video_path):
         """Liest zentrale Video-Stream-Eigenschaften für Concat-Kompatibilitätsprüfungen."""
         try:
@@ -305,12 +320,25 @@ class VideoProcessor:
                 f"Intro-Codec ({intro['vcodec']}) passt nicht zum Hauptvideo ({body['vcodec']})."
             )
 
-        for key in ('width', 'height', 'pix_fmt', 'fps'):
+        for key in ('width', 'height', 'fps'):
             if intro.get(key) != body.get(key):
                 raise ValueError(
                     f"Intro und Hauptvideo unterscheiden sich bei {key}: "
                     f"intro={intro.get(key)}, body={body.get(key)}"
                 )
+
+        intro_pix = intro.get('pix_fmt')
+        body_pix = body.get('pix_fmt')
+        if intro_pix != body_pix:
+            if not self._pix_fmts_compatible_for_mux(intro_pix, body_pix, intro['vcodec']):
+                raise ValueError(
+                    f"Intro und Hauptvideo unterscheiden sich bei pix_fmt: "
+                    f"intro={intro_pix}, body={body_pix}"
+                )
+            print(
+                f"ℹ Intro/Body pix_fmt unterschiedlich aber mux-fähig: "
+                f"intro={intro_pix}, body={body_pix}"
+            )
 
         if intro.get('profile') and body.get('profile') and intro['profile'] != body['profile']:
             raise ValueError(
@@ -526,7 +554,10 @@ class VideoProcessor:
     ):
         """Führt einen Stream-Copy-Mux aus und validiert das Ergebnis. Returns (ok, reason)."""
         combined_body_path = mux_segments['combined_body_path']
-        self._assert_stream_copy_compatible(temp_intro_with_audio_path, combined_body_path)
+        try:
+            self._assert_stream_copy_compatible(temp_intro_with_audio_path, combined_body_path)
+        except ValueError as exc:
+            return False, str(exc)
         command = self._execute_final_mux_command(full_video_output_path, video_params, mux_segments)
         mux_progress_duration = self._estimate_stream_copy_mux_duration_sec(
             intro_dauer, combined_body_path, mux_segments
@@ -941,10 +972,6 @@ class VideoProcessor:
                         work_temp,
                     )
                     temp_files.extend(mux_segments.get('temp_files', []))
-
-                    self._assert_stream_copy_compatible(
-                        temp_intro_with_audio_path, mux_segments['combined_body_path']
-                    )
                 else:
                     self._check_for_cancellation()
                     self._update_progress(3, TOTAL_STEPS)
@@ -1363,10 +1390,16 @@ class VideoProcessor:
 
     def _build_intro_ffmpeg_command(self, output_path, dauer, v_params, drawtext_filter, force_software=False):
         """Baut den FFmpeg-Befehl für die Intro-Erstellung."""
+        target_pix_fmt = v_params.get('pix_fmt') or 'yuv420p'
+        if target_pix_fmt in ('yuv420p', 'yuvj420p', 'yuv420p10le'):
+            format_suffix = f",format={target_pix_fmt}"
+        else:
+            format_suffix = ",format=yuv420p"
+            target_pix_fmt = 'yuv420p'
         video_filters = (
             f"scale={v_params['width']}:{v_params['height']}:force_original_aspect_ratio=decrease,"
             f"pad={v_params['width']}:{v_params['height']}:(ow-iw)/2:(oh-ih)/2:black,"
-            f"{drawtext_filter}"
+            f"{drawtext_filter}{format_suffix}"
         )
 
         vcodec = v_params.get('vcodec', 'h264')
@@ -1389,7 +1422,7 @@ class VideoProcessor:
         command.extend(["-vf", video_filters])
         command.extend(encoding_params['output_params'])
         command.extend([
-            "-pix_fmt", v_params['pix_fmt'],
+            "-pix_fmt", target_pix_fmt,
             "-r", v_params['fps'],
             "-video_track_timescale", v_params['timescale'],
             "-c:a", v_params['acodec'],

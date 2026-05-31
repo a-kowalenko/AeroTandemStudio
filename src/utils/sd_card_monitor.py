@@ -39,7 +39,7 @@ except ImportError:
 LINUX_API_AVAILABLE = True
 
 from src.utils.media_history import MediaHistoryStore, get_media_type_from_filename
-from src.utils.dji_media_paths import filter_media_paths_for_backup  # NEU
+from src.utils.dji_media_paths import filter_media_paths_for_backup, write_backup_manifest  # NEU
 from src.utils.file_utils import normalize_server_path
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 
@@ -594,6 +594,7 @@ class SDCardMonitor:
             start_time = time.time()
             used_filenames = set()
             local_to_server_map = []
+            manifest_entries = []
 
             for src_file in filtered_files:
                 try:
@@ -610,6 +611,11 @@ class SDCardMonitor:
                     file_size = os.path.getsize(src_file)
                     shutil.copy2(src_file, local_dst_file)
                     copied_source_files.append(src_file)
+                    manifest_entries.append({
+                        "dest": dst_filename,
+                        "src": src_file,
+                        "media_type": get_media_type_from_filename(original_name),
+                    })
                     copied_size += file_size
                     copied_count += 1
 
@@ -664,6 +670,8 @@ class SDCardMonitor:
                 server_success = False
 
             print(f"Backup abgeschlossen: {copied_count} neue Mediendateien kopiert")
+            if manifest_entries:
+                write_backup_manifest(backup_path, dcim_source, manifest_entries)
             backup_info = {
                 "server_backup_enabled": bool(settings.get("sd_server_backup_enabled", False)),
                 "server_backup_mode": server_backup_mode,

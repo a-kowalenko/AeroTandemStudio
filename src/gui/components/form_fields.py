@@ -2,6 +2,8 @@
 from tkcalendar import DateEntry
 from datetime import date
 
+from .circular_spinner import CircularSpinner
+
 class FormFields:
     def __init__(self, parent, config, app_instance):
         self.parent = parent
@@ -85,14 +87,19 @@ class FormFields:
         self._last_layout_signature = None
         self._last_qr_success = False
         self._last_kunde = None
+        self._layout_overlay = None
+        self._layout_spinner = None
 
         # Lade Einstellungen und baue initiales Formular
         self.load_initial_settings()
         self.build_manual_form()
+        self._last_layout_signature = self._build_layout_signature(False, None)
 
     def clear_form(self):
         """Entfernt alle Widgets aus dem Frame."""
         for widget in self.frame.winfo_children():
+            if widget is self._layout_overlay:
+                continue
             widget.destroy()
         # NEU: Widget-Liste leeren
         self.video_widgets_list = []
@@ -119,6 +126,45 @@ class FormFields:
         """True, wenn das Formular bereits durch einen erfolgreichen QR-Scan befüllt ist."""
         return self.form_mode == 'kunde'
 
+    def _ensure_layout_overlay(self):
+        """Erstellt ein Overlay mit Spinner über dem Formular (lazy, einmalig)."""
+        if self._layout_overlay is not None:
+            return
+
+        try:
+            bg = self.parent.cget("bg")
+        except tk.TclError:
+            bg = "#f0f0f0"
+
+        self._layout_overlay = tk.Frame(self.frame, bg=bg)
+        center = tk.Frame(self._layout_overlay, bg=bg)
+        center.place(relx=0.5, rely=0.5, anchor="center")
+
+        self._layout_spinner = CircularSpinner(center, size=48, line_width=4, color="#007ACC")
+        self._layout_spinner.pack(pady=(0, 8))
+        tk.Label(
+            center,
+            text="Formular wird aktualisiert…",
+            font=("Arial", 10),
+            bg=bg,
+            fg="#555555",
+        ).pack()
+
+    def _show_layout_loading(self):
+        """Blendet das Formular-Overlay ein, während Widgets neu aufgebaut werden."""
+        self._ensure_layout_overlay()
+        self._layout_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._layout_overlay.lift()
+        self.frame.update_idletasks()
+        self._layout_spinner.start()
+
+    def _hide_layout_loading(self):
+        """Entfernt das Formular-Overlay nach dem Neuaufbau."""
+        if self._layout_overlay is None:
+            return
+        self._layout_spinner.stop()
+        self._layout_overlay.place_forget()
+
     def update_form_layout(self, qr_success, kunde=None):
         """
         Aktualisiert das Formular-Layout basierend auf dem QR-Scan-Ergebnis.
@@ -129,6 +175,7 @@ class FormFields:
         if layout_signature == self._last_layout_signature:
             return
 
+        self._show_layout_loading()
         self._suspend_trace_callbacks = True
 
         try:
@@ -143,6 +190,7 @@ class FormFields:
                 self.build_manual_form()
         finally:
             self._suspend_trace_callbacks = False
+            self._hide_layout_loading()
 
         self._last_layout_signature = layout_signature
         self._notify_watermark_visibility_update()
@@ -354,6 +402,10 @@ class FormFields:
             self.email_var.set("")
             self.telefon_var.set("")
         else:
+            self.vorname_var.set("")
+            self.nachname_var.set("")
+            self.email_var.set("")
+            self.telefon_var.set("")
             tk.Label(self.frame, text="Vorname:", font=("Arial", 11)).grid(
                 row=row, column=0, padx=5, pady=5, sticky="w"
             )

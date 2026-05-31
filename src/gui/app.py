@@ -31,6 +31,7 @@ from ..utils.validation import validate_form_data
 from ..utils.sd_card_monitor import SDCardMonitor
 from ..utils.media_history import MediaHistoryStore
 from ..utils.natural_sort import sort_paths_by_basename
+from ..utils.dji_media_paths import filter_backup_import_paths
 from ..installer.ffmpeg_installer import ensure_ffmpeg_installed
 from ..utils.file_utils import test_server_connection
 from ..installer.updater import initialize_updater
@@ -85,6 +86,7 @@ class VideoGeneratorApp:
         # Für Threading und Ladefenster ---
         self.analysis_queue = None
         self.loading_window = None
+        self._session_reset_in_progress = False
         self._last_video_wm_visible = None
         self._last_photo_wm_visible = None
 
@@ -992,7 +994,8 @@ class VideoGeneratorApp:
             # Wenn alle Videos gelöscht wurden, setze das Formular
             # auf den manuellen Modus zurück.
             print("Keine Videos gefunden, setze Formular auf manuell zurück.")
-            self.form_fields.update_form_layout(qr_success=False, kunde=None)
+            if not getattr(self, "_session_reset_in_progress", False):
+                self.form_fields.update_form_layout(qr_success=False, kunde=None)
 
             # Auch Vorschau und Player leeren
             try:
@@ -1136,6 +1139,28 @@ class VideoGeneratorApp:
             self.loading_window.focus_force()
         except tk.TclError:
             pass
+
+    def _set_qr_loading_status(self, text: str) -> None:
+        """Aktualisiert den Text im QR-Ladefenster (falls geöffnet)."""
+        if self.loading_window and hasattr(self.loading_window, "update_text"):
+            try:
+                self.loading_window.update_text(text)
+            except tk.TclError:
+                pass
+
+    def _dismiss_qr_loading_window(self) -> None:
+        """Schließt das QR-Ladefenster, falls vorhanden."""
+        if self.loading_window:
+            try:
+                self.loading_window.destroy()
+            except tk.TclError:
+                pass
+            self.loading_window = None
+
+    def _update_form_layout_after_qr(self, qr_success, kunde=None) -> None:
+        """Aktualisiert das Formular-Layout; QR-Lade-Dialog bleibt bis zum Aufrufer offen."""
+        self._set_qr_loading_status("Formular wird aktualisiert…")
+        self.form_fields.update_form_layout(qr_success, kunde)
 
     def _update_qr_scan_progress(
         self,
@@ -1487,16 +1512,15 @@ class VideoGeneratorApp:
         try:
             # Versuchen, ein Ergebnis zu holen, ohne zu blockieren
             status, result = self.analysis_queue.get_nowait()
+        except queue.Empty:
+            # Wenn die Queue leer ist, erneut in 100ms prüfen
+            self.root.after(100, self._check_analysis_result, video_paths)
+            return
 
+        try:
             # --- Ergebnis ist da ---
             self._signal_qr_search_stop()
 
-            # 1. Ladefenster schließen
-            if self.loading_window:
-                self.loading_window.destroy()
-                self.loading_window = None
-
-            # 2. Ergebnis verarbeiten
             if status == "success":
                 kunde, qr_scan_success, source_path = result
                 self._process_analysis_result(kunde, qr_scan_success, video_paths, source_path)
@@ -1506,21 +1530,15 @@ class VideoGeneratorApp:
                 messagebox.showerror("Analyse-Fehler",
                                      f"Ein unerwarteter Fehler bei der Videoanalyse ist aufgetreten:\n{result}")
                 # Kein _restore_button_state - Preview läuft parallel!
-                self.form_fields.update_form_layout(False, None)
-
-
-        except queue.Empty:
-            # Wenn die Queue leer ist, erneut in 100ms prüfen
-            self.root.after(100, self._check_analysis_result, video_paths)
+                self._update_form_layout_after_qr(False, None)
 
         except Exception as e:
             # Allgemeiner Fehler beim Abrufen
-            if self.loading_window:
-                self.loading_window.destroy()
-                self.loading_window = None
             messagebox.showerror("Fehler", f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}")
             # Kein _restore_button_state - Preview läuft parallel!
-            self.form_fields.update_form_layout(False, None)
+            self._update_form_layout_after_qr(False, None)
+        finally:
+            self._dismiss_qr_loading_window()
 
     def _check_photo_analysis_result(self, photo_path: str):
         """Legacy-Polling für Einzelfoto-QR (wird nicht mehr direkt aufgerufen)."""
@@ -1530,12 +1548,12 @@ class VideoGeneratorApp:
         """Überprüft alle 100ms, ob ein Ergebnis der Foto-QR-Analyse in der Queue liegt."""
         try:
             status, result = self.analysis_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(100, self._check_photo_batch_analysis_result)
+            return
 
+        try:
             self._signal_qr_search_stop()
-
-            if self.loading_window:
-                self.loading_window.destroy()
-                self.loading_window = None
 
             batch_mode = getattr(self, "_photo_qr_batch_mode", False)
             self._photo_qr_batch_mode = False
@@ -1556,20 +1574,16 @@ class VideoGeneratorApp:
                     f"Ein unerwarteter Fehler bei der Foto-Analyse ist aufgetreten:\n{result}",
                 )
                 if not batch_mode:
-                    self.form_fields.update_form_layout(False, None)
-
-        except queue.Empty:
-            self.root.after(100, self._check_photo_batch_analysis_result)
+                    self._update_form_layout_after_qr(False, None)
 
         except Exception as e:
-            if self.loading_window:
-                self.loading_window.destroy()
-                self.loading_window = None
             self._photo_qr_batch_mode = False
             messagebox.showerror(
                 "Fehler",
                 f"Ein Fehler beim Verarbeiten des Ergebnisses ist aufgetreten: {e}",
             )
+        finally:
+            self._dismiss_qr_loading_window()
 
     def _get_media_duration_seconds(self, media_path: str):
         """Ermittelt die Medien-Dauer in Sekunden (ffprobe)."""
@@ -1686,7 +1700,7 @@ class VideoGeneratorApp:
                     self.run_photo_batch_qr_analysis(self.drag_drop.photo_paths.copy())
 
             # Formular-Layout aktualisieren
-            self.form_fields.update_form_layout(qr_scan_success, kunde)
+            self._update_form_layout_after_qr(qr_scan_success, kunde)
 
             if qr_scan_success and kunde:
                 self._maybe_remove_qr_source_after_scan("video", source_path)
@@ -1700,7 +1714,7 @@ class VideoGeneratorApp:
             # Nur wenn Preview NICHT läuft, Button wiederherstellen
             if not (self.video_preview and self.video_preview.processing_thread):
                 self._restore_button_state()
-            self.form_fields.update_form_layout(False, None)
+            self._update_form_layout_after_qr(False, None)
 
     def _process_photo_analysis_result(
         self,
@@ -1719,7 +1733,7 @@ class VideoGeneratorApp:
                       f"Booking ID Hash {kunde.booking_id_hash}, Email: {kunde.email}, "
                       f"Name: {kunde.vorname} {kunde.nachname}")
 
-                self.form_fields.update_form_layout(qr_scan_success, kunde)
+                self._update_form_layout_after_qr(qr_scan_success, kunde)
                 self._maybe_remove_qr_source_after_scan("photo", photo_path)
 
             elif qr_scan_success and not kunde:
@@ -1728,7 +1742,7 @@ class VideoGeneratorApp:
                     "Ein QR-Code wurde im Foto erkannt, aber die Daten sind ungültig.",
                 )
                 if not batch_scan:
-                    self.form_fields.update_form_layout(False, None)
+                    self._update_form_layout_after_qr(False, None)
 
             else:
                 if batch_scan:
@@ -1739,12 +1753,12 @@ class VideoGeneratorApp:
                         "Kein QR-Code gefunden",
                         f"Kein gültiger QR-Code im Foto gefunden:\n{basename}",
                     )
-                    self.form_fields.update_form_layout(False, None)
+                    self._update_form_layout_after_qr(False, None)
 
         except Exception as e:
             print(f"Fehler in _process_photo_analysis_result: {e}")
             if not batch_scan:
-                self.form_fields.update_form_layout(False, None)
+                self._update_form_layout_after_qr(False, None)
 
     def erstelle_video(self):
         """Bereitet die Videoerstellung mit Intro vor"""
@@ -2116,32 +2130,34 @@ class VideoGeneratorApp:
         if hasattr(self, "video_preview") and self.video_preview:
             self.video_preview.cancel_creation()
 
-        if self.drag_drop:
-            self.drag_drop.clear_all()
+        self._session_reset_in_progress = True
+        try:
+            if self.drag_drop:
+                self.drag_drop.clear_all()
 
-        if self.form_fields:
-            settings = self.config.get_settings()
-            settings["gast_name"] = ""
-            settings["tandemmaster"] = tm_snapshot if keep_tm else ""
-            settings["videospringer"] = vs_snapshot if keep_vs else ""
-            self.config.save_settings(settings)
+            if self.form_fields:
+                settings = self.config.get_settings()
+                settings["gast_name"] = ""
+                settings["tandemmaster"] = tm_snapshot if keep_tm else ""
+                settings["videospringer"] = vs_snapshot if keep_vs else ""
+                self.config.save_settings(settings)
 
-            # Layout erzwingen: clear_all kann update_form_layout auslösen, das bei
-            # unveränderter Signatur abbricht — dann blieben Kunden-/Produktfelder stehen.
-            self.form_fields._last_layout_signature = None
-            self.form_fields._last_qr_success = False
-            self.form_fields._last_kunde = None
-            self.form_fields.update_form_layout(False, None)
+                self.form_fields._last_layout_signature = None
+                self.form_fields._last_qr_success = False
+                self.form_fields._last_kunde = None
+                self.form_fields.update_form_layout(False, None)
 
-            self.form_fields.gast_name_var.set("")
-            self.form_fields.tandemmaster_var.set(tm_snapshot if keep_tm else "")
-            self.form_fields.videospringer_var.set(vs_snapshot if keep_vs else "")
+                self.form_fields.gast_name_var.set("")
+                self.form_fields.tandemmaster_var.set(tm_snapshot if keep_tm else "")
+                self.form_fields.videospringer_var.set(vs_snapshot if keep_vs else "")
 
-            settings = self.config.get_settings()
-            settings["gast_name"] = ""
-            settings["tandemmaster"] = self.form_fields.tandemmaster_var.get()
-            settings["videospringer"] = self.form_fields.videospringer_var.get()
-            self.config.save_settings(settings)
+                settings = self.config.get_settings()
+                settings["gast_name"] = ""
+                settings["tandemmaster"] = self.form_fields.tandemmaster_var.get()
+                settings["videospringer"] = self.form_fields.videospringer_var.get()
+                self.config.save_settings(settings)
+        finally:
+            self._session_reset_in_progress = False
 
         if update_progress_status and hasattr(self, "progress_handler") and self.progress_handler:
             self.progress_handler.set_status("Status: Bereit.")
@@ -3241,6 +3257,19 @@ class VideoGeneratorApp:
             # Prüfe Einstellung für Duplikate-Filter
             settings = self.config.get_settings()
             skip_processed = settings.get("sd_skip_processed", False)
+            exclude_timelapse = settings.get("sd_exclude_timelapse_videos", True)
+
+            video_files, photo_files, timelapse_skipped = filter_backup_import_paths(
+                video_files,
+                photo_files,
+                backup_path,
+                exclude_timelapse_videos=exclude_timelapse,
+            )
+            if timelapse_skipped:
+                print(
+                    f"DJI Timelapse-Filter beim Import: "
+                    f"{timelapse_skipped} Video(s) übersprungen"
+                )
 
             if skip_processed and (video_files or photo_files):
                 # Filtere bereits importierte Dateien

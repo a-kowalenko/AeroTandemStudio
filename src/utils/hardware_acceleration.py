@@ -191,7 +191,7 @@ class HardwareAccelerationDetector:
                 'decoder': None,
                 'hwaccel': 'dxva2',
                 'device': None,
-                'extra_params': ['-usage', 'transcoding', '-quality', 'speed', '-g', '30']
+                'extra_params': ['-usage', 'transcoding', '-g', '30']
             }
         return None
 

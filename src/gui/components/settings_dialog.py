@@ -64,6 +64,7 @@ class SettingsDialog:
         # Encoding-Strategie bei festem Codec (per_clip | combined)
         self.encoding_strategy_var = tk.StringVar(value="per_clip")
         self.reencode_matching_clips_var = tk.BooleanVar(value=False)
+        self.preview_encode_crf_var = tk.StringVar(value="18")
         # Session-Zurücksetzen: Tandemmaster / Videospringer optional beibehalten
         self.keep_tandemmaster_on_session_reset_var = tk.BooleanVar()
         self.keep_videospringer_on_session_reset_var = tk.BooleanVar()
@@ -624,34 +625,85 @@ class SettingsDialog:
             font=("Arial", 10),
         )
 
-        # NEU: Nur-neue-Dateien Checkbox + Verlauf-Button (gleiche Ebene)
-        row_idx = 8
         self.sd_skip_checkbox = tk.Checkbutton(
             backup_frame,
             text="Nur neue Dateien sichern/importieren (Duplikate überspringen)",
             variable=self.sd_skip_processed_var,
             font=("Arial", 10),
-            command=self.on_skip_processed_toggle
+            command=self.on_skip_processed_toggle,
         )
-        self.sd_skip_checkbox.grid(row=row_idx, column=0, sticky="w", padx=5, pady=(8, 2))
 
         self.history_button = tk.Button(
             backup_frame,
             text="Verlauf anzeigen…",
             command=self._open_processed_history_dialog,
-            width=18
+            width=18,
         )
-        self.history_button.grid(row=row_idx, column=1, sticky="e", padx=5, pady=(8, 2))
 
-        # NEU: Sub-Option für manuellen Import (eingerückt, nur sichtbar wenn skip_processed aktiv)
-        row_idx += 1
         self.sd_skip_manual_checkbox = tk.Checkbutton(
             backup_frame,
             text="Auch manuell importierte Dateien merken und prüfen",
             variable=self.sd_skip_processed_manual_var,
             font=("Arial", 9),
         )
-        # Wird nur angezeigt wenn sd_skip_processed aktiv ist
+
+        self._refresh_backup_tab_layout()
+
+    def _refresh_backup_tab_layout(self):
+        """Ordnet SD-Backup-Optionen dynamisch an, damit Sub-Optionen nicht überlappen."""
+        auto = self.sd_auto_backup_var.get()
+        server = self.sd_server_backup_enabled_var.get()
+        size_limit = self.sd_size_limit_enabled_var.get()
+        skip = self.sd_skip_processed_var.get()
+
+        for widget in (
+            self.sd_pc_name_frame,
+            self.sd_auto_import_checkbox,
+            self.sd_server_backup_checkbox,
+            self.sd_server_path_frame,
+            self.sd_server_mode_frame,
+            self.sd_size_limit_checkbox,
+            self.sd_size_limit_frame,
+            self.sd_clear_checkbox,
+            self.sd_exclude_timelapse_checkbox,
+            self.sd_skip_checkbox,
+            self.history_button,
+            self.sd_skip_manual_checkbox,
+        ):
+            widget.grid_forget()
+
+        row = 2
+        if auto:
+            self.sd_pc_name_frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=30, pady=2)
+            row += 1
+            self.sd_auto_import_checkbox.grid(row=row, column=0, sticky="w", padx=30, pady=2)
+            row += 1
+            self.sd_server_backup_checkbox.grid(row=row, column=0, sticky="w", padx=30, pady=(6, 2))
+            row += 1
+            if server:
+                self.sd_server_path_frame.grid(
+                    row=row, column=0, columnspan=2, sticky="ew", padx=50, pady=(0, 2),
+                )
+                row += 1
+                self.sd_server_mode_frame.grid(
+                    row=row, column=0, columnspan=2, sticky="w", padx=50, pady=(0, 2),
+                )
+                row += 1
+            self.sd_size_limit_checkbox.grid(row=row, column=0, sticky="w", padx=30, pady=(8, 2))
+            row += 1
+            if size_limit:
+                self.sd_size_limit_frame.grid(row=row, column=0, sticky="w", padx=50, pady=(0, 2))
+                row += 1
+            self.sd_clear_checkbox.grid(row=row, column=0, sticky="w", padx=30, pady=2)
+            row += 1
+            self.sd_exclude_timelapse_checkbox.grid(row=row, column=0, sticky="w", padx=30, pady=2)
+            row += 1
+
+        self.sd_skip_checkbox.grid(row=row, column=0, sticky="w", padx=5, pady=(8, 2))
+        self.history_button.grid(row=row, column=1, sticky="e", padx=5, pady=(8, 2))
+        row += 1
+        if skip:
+            self.sd_skip_manual_checkbox.grid(row=row, column=0, sticky="w", padx=30, pady=(0, 2))
 
 
     def _open_processed_history_dialog(self):
@@ -800,9 +852,59 @@ class SettingsDialog:
         )
         self.parallel_info_label.grid(row=4, column=0, sticky="w", padx=20, pady=(0, 5))
 
+        # --- Re-Encode Qualität ---
+        separator_quality = ttk.Separator(advanced_frame, orient='horizontal')
+        separator_quality.grid(row=5, column=0, sticky="ew", pady=10)
+
+        quality_header = tk.Label(
+            advanced_frame,
+            text="Re-Encode Qualität (CRF):",
+            font=("Arial", 10, "bold"),
+            anchor="w",
+        )
+        quality_header.grid(row=6, column=0, sticky="w", padx=5, pady=(0, 5))
+
+        quality_container = tk.Frame(advanced_frame)
+        quality_container.grid(row=7, column=0, sticky="w", padx=20, pady=2)
+
+        tk.Label(
+            quality_container,
+            text="CRF-Wert:",
+            font=("Arial", 10),
+        ).pack(side="left")
+
+        self.preview_encode_crf_spinbox = tk.Spinbox(
+            quality_container,
+            from_=0,
+            to=51,
+            width=5,
+            textvariable=self.preview_encode_crf_var,
+            font=("Arial", 10),
+        )
+        self.preview_encode_crf_spinbox.pack(side="left", padx=(8, 0))
+
+        tk.Label(
+            quality_container,
+            text="(0 = beste Qualität, 51 = kleinste Datei; Standard: 18)",
+            font=("Arial", 9),
+            fg="gray",
+        ).pack(side="left", padx=(10, 0))
+
+        self.preview_encode_crf_hint_label = tk.Label(
+            advanced_frame,
+            text="Gilt für Software- und Hardware-Encoder beim Standardisieren von Clips. "
+                 "Niedrigere Werte = höhere Bitrate und bessere Qualität.",
+            font=("Arial", 9),
+            fg="gray",
+            wraplength=650,
+            justify="left",
+            anchor="w",
+        )
+        self.preview_encode_crf_hint_label.grid(row=8, column=0, sticky="w", padx=20, pady=(0, 5))
+
         # --- Encoding-Strategie (nur bei festem Codec) ---
         separator3 = ttk.Separator(advanced_frame, orient='horizontal')
-        separator3.grid(row=5, column=0, sticky="ew", pady=10)
+        separator3.grid(row=9, column=0, sticky="ew", pady=10)
 
         strategy_header = tk.Label(
             advanced_frame,
@@ -810,7 +912,7 @@ class SettingsDialog:
             font=("Arial", 10, "bold"),
             anchor="w",
         )
-        strategy_header.grid(row=6, column=0, sticky="w", padx=5, pady=(0, 5))
+        strategy_header.grid(row=10, column=0, sticky="w", padx=5, pady=(0, 5))
 
         self.encoding_strategy_per_clip_radio = tk.Radiobutton(
             advanced_frame,
@@ -820,7 +922,7 @@ class SettingsDialog:
             font=("Arial", 10),
             anchor="w",
         )
-        self.encoding_strategy_per_clip_radio.grid(row=7, column=0, sticky="w", padx=20, pady=2)
+        self.encoding_strategy_per_clip_radio.grid(row=11, column=0, sticky="w", padx=20, pady=2)
 
         self.encoding_strategy_combined_radio = tk.Radiobutton(
             advanced_frame,
@@ -830,7 +932,7 @@ class SettingsDialog:
             font=("Arial", 10),
             anchor="w",
         )
-        self.encoding_strategy_combined_radio.grid(row=8, column=0, sticky="w", padx=20, pady=2)
+        self.encoding_strategy_combined_radio.grid(row=12, column=0, sticky="w", padx=20, pady=2)
 
         self.encoding_strategy_hint_label = tk.Label(
             advanced_frame,
@@ -842,7 +944,7 @@ class SettingsDialog:
             justify="left",
             anchor="w",
         )
-        self.encoding_strategy_hint_label.grid(row=9, column=0, sticky="w", padx=20, pady=(0, 5))
+        self.encoding_strategy_hint_label.grid(row=13, column=0, sticky="w", padx=20, pady=(0, 5))
 
         self.encoding_strategy_auto_hint_label = tk.Label(
             advanced_frame,
@@ -853,7 +955,7 @@ class SettingsDialog:
             justify="left",
             anchor="w",
         )
-        self.encoding_strategy_auto_hint_label.grid(row=10, column=0, sticky="w", padx=20, pady=(0, 5))
+        self.encoding_strategy_auto_hint_label.grid(row=14, column=0, sticky="w", padx=20, pady=(0, 5))
 
         self.reencode_matching_clips_checkbox = tk.Checkbutton(
             advanced_frame,
@@ -862,7 +964,7 @@ class SettingsDialog:
             font=("Arial", 10),
             anchor="w",
         )
-        self.reencode_matching_clips_checkbox.grid(row=11, column=0, sticky="w", padx=20, pady=(5, 2))
+        self.reencode_matching_clips_checkbox.grid(row=15, column=0, sticky="w", padx=20, pady=(5, 2))
 
         self.reencode_matching_clips_hint_label = tk.Label(
             advanced_frame,
@@ -873,7 +975,7 @@ class SettingsDialog:
             justify="left",
             anchor="w",
         )
-        self.reencode_matching_clips_hint_label.grid(row=12, column=0, sticky="w", padx=20, pady=(0, 5))
+        self.reencode_matching_clips_hint_label.grid(row=16, column=0, sticky="w", padx=20, pady=(0, 5))
 
     def _update_encoding_strategy_state(self):
         """Aktiviert/deaktiviert Encoding-Strategie abhängig von Codec-Auswahl."""
@@ -994,82 +1096,27 @@ class SettingsDialog:
 
     def on_auto_backup_toggle(self):
         """Wird aufgerufen wenn die Auto-Backup Checkbox geändert wird"""
-        is_enabled = self.sd_auto_backup_var.get()
-
-        if is_enabled:
-            self.sd_pc_name_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=30, pady=2)
-            # Zeige abhängige Checkboxen in neuer Reihenfolge (alle eingerückt mit padx=30)
-            # 1. Automatisch importieren (ERSTE Option)
-            self.sd_auto_import_checkbox.grid(row=3, column=0, sticky="w", padx=30, pady=2)
-
-            # 1b. Optionales Server-Backup
-            self.sd_server_backup_checkbox.grid(row=4, column=0, sticky="w", padx=30, pady=(6, 2))
-            self.on_server_backup_toggle()
-
-            # 2. Größen-Limit Option
-            self.sd_size_limit_checkbox.grid(row=7, column=0, sticky="w", padx=30, pady=(8, 2))
-            self.on_size_limit_toggle()  # Zeige/Verstecke Eingabefeld
-
-            # 3. SD-Karte leeren
-            self.sd_clear_checkbox.grid(row=9, column=0, sticky="w", padx=30, pady=2)
-            self.sd_exclude_timelapse_checkbox.grid(row=10, column=0, sticky="w", padx=30, pady=2)
-        else:
-            # Verstecke und deaktiviere alle abhängigen Checkboxen
-            self.sd_pc_name_frame.grid_forget()
-            self.sd_auto_import_checkbox.grid_forget()
-            self.sd_server_backup_checkbox.grid_forget()
-            self.sd_server_path_frame.grid_forget()
-            self.sd_server_mode_frame.grid_forget()
-            self.sd_size_limit_checkbox.grid_forget()
-            self.sd_size_limit_frame.grid_forget()
-            self.sd_clear_checkbox.grid_forget()
-            self.sd_exclude_timelapse_checkbox.grid_forget()
-            self.sd_skip_manual_checkbox.grid_forget()
+        if not self.sd_auto_backup_var.get():
             self.sd_auto_import_var.set(False)
             self.sd_server_backup_enabled_var.set(False)
             self.sd_size_limit_enabled_var.set(False)
             self.sd_clear_var.set(False)
             self.sd_skip_processed_manual_var.set(False)
-
-        # "Nur neue Dateien" Checkbox und Verlauf-Button IMMER anzeigen
-        self.sd_skip_checkbox.grid(row=8, column=0, sticky="w", padx=5, pady=(8, 2))
-        self.history_button.grid(row=8, column=1, sticky="e", padx=5, pady=(8, 2))
-
-        # Sub-Option für manuellen Import (conditional)
-        self.on_skip_processed_toggle()
+        self._refresh_backup_tab_layout()
 
     def on_skip_processed_toggle(self):
         """Wird aufgerufen wenn die Skip-Processed Checkbox geändert wird"""
-        is_enabled = self.sd_skip_processed_var.get()
-
-        if is_enabled:
-            # Zeige Sub-Option für manuellen Import (eingerückt)
-            self.sd_skip_manual_checkbox.grid(row=9, column=0, sticky="w", padx=30, pady=(0, 2))
-        else:
-            # Verstecke Sub-Option
-            self.sd_skip_manual_checkbox.grid_forget()
+        if not self.sd_skip_processed_var.get():
             self.sd_skip_processed_manual_var.set(False)
+        self._refresh_backup_tab_layout()
 
     def on_server_backup_toggle(self):
         """Zeigt/versteckt Felder für optionales Server-Backup."""
-        enabled = self.sd_server_backup_enabled_var.get()
-        if enabled and self.sd_auto_backup_var.get():
-            self.sd_server_path_frame.grid(row=5, column=0, columnspan=2, sticky="ew", padx=50, pady=(0, 2))
-            self.sd_server_mode_frame.grid(row=6, column=0, columnspan=2, sticky="w", padx=50, pady=(0, 2))
-        else:
-            self.sd_server_path_frame.grid_forget()
-            self.sd_server_mode_frame.grid_forget()
+        self._refresh_backup_tab_layout()
 
     def on_size_limit_toggle(self):
         """Wird aufgerufen wenn die Größen-Limit Checkbox geändert wird"""
-        is_enabled = self.sd_size_limit_enabled_var.get()
-
-        if is_enabled:
-            # Zeige Eingabefeld (noch mehr eingerückt als Checkbox)
-            self.sd_size_limit_frame.grid(row=8, column=0, sticky="w", padx=50, pady=(0, 2))
-        else:
-            # Verstecke Eingabefeld
-            self.sd_size_limit_frame.grid_forget()
+        self._refresh_backup_tab_layout()
 
     def on_parallel_processing_toggle(self):
         """Wird aufgerufen wenn die Paralleles Processing Checkbox geändert wird"""
@@ -1906,6 +1953,7 @@ class SettingsDialog:
         self.codec_var.set(settings.get("video_codec", "auto"))
         self.encoding_strategy_var.set(settings.get("encoding_strategy", "per_clip"))
         self.reencode_matching_clips_var.set(settings.get("reencode_matching_clips", False))
+        self.preview_encode_crf_var.set(str(settings.get("preview_encode_crf", 18)))
         self._update_encoding_strategy_state()
 
         # Formular beim Session-Zurücksetzen
@@ -1995,6 +2043,18 @@ class SettingsDialog:
         if encoding_strategy not in ("per_clip", "combined"):
             encoding_strategy = "per_clip"
         reencode_matching_clips = self.reencode_matching_clips_var.get()
+
+        try:
+            preview_encode_crf = int(self.preview_encode_crf_var.get().strip())
+            if preview_encode_crf < 0 or preview_encode_crf > 51:
+                raise ValueError("CRF out of range")
+        except ValueError:
+            messagebox.showwarning(
+                "Ungültige Eingabe",
+                "Bitte einen gültigen CRF-Wert zwischen 0 und 51 angeben.",
+                parent=self.dialog,
+            )
+            return
 
         keep_tandemmaster_on_session_reset = self.keep_tandemmaster_on_session_reset_var.get()
         keep_videospringer_on_session_reset = self.keep_videospringer_on_session_reset_var.get()
@@ -2114,6 +2174,7 @@ class SettingsDialog:
             current_settings["video_codec"] = video_codec
             current_settings["encoding_strategy"] = encoding_strategy
             current_settings["reencode_matching_clips"] = reencode_matching_clips
+            current_settings["preview_encode_crf"] = preview_encode_crf
 
             # Formular beim Session-Zurücksetzen
             current_settings["keep_tandemmaster_on_session_reset"] = keep_tandemmaster_on_session_reset

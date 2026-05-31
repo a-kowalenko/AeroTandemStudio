@@ -28,6 +28,13 @@ from src.utils.preview_encode_target import (
     all_clips_match_preview_target,
     clip_matches_preview_target,
 )
+from src.utils.encoding_quality import (
+    build_hw_quality_params,
+    build_software_quality_params,
+    clamp_crf,
+    clip_needs_video_filter,
+    stream_format_values_equivalent,
+)
 from typing import List, Dict, Callable  # NEU
 
 
@@ -1307,6 +1314,50 @@ class VideoPreview:
             encoding_strategy = "per_clip"
         return selected_codec, encoding_strategy, reencode_matching_clips
 
+    def _get_preview_encode_crf(self) -> int:
+        crf = 18
+        if self.app and hasattr(self.app, 'config'):
+            crf = self.app.config.get_settings().get("preview_encode_crf", 18)
+        return clamp_crf(crf)
+
+    def _probe_clip_format(self, video_path):
+        """Liest zentrale Video-/Audio-Stream-Eigenschaften per ffprobe."""
+        try:
+            result = subprocess.run(
+                ['ffprobe', '-v', 'quiet', '-print_format', 'json',
+                 '-show_streams', video_path],
+                capture_output=True, text=True, timeout=10,
+                creationflags=SUBPROCESS_CREATE_NO_WINDOW,
+            )
+            if result.returncode != 0:
+                return None
+            info = json.loads(result.stdout)
+            video_stream = next(
+                (s for s in info.get('streams', []) if s.get('codec_type') == 'video'), None
+            )
+            audio_stream = next(
+                (s for s in info.get('streams', []) if s.get('codec_type') == 'audio'), None
+            )
+            if not video_stream:
+                return None
+            prof = video_stream.get('profile')
+            if isinstance(prof, str):
+                prof = prof.lower().replace(' ', '')
+            return {
+                'codec_name': video_stream.get('codec_name', 'unknown'),
+                'width': video_stream.get('width', 0),
+                'height': video_stream.get('height', 0),
+                'r_frame_rate': video_stream.get('r_frame_rate', '0/0'),
+                'pix_fmt': video_stream.get('pix_fmt', 'unknown'),
+                'profile': prof,
+                'audio_codec': audio_stream.get('codec_name') if audio_stream else None,
+                'sample_rate': str(audio_stream.get('sample_rate')) if audio_stream else None,
+                'channels': audio_stream.get('channels') if audio_stream else None,
+            }
+        except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError) as exc:
+            print(f"Warnung: Clip-Format nicht lesbar ({video_path}): {exc}")
+            return None
+
     @staticmethod
     def _normalize_target_codec(codec_name):
         """Normalisiert ffprobe- oder Settings-Codec-Namen für Vergleiche."""
@@ -1435,6 +1486,9 @@ class VideoPreview:
         }
         tp = target_params
         encoding_params = self._get_encoding_params(codec_to_use)
+        preview_crf = self._get_preview_encode_crf()
+        source_fmt = self._probe_clip_format(input_path)
+        needs_vf = clip_needs_video_filter(source_fmt)
 
         cmd = ["ffmpeg", "-y"]
         cmd.extend(["-err_detect", "ignore_err", "-fflags", "+genpts+igndts"])
@@ -1443,80 +1497,49 @@ class VideoPreview:
         hw_type = hw_info.get('type') if hw_info.get('available') else None
         use_hw_filters = False
 
+        cmd.extend(encoding_params.get('input_params', []))
         cmd.extend(["-i", input_path])
 
-        if use_hw_filters and hw_type == 'intel':
-            filter_str = (
-                f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
-                f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                f"fps={tp['fps']},format=nv12,hwupload=extra_hw_frames=64,format=qsv"
-            )
-            cmd.extend(["-vf", filter_str])
-        elif use_hw_filters and hw_type == 'nvidia':
-            filter_str = (
-                f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
-                f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                f"fps={tp['fps']},format=nv12,hwupload"
-            )
-            cmd.extend(["-vf", filter_str])
-        else:
-            filter_chain = (
-                f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
-                f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                f"fps={tp['fps']},format=yuv420p"
-            )
-            if self.hw_accel_enabled and hw_type in ['intel', 'nvidia', 'amd']:
+        if needs_vf:
+            if use_hw_filters and hw_type == 'intel':
+                filter_str = (
+                    f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
+                    f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                    f"fps={tp['fps']},format=nv12,hwupload=extra_hw_frames=64,format=qsv"
+                )
+                cmd.extend(["-vf", filter_str])
+            elif use_hw_filters and hw_type == 'nvidia':
+                filter_str = (
+                    f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
+                    f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                    f"fps={tp['fps']},format=nv12,hwupload"
+                )
+                cmd.extend(["-vf", filter_str])
+            else:
                 filter_chain = (
                     f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
                     f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                    f"fps={tp['fps']}"
+                    f"fps={tp['fps']},format=yuv420p"
                 )
-            cmd.extend(["-vf", filter_chain])
-
-        cmd.extend(["-pix_fmt", "yuv420p"])
-        cmd.extend(encoding_params['output_params'])
-
-        if self.hw_accel_enabled:
-            cmd.extend(["-pix_fmt", "yuv420p"])
-
-        preview_crf = 18
-        if self.app and hasattr(self.app, 'config'):
-            try:
-                preview_crf = int(self.app.config.get_settings().get("preview_encode_crf", 18))
-            except (TypeError, ValueError):
-                preview_crf = 18
-        preview_crf = max(0, min(51, preview_crf))
-
-        if not self.hw_accel_enabled:
-            encoder = encoding_params.get('encoder', 'libx264')
-            cmd.extend(["-g", "30", "-keyint_min", "30"])
-            if encoder == 'libx264':
-                cmd.extend([
-                    "-preset", "medium",
-                    "-crf", str(preview_crf),
-                ])
-            elif encoder == 'libx265':
-                hevc_crf = min(51, preview_crf + 2)
-                cmd.extend([
-                    "-preset", "medium",
-                    "-crf", str(hevc_crf),
-                ])
-            elif encoder == 'libvpx-vp9':
-                cmd.extend([
-                    "-deadline", "realtime",
-                    "-cpu-used", "5",
-                    "-row-mt", "1",
-                    "-b:v", "0",
-                    "-crf", "31"
-                ])
-            elif encoder in ['libaom-av1', 'libsvtav1']:
-                cmd.extend([
-                    "-cpu-used", "8",
-                    "-crf", "35",
-                    "-b:v", "0"
-                ])
+                if self.hw_accel_enabled and hw_type in ['intel', 'nvidia', 'amd']:
+                    filter_chain = (
+                        f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
+                        f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                        f"fps={tp['fps']}"
+                    )
+                cmd.extend(["-vf", filter_chain])
         else:
-            print(f"  → Nutze Hardware-Encoder: {encoding_params['encoder']}")
+            print(f"  → Quelle bereits 1080p@30 — überspringe Scale/FPS-Filter")
+
+        encoder = encoding_params.get('encoder', 'libx264')
+        cmd.extend(["-c:v", encoder])
+        cmd.extend(["-pix_fmt", "yuv420p"])
+
+        if self.hw_accel_enabled and hw_type:
+            print(f"  → Nutze Hardware-Encoder: {encoder} (Qualität CRF≈{preview_crf})")
+            cmd.extend(build_hw_quality_params(hw_type, encoder, preview_crf, codec_to_use))
+        else:
+            cmd.extend(build_software_quality_params(encoder, preview_crf, codec_to_use))
 
         cmd.extend([
             "-c:a", tp['audio_codec'],
@@ -1733,6 +1756,19 @@ class VideoPreview:
             selected_codec = settings.get("video_codec", "auto")
 
         codec_to_use = "h264" if selected_codec == "auto" else selected_codec
+        source_fmt = self._probe_clip_format(input_path)
+        if (
+            codec_to_use == "h264"
+            and source_fmt
+            and clip_matches_preview_target(source_fmt)
+        ):
+            print(
+                f"  → {os.path.basename(input_path)} bereits 1080p H.264 30fps "
+                f"— Stream-Copy (kein Neuencode)"
+            )
+            self._copy_without_thumbnails(input_path, output_path)
+            return
+
         self._execute_reencode(
             input_path, output_path, codec_to_use, task_id, video_index
         )
@@ -2438,8 +2474,11 @@ class VideoPreview:
                 is_compatible = False
                 diffs.append(f"Video {i + 1}: {fmt['error']}")
                 continue
+            vcodec = fmt.get('codec_name', 'h264')
             for key in compare_keys:
-                if fmt.get(key) != first_format.get(key):
+                val_a = first_format.get(key)
+                val_b = fmt.get(key)
+                if not stream_format_values_equivalent(key, val_a, val_b, vcodec):
                     is_compatible = False
                     diffs.append(f"V{i + 1} {key}")
             if 'error' not in fmt:

@@ -16,6 +16,13 @@ from src.gui.components.error_dialog import ErrorDialog
 from src.utils.constants import LOG_FILE, SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.media_history import MediaHistoryStore
 from src.utils.natural_sort import natural_sort_key, sort_paths_by_basename
+from src.utils.dji_media_paths import (
+    collect_media_paths_from_tree,
+    dcim_has_timelapse_photo_tree,
+    filter_collected_media_for_timelapse,
+    resolve_dcim_root,
+    should_skip_file_for_timelapse_session,
+)
 from src.utils.file_times import (
     format_creation_date,
     format_creation_time,
@@ -59,17 +66,26 @@ def _dnd_classify_file(path: str):
     return None
 
 
-def _collect_media_from_directory(dir_path: str):
+def _collect_media_from_directory(dir_path: str, exclude_timelapse_videos: bool = True):
     """
-    Sammelt unterstützte Medien direkt im Ordner (keine Unterordner).
-    Nicht-Medien-Dateien werden übersprungen.
+    Sammelt unterstützte Medien im Ordner.
+    Bei DJI/DCIM-Struktur rekursiv mit Timelapse-Filter (nur Fotos aus TIMELAPSE).
     """
+    dcim_root = resolve_dcim_root(dir_path)
+    if dcim_root:
+        all_media = collect_media_paths_from_tree(dir_path)
+        return filter_collected_media_for_timelapse(
+            all_media,
+            dir_path,
+            exclude_timelapse_videos=exclude_timelapse_videos,
+        )
+
     videos, photos = [], []
     try:
         with os.scandir(dir_path) as it:
             entries = sorted(it, key=lambda e: natural_sort_key(e.name))
     except OSError:
-        return videos, photos
+        return videos, photos, 0
     for entry in entries:
         if not entry.is_file(follow_symlinks=False):
             continue
@@ -78,7 +94,7 @@ def _collect_media_from_directory(dir_path: str):
             videos.append(entry.path)
         elif kind == "photo":
             photos.append(entry.path)
-    return videos, photos
+    return videos, photos, 0
 
 
 class ImportProgressDialog(tk.Toplevel):
@@ -394,6 +410,23 @@ class DragDropFrame:
         self.frame.drop_target_register(DND_FILES)
         self.frame.dnd_bind('<<Drop>>', self.handle_drop)
 
+    def _should_skip_dji_timelapse_video(self, path: str) -> bool:
+        if not self.app or not hasattr(self.app, "config"):
+            return False
+        settings = self.app.config.get_settings()
+        if not settings.get("sd_exclude_timelapse_videos", True):
+            return False
+        dcim_root = resolve_dcim_root(path)
+        if not dcim_root:
+            return False
+        session_active = dcim_has_timelapse_photo_tree(dcim_root)
+        return should_skip_file_for_timelapse_session(
+            path,
+            dcim_root,
+            is_video=True,
+            timelapse_session_active=session_active,
+        )
+
     def handle_drop(self, event):
         """Verarbeitet das Ablegen von Dateien (Videos und Fotos)"""
         filepaths = self._parse_dropped_files(event.data)
@@ -404,6 +437,12 @@ class DragDropFrame:
             if os.path.isfile(filepath):
                 kind = _dnd_classify_file(filepath)
                 if kind == "video":
+                    if self._should_skip_dji_timelapse_video(filepath):
+                        print(
+                            f"DJI Timelapse-Filter: überspringe "
+                            f"{os.path.basename(filepath)}"
+                        )
+                        continue
                     valid_videos.append(filepath)
                 elif kind == "photo":
                     valid_photos.append(filepath)
@@ -411,7 +450,19 @@ class DragDropFrame:
                     messagebox.showwarning("Ungültige Datei",
                                            f"'{os.path.basename(filepath)}' ist keine unterstützte Video- oder Foto-Datei")
             elif os.path.isdir(filepath):
-                v, p = _collect_media_from_directory(filepath)
+                exclude_timelapse = True
+                if self.app and hasattr(self.app, "config"):
+                    exclude_timelapse = bool(
+                        self.app.config.get_settings().get("sd_exclude_timelapse_videos", True)
+                    )
+                v, p, skipped = _collect_media_from_directory(
+                    filepath, exclude_timelapse_videos=exclude_timelapse,
+                )
+                if skipped:
+                    print(
+                        f"DJI Timelapse-Filter: {skipped} Video(s) übersprungen "
+                        f"(Ordner: {os.path.basename(filepath)})"
+                    )
                 valid_videos.extend(v)
                 valid_photos.extend(p)
 

@@ -2,7 +2,7 @@
 import os
 import sys
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 # --- 📋 Version aus VERSION.txt lesen ---
 # HINWEIS: Version wird von build.py hochgezählt, bevor PyInstaller startet
@@ -15,6 +15,9 @@ print(f"[BUILD] Baue Version: {CURRENT_VERSION}")
 pyzbar_libs = collect_dynamic_libs("pyzbar")
 print(f"[BUILD] Gesammelte pyzbar dynamische Bibliotheken: {len(pyzbar_libs)}")
 
+tkinterdnd2_datas = collect_data_files("tkinterdnd2")
+print(f"[BUILD] Gesammelte tkinterdnd2 Dateien: {len(tkinterdnd2_datas)}")
+
 runtime_hooks = []
 if sys.platform == "win32":
     runtime_hooks.append("pyinstaller_runtime_hook_pyzbar.py")
@@ -25,10 +28,14 @@ a = Analysis(
     binaries=pyzbar_libs,
     datas=[
         ('VERSION.txt', '.'),   # Version-Datei mit einbinden
-        ('assets', 'assets')    # Assets-Ordner mitnehmen
+        ('assets', 'assets'),   # Assets-Ordner mitnehmen
+        *tkinterdnd2_datas,
     ],
-    hiddenimports=['pyzbar', 'pyzbar.pyzbar', 'vlc', 'PIL._tkinter_finder'],  # pyzbar & vlc explizit importieren
-    hookspath=[],
+    hiddenimports=[
+        'pyzbar', 'pyzbar.pyzbar', 'vlc', 'PIL._tkinter_finder',
+        'tkinterdnd2', 'tkinterdnd2.TkinterDnD',
+    ],
+    hookspath=['.'],
     hooksconfig={},
     runtime_hooks=runtime_hooks,
     excludes=[],
@@ -59,6 +66,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
+    upx_exclude=['libtkdnd*.dll', 'libtkdnd*.so', 'libtkdnd*.dylib'],
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -75,7 +83,7 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    upx_exclude=['libtkdnd*.dll', 'libtkdnd*.so', 'libtkdnd*.dylib'],
     name=f"Aero Tandem Studio v{CURRENT_VERSION}",
 )
 

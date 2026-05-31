@@ -2009,25 +2009,11 @@ class VideoGeneratorApp:
         self.root.after(0, self._switch_to_create_mode)
 
     def _clear_all_files_after_success(self):
-        """Löscht alle importierten Videos und Fotos nach erfolgreichem Erstellen"""
+        """Setzt Session nach erfolgreichem Erstellen zurück (Formular + Medien)."""
         try:
-            print("🗑️ Auto-Clear: Lösche alle importierten Dateien...")
-
-            if not self.drag_drop:
-                return
-
-            had_videos = bool(self.drag_drop.video_paths)
-            had_photos = bool(self.drag_drop.photo_paths)
-            if had_videos or had_photos:
-                self.drag_drop.clear_all()
-                if had_videos:
-                    print("   ✓ Video(s) gelöscht")
-                if had_photos:
-                    print("   ✓ Foto(s) gelöscht")
-                print("   ✓ Drop-Label zurückgesetzt")
-
+            print("🗑️ Auto-Clear: Setze Formular und importierte Medien zurück...")
+            self._apply_session_reset(update_progress_status=False)
             print("✅ Auto-Clear abgeschlossen")
-
         except Exception as e:
             print(f"⚠️ Fehler beim Auto-Clear: {e}")
 
@@ -2107,6 +2093,61 @@ class VideoGeneratorApp:
                 return True, "Zurücksetzen ist während der Videoerstellung nicht möglich."
         return False, ""
 
+    def _apply_session_reset(self, *, respect_keep_flags: bool = True, update_progress_status: bool = True):
+        """
+        Leert importierte Medien und setzt das Formular auf den manuellen Modus zurück.
+
+        respect_keep_flags: Tandemmaster/Videospringer gemäß Einstellungen beibehalten.
+        """
+        keep_tm = False
+        keep_vs = False
+        tm_snapshot = ""
+        vs_snapshot = ""
+        if self.form_fields:
+            snap_settings = self.config.get_settings()
+            if respect_keep_flags:
+                keep_tm = _truthy_session_keep_flag(
+                    snap_settings.get("keep_tandemmaster_on_session_reset", False))
+                keep_vs = _truthy_session_keep_flag(
+                    snap_settings.get("keep_videospringer_on_session_reset", False))
+            tm_snapshot = self.form_fields.tandemmaster_var.get()
+            vs_snapshot = self.form_fields.videospringer_var.get()
+
+        if hasattr(self, "video_preview") and self.video_preview:
+            self.video_preview.cancel_creation()
+
+        if self.drag_drop:
+            self.drag_drop.clear_all()
+
+        if self.form_fields:
+            settings = self.config.get_settings()
+            settings["gast_name"] = ""
+            settings["tandemmaster"] = tm_snapshot if keep_tm else ""
+            settings["videospringer"] = vs_snapshot if keep_vs else ""
+            self.config.save_settings(settings)
+
+            # Layout erzwingen: clear_all kann update_form_layout auslösen, das bei
+            # unveränderter Signatur abbricht — dann blieben Kunden-/Produktfelder stehen.
+            self.form_fields._last_layout_signature = None
+            self.form_fields._last_qr_success = False
+            self.form_fields._last_kunde = None
+            self.form_fields.update_form_layout(False, None)
+
+            self.form_fields.gast_name_var.set("")
+            self.form_fields.tandemmaster_var.set(tm_snapshot if keep_tm else "")
+            self.form_fields.videospringer_var.set(vs_snapshot if keep_vs else "")
+
+            settings = self.config.get_settings()
+            settings["gast_name"] = ""
+            settings["tandemmaster"] = self.form_fields.tandemmaster_var.get()
+            settings["videospringer"] = self.form_fields.videospringer_var.get()
+            self.config.save_settings(settings)
+
+        if update_progress_status and hasattr(self, "progress_handler") and self.progress_handler:
+            self.progress_handler.set_status("Status: Bereit.")
+
+        self.update_watermark_column_visibility()
+
     def reset_session(self):
         """Leert Formular (manueller Modus) und alle importierten Medien nach Bestätigung."""
         blocked, reason = self._is_session_reset_blocked()
@@ -2127,51 +2168,8 @@ class VideoGeneratorApp:
             messagebox.showwarning("Zurücksetzen nicht möglich", reason, parent=self.root)
             return
 
-        # Vor clear_all: Keep-Flags und aktuelle TM/VS sichern — clear_all löst
-        # update_video_preview([]) → update_form_layout → build_manual_form aus,
-        # das die Felder sonst aus der Config neu lädt und „Beibehalten“ zunichtemacht.
-        keep_tm = False
-        keep_vs = False
-        tm_snapshot = ""
-        vs_snapshot = ""
-        if self.form_fields:
-            snap_settings = self.config.get_settings()
-            keep_tm = _truthy_session_keep_flag(
-                snap_settings.get("keep_tandemmaster_on_session_reset", False))
-            keep_vs = _truthy_session_keep_flag(
-                snap_settings.get("keep_videospringer_on_session_reset", False))
-            tm_snapshot = self.form_fields.tandemmaster_var.get()
-            vs_snapshot = self.form_fields.videospringer_var.get()
-
         try:
-            if hasattr(self, "video_preview") and self.video_preview:
-                self.video_preview.cancel_creation()
-
-            if self.drag_drop:
-                self.drag_drop.clear_all()
-
-            if self.form_fields:
-                settings = self.config.get_settings()
-                if keep_tm:
-                    self.form_fields.tandemmaster_var.set(tm_snapshot)
-                    settings["tandemmaster"] = tm_snapshot
-                else:
-                    self.form_fields.tandemmaster_var.set("")
-                    settings["tandemmaster"] = ""
-                if keep_vs:
-                    self.form_fields.videospringer_var.set(vs_snapshot)
-                    settings["videospringer"] = vs_snapshot
-                else:
-                    self.form_fields.videospringer_var.set("")
-                    settings["videospringer"] = ""
-                self.form_fields.gast_name_var.set("")
-                settings["gast_name"] = ""
-                self.config.save_settings(settings)
-
-            if hasattr(self, "progress_handler") and self.progress_handler:
-                self.progress_handler.set_status("Status: Bereit.")
-
-            self.update_watermark_column_visibility()
+            self._apply_session_reset()
         except Exception as e:
             print(f"⚠️ Fehler beim Zurücksetzen: {e}")
             messagebox.showerror("Zurücksetzen", f"Fehler beim Zurücksetzen:\n{e}", parent=self.root)

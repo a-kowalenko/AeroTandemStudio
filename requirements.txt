@@ -1,5 +1,6 @@
 ﻿# GUI Framework
-tkinterdnd2
+# 0.4.4 ships a 32-bit DLL in win-x64 (breaks 64-bit Windows builds)
+tkinterdnd2==0.4.3
 tkcalendar
 
 # Video/Medien Processing

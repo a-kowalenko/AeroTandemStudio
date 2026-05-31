@@ -94,6 +94,21 @@ def main():
         print(f"Fehler beim Starten der Anwendung: {e}")
         import traceback
         traceback.print_exc()
+        if getattr(sys, "frozen", False) or not sys.stdin or not sys.stdin.isatty():
+            try:
+                import tkinter as tk
+                from tkinter import messagebox
+
+                err_root = tk.Tk()
+                err_root.withdraw()
+                messagebox.showerror(
+                    "Aero Tandem Studio",
+                    f"Fehler beim Starten der Anwendung:\n\n{e}",
+                )
+                err_root.destroy()
+            except Exception:
+                pass
+            sys.exit(1)
         input("Drücke Enter zum Beenden...")
 
 

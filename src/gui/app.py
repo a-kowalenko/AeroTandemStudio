@@ -31,7 +31,7 @@ from ..utils.validation import validate_form_data
 from ..utils.sd_card_monitor import SDCardMonitor
 from ..utils.media_history import MediaHistoryStore
 from ..utils.natural_sort import sort_paths_by_basename
-from ..utils.dji_media_paths import filter_backup_import_paths
+from ..utils.dji_media_paths import collect_media_from_backup_folder
 from ..installer.ffmpeg_installer import ensure_ffmpeg_installed
 from ..utils.file_utils import test_server_connection
 from ..installer.updater import initialize_updater
@@ -3230,38 +3230,11 @@ class VideoGeneratorApp:
                         self.drag_drop._maybe_run_photo_qr_search()
 
         try:
-            # Sammle alle Dateien aus dem Backup-Ordner
-            video_files = []
-            photo_files = []
-
-            # Dateien liegen direkt im Backup-Ordner (flache Struktur)
-            if os.path.isdir(backup_path):
-                for file in os.listdir(backup_path):
-                    file_lower = file.lower()
-                    file_path = os.path.join(backup_path, file)
-
-                    # Nur Dateien, keine Ordner
-                    if not os.path.isfile(file_path):
-                        continue
-
-                    # Video-Formate
-                    if file_lower.endswith(('.mp4', '.mov', '.avi', '.mkv', '.m4v',
-                                          '.mpg', '.mpeg', '.wmv', '.flv', '.webm')):
-                        video_files.append(file_path)
-                    # Foto-Formate
-                    elif file_lower.endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tif',
-                                            '.tiff', '.gif', '.webp', '.heic', '.raw',
-                                            '.cr2', '.nef', '.arw', '.dng')):
-                        photo_files.append(file_path)
-
-            # Prüfe Einstellung für Duplikate-Filter
             settings = self.config.get_settings()
             skip_processed = settings.get("sd_skip_processed", False)
             exclude_timelapse = settings.get("sd_exclude_timelapse_videos", True)
 
-            video_files, photo_files, timelapse_skipped = filter_backup_import_paths(
-                video_files,
-                photo_files,
+            video_files, photo_files, timelapse_skipped = collect_media_from_backup_folder(
                 backup_path,
                 exclude_timelapse_videos=exclude_timelapse,
             )

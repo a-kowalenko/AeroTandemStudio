@@ -18,9 +18,11 @@ from typing import Any, Dict, Optional, Tuple
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.file_times import get_creation_timestamp
 
-# EXIF: DateTimeOriginal, DateTime
+# EXIF: DateTimeOriginal, DateTime, SubSecTimeOriginal
 _EXIF_DATETIME_ORIGINAL = 36867
 _EXIF_DATETIME = 306
+_EXIF_SUBSEC_TIME_ORIGINAL = 37521
+_EXIF_SUBSEC_TIME = 37520
 
 
 def _parse_tag_to_epoch(tag_val: str) -> Optional[float]:
@@ -96,28 +98,69 @@ def get_ffprobe_format_creation_epoch(path: str) -> Optional[float]:
     return None
 
 
-def get_pil_exif_epoch(path: str) -> Optional[float]:
-    """EXIF DateTimeOriginal / DateTime (z. B. JPG; bei manchen Formaten auch embed)."""
+def _decode_exif_text(raw) -> Optional[str]:
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+    if isinstance(raw, str):
+        text = raw.strip()
+        return text or None
+    return None
+
+
+def _normalize_exif_subsec_to_ms(subsec: Optional[str]) -> str:
+    """Wandelt EXIF SubSecTime(Original) in 3-stellige Millisekunden um."""
+    if not subsec:
+        return "000"
+    digits = re.sub(r"\D", "", subsec)[:3]
+    return digits.ljust(3, "0") if digits else "000"
+
+
+def get_pil_exif_capture_datetime(path: str) -> Tuple[Optional[datetime], str]:
+    """
+    Liest EXIF DateTimeOriginal (+ SubSecTimeOriginal) für Dateinamen.
+    Returns: (datetime ohne Bruchteil, Millisekunden als 3-stelliger String)
+    """
     try:
         from PIL import Image
 
         with Image.open(path) as img:
             exif = img.getexif()
             if not exif:
-                return None
-            raw = exif.get(_EXIF_DATETIME_ORIGINAL) or exif.get(_EXIF_DATETIME)
-            if isinstance(raw, bytes):
-                try:
-                    raw = raw.decode("utf-8", errors="ignore")
-                except Exception:
-                    return None
-            if raw and isinstance(raw, str):
-                epoch = _parse_tag_to_epoch(raw.strip())
-                if epoch is not None:
-                    return epoch
+                return None, "000"
+            raw_dt = _decode_exif_text(
+                exif.get(_EXIF_DATETIME_ORIGINAL) or exif.get(_EXIF_DATETIME)
+            )
+            if not raw_dt or len(raw_dt) < 19:
+                return None, "000"
+            try:
+                dt = datetime.strptime(raw_dt[:19], "%Y:%m:%d %H:%M:%S")
+            except ValueError:
+                return None, "000"
+            raw_subsec = _decode_exif_text(
+                exif.get(_EXIF_SUBSEC_TIME_ORIGINAL) or exif.get(_EXIF_SUBSEC_TIME)
+            )
+            return dt, _normalize_exif_subsec_to_ms(raw_subsec)
     except Exception:
         pass
-    return None
+    return None, "000"
+
+
+def get_pil_exif_epoch(path: str) -> Optional[float]:
+    """EXIF DateTimeOriginal / DateTime (z. B. JPG; bei manchen Formaten auch embed)."""
+    dt, ms = get_pil_exif_capture_datetime(path)
+    if dt is None:
+        return None
+    try:
+        epoch = float(dt.timestamp())
+        ms_val = int(ms)
+        return epoch + (ms_val / 1000.0)
+    except (ValueError, OSError, OverflowError):
+        return float(dt.timestamp())
 
 
 def resolve_video_display_epoch(

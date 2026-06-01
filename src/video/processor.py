@@ -12,6 +12,7 @@ import time
 from .logger import CancellableProgressBarLogger, CancellationError
 from ..utils.file_utils import sanitize_filename
 from src.utils.media_datetime import get_photo_display_epoch
+from src.utils.dji_media_paths import is_timelapse_photo_filename
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.constants import HINTERGRUND_PATH
 from src.utils.constants import (
@@ -1569,8 +1570,12 @@ class VideoProcessor:
         for src in photo_paths:
             if not os.path.exists(src):
                 continue
-            prefix = self._get_photo_capture_dt(src).strftime("%Y%m%d%H%M%S")
-            candidate = f"{prefix}_{os.path.basename(src)}"
+            basename = os.path.basename(src)
+            if is_timelapse_photo_filename(basename):
+                candidate = basename
+            else:
+                prefix = self._get_photo_capture_dt(src).strftime("%Y%m%d%H%M%S")
+                candidate = f"{prefix}_{basename}"
             if candidate in used:
                 base, ext = os.path.splitext(candidate)
                 n = 1

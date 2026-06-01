@@ -39,7 +39,12 @@ except ImportError:
 LINUX_API_AVAILABLE = True
 
 from src.utils.media_history import MediaHistoryStore, get_media_type_from_filename
-from src.utils.dji_media_paths import filter_media_paths_for_backup, write_backup_manifest  # NEU
+from src.utils.dji_media_paths import (
+    filter_media_paths_for_backup,
+    resolve_drive_dcim_path,
+    resolve_timelapse_session_active_for_paths,
+    write_backup_manifest,
+)
 from src.utils.file_utils import normalize_server_path
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
 
@@ -205,7 +210,7 @@ class SDCardMonitor:
         Kriterium: DCIM Ordner vorhanden
         """
         try:
-            dcim_path = os.path.join(drive, "DCIM")
+            dcim_path = resolve_drive_dcim_path(drive)
             return os.path.isdir(dcim_path)
         except:
             return False
@@ -370,7 +375,7 @@ class SDCardMonitor:
         try:
             limit_mb = settings.get("sd_size_limit_mb", 2000)
             # Scanne Dateien
-            dcim_source = os.path.join(drive, "DCIM")
+            dcim_source = resolve_drive_dcim_path(drive)
             if not os.path.isdir(dcim_source):
                 return None  # Kein DCIM Ordner, normal fortfahren
 
@@ -499,7 +504,7 @@ class SDCardMonitor:
             if selected_files:
                 print(f"  → Nur {len(selected_files)} ausgewählte Dateien werden kopiert")
 
-            dcim_source = os.path.join(drive, "DCIM")
+            dcim_source = resolve_drive_dcim_path(drive)
             if not os.path.isdir(dcim_source):
                 error_msg = f"DCIM Ordner nicht gefunden: {dcim_source}"
                 print(error_msg)
@@ -671,7 +676,16 @@ class SDCardMonitor:
 
             print(f"Backup abgeschlossen: {copied_count} neue Mediendateien kopiert")
             if manifest_entries:
-                write_backup_manifest(backup_path, dcim_source, manifest_entries)
+                session_active = resolve_timelapse_session_active_for_paths(
+                    dcim_source,
+                    copied_source_files,
+                )
+                write_backup_manifest(
+                    backup_path,
+                    dcim_source,
+                    manifest_entries,
+                    timelapse_session_active=session_active,
+                )
             backup_info = {
                 "server_backup_enabled": bool(settings.get("sd_server_backup_enabled", False)),
                 "server_backup_mode": server_backup_mode,

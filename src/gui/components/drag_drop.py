@@ -17,11 +17,16 @@ from src.utils.constants import LOG_FILE, SUBPROCESS_CREATE_NO_WINDOW
 from src.utils.media_history import MediaHistoryStore
 from src.utils.natural_sort import natural_sort_key, sort_paths_by_basename
 from src.utils.dji_media_paths import (
+    collect_media_from_backup_folder,
     collect_media_paths_from_tree,
-    dcim_has_timelapse_photo_tree,
     filter_collected_media_for_timelapse,
+    read_backup_manifest,
     resolve_dcim_root,
+    resolve_manifest_source_path,
+    resolve_timelapse_photo_import_name,
+    resolve_timelapse_session_active_for_paths,
     should_skip_file_for_timelapse_session,
+    should_skip_video_for_import,
 )
 from src.utils.file_times import (
     format_creation_date,
@@ -70,7 +75,14 @@ def _collect_media_from_directory(dir_path: str, exclude_timelapse_videos: bool 
     """
     Sammelt unterstützte Medien im Ordner.
     Bei DJI/DCIM-Struktur rekursiv mit Timelapse-Filter (nur Fotos aus TIMELAPSE).
+    Bei SD-Backup-Ordnern mit Manifest ebenfalls mit Timelapse-Filter.
     """
+    if read_backup_manifest(dir_path):
+        return collect_media_from_backup_folder(
+            dir_path,
+            exclude_timelapse_videos=exclude_timelapse_videos,
+        )
+
     dcim_root = resolve_dcim_root(dir_path)
     if dcim_root:
         all_media = collect_media_paths_from_tree(dir_path)
@@ -418,8 +430,11 @@ class DragDropFrame:
             return False
         dcim_root = resolve_dcim_root(path)
         if not dcim_root:
-            return False
-        session_active = dcim_has_timelapse_photo_tree(dcim_root)
+            return should_skip_video_for_import(
+                path,
+                exclude_timelapse_videos=True,
+            )
+        session_active = resolve_timelapse_session_active_for_paths(dcim_root, [path])
         return should_skip_file_for_timelapse_session(
             path,
             dcim_root,
@@ -777,9 +792,22 @@ class DragDropFrame:
             settings = self.app.config.get_settings()
             skip_processed = settings.get("sd_skip_processed", False)
             skip_processed_manual = settings.get("sd_skip_processed_manual", False)
+            exclude_timelapse = settings.get("sd_exclude_timelapse_videos", True)
 
             total_bytes = 0
             files_to_process = []
+            import_manifest_cache: dict[str, Optional[dict]] = {}
+            timelapse_used_names: set[str] = set()
+
+            def _get_import_manifest(path: str) -> Optional[dict]:
+                parent = os.path.dirname(path)
+                cache_key = os.path.normcase(parent)
+                if cache_key not in import_manifest_cache:
+                    import_manifest_cache[cache_key] = read_backup_manifest(parent)
+                return import_manifest_cache[cache_key]
+
+            for existing_photo in self.photo_paths:
+                timelapse_used_names.add(os.path.basename(existing_photo).lower())
 
             if new_videos or new_photos:
                 temp_dir = self._ensure_working_temp_dir()
@@ -793,6 +821,16 @@ class DragDropFrame:
             # Prepare videos
             if new_videos:
                 for path in new_videos:
+                    if should_skip_video_for_import(
+                        path,
+                        exclude_timelapse_videos=exclude_timelapse,
+                        manifest=_get_import_manifest(path),
+                    ):
+                        print(
+                            f"DJI Timelapse-Filter (Import): überspringe "
+                            f"{os.path.basename(path)}"
+                        )
+                        continue
                     if skip_processed and skip_processed_manual:
                         history_store = MediaHistoryStore.instance()
                         identity = history_store.compute_identity(path)
@@ -958,7 +996,23 @@ class DragDropFrame:
                         print(f"  ⚠️ Konnte Foto-Arbeitsordner nicht anlegen: {e}")
                         continue
 
-                    safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+                    import_manifest = _get_import_manifest(source_path)
+                    logical_src = resolve_manifest_source_path(source_path, import_manifest)
+                    dcim_root = import_manifest.get("dcim_source") if import_manifest else None
+                    timelapse_name = resolve_timelapse_photo_import_name(
+                        source_path,
+                        logical_src,
+                        dcim_root,
+                        timelapse_used_names,
+                    )
+                    if timelapse_name:
+                        safe_filename = re.sub(r'[<>:"/\\|?*]', '_', timelapse_name)
+                        print(
+                            f"DJI Timelapse-Foto umbenannt: "
+                            f"{filename} -> {safe_filename}"
+                        )
+                    else:
+                        safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
                     dest_path = os.path.join(photos_dir, safe_filename)
                     if os.path.exists(dest_path):
                         base_name, ext = os.path.splitext(safe_filename)

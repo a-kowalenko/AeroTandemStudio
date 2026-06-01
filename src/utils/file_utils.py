@@ -9,6 +9,7 @@ This module provides:
 """
 
 import os
+import re
 import shutil
 import subprocess
 import platform
@@ -73,6 +74,11 @@ def normalize_server_path(server_url: str) -> Tuple[Optional[str], bool, bool]:
 # ============================================================================
 # FILE AND DIRECTORY UTILITIES
 # ============================================================================
+
+def normalize_whitespace_to_underscore(text: str) -> str:
+    """Ersetzt jede Whitespace-Sequenz durch genau einen Unterstrich."""
+    return re.sub(r"\s+", "_", text)
+
 
 def sanitize_filename(filename: str) -> str:
     """

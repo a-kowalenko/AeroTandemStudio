@@ -10,7 +10,7 @@ import multiprocessing
 import time
 
 from .logger import CancellableProgressBarLogger, CancellationError
-from ..utils.file_utils import sanitize_filename
+from ..utils.file_utils import normalize_whitespace_to_underscore, sanitize_filename
 from src.utils.media_datetime import get_photo_display_epoch
 from src.utils.dji_media_paths import is_timelapse_photo_filename
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
@@ -1211,7 +1211,8 @@ class VideoProcessor:
                 'watermark_video': bool(watermark_video_output_path),
                 'photos': copied_count,
                 'watermark_photos': watermark_photo_count,
-                'server_uploaded': server_uploaded
+                'server_uploaded': server_uploaded,
+                'output_dir': base_output_dir or None,
             }
 
             self._show_success_message(created_items)
@@ -2096,6 +2097,7 @@ class VideoProcessor:
         if outside_video:
             base_filename += f"_V_{videospringer}"
 
+        base_filename = normalize_whitespace_to_underscore(base_filename)
         base_filename_sanitized = sanitize_filename(base_filename)
         output_dir = os.path.join(speicherort, base_filename_sanitized)
 

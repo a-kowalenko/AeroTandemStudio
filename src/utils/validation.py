@@ -1,7 +1,7 @@
 ﻿import os
 
 
-def validate_form_data(form_data, video_paths):
+def validate_form_data(form_data, video_paths, oldschool_mode=False):
     """Validiert die Formulardaten und gibt Fehlermeldungen zurück"""
     errors = []
 
@@ -13,6 +13,10 @@ def validate_form_data(form_data, video_paths):
     for field_key, field_name in required_fields:
         if not form_data.get(field_key, "").strip():
             errors.append(f"{field_name} ist erforderlich")
+
+    if oldschool_mode and form_data.get("form_mode") == "manual":
+        if not form_data.get("email", "").strip():
+            errors.append("Email ist erforderlich")
 
     if form_data.get("outside_video") and not form_data.get("videospringer", "").strip():
         errors.append("Videospringer ist erforderlich bei Outside Video")

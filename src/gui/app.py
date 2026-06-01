@@ -1856,7 +1856,12 @@ class VideoGeneratorApp:
         )
 
         # Validierung der Formulardaten (Textfelder)
-        errors = validate_form_data(form_data, (video_produkt_gewaehlt or foto_produkt_gewaehlt))
+        oldschool_mode = bool(self.config.get_settings().get("oldschool_mode", False))
+        errors = validate_form_data(
+            form_data,
+            (video_produkt_gewaehlt or foto_produkt_gewaehlt),
+            oldschool_mode=oldschool_mode,
+        )
         if errors:
             messagebox.showwarning("Fehlende Eingabe", "\n".join(errors))
             return

@@ -1,4 +1,8 @@
-﻿import tkinter as tk
+﻿import os
+import subprocess
+import sys
+import tkinter as tk
+from tkinter import messagebox
 
 
 class SuccessDialog:
@@ -14,12 +18,14 @@ class SuccessDialog:
                     'watermark_video': bool/str,  # Wasserzeichen-Video oder False
                     'photos': int,  # Anzahl der Fotos
                     'watermark_photos': int,  # Anzahl Wasserzeichen-Fotos
-                    'server_uploaded': bool  # Server-Upload erfolgreich
+                    'server_uploaded': bool,  # Server-Upload erfolgreich
+                    'output_dir': str,  # Lokales Zielverzeichnis (optional)
                 }
         """
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("Erfolgreich erstellt")
         self.dialog.transient(parent)
+        self.output_dir = created_items.get("output_dir") or ""
 
         # WICHTIG: Verstecke Dialog initial, um Flackern zu vermeiden
         self.dialog.withdraw()
@@ -150,33 +156,73 @@ class SuccessDialog:
             )
             empty_label.pack(pady=10)
 
-        # OK Button
+        # Buttons
         button_frame = tk.Frame(self.dialog, bg='#f0f0f0')
         button_frame.pack(fill='x', padx=20, pady=(0, 20))
+
+        button_style = dict(
+            font=('Arial', 11, 'bold'),
+            cursor='hand2',
+            relief='flat',
+            padx=20,
+            pady=10,
+            borderwidth=0,
+        )
+
+        if self.output_dir and os.path.isdir(self.output_dir):
+            open_button = tk.Button(
+                button_frame,
+                text="Zielverzeichnis öffnen",
+                command=self._open_output_dir,
+                bg='#2196F3',
+                fg='white',
+                activebackground='#1976D2',
+                activeforeground='white',
+                **button_style,
+            )
+            open_button.pack(side='left', expand=True, fill='x', padx=(0, 8))
 
         ok_button = tk.Button(
             button_frame,
             text="OK",
             command=self.dialog.destroy,
-            font=('Arial', 11, 'bold'),
             bg='#4CAF50',
             fg='white',
             activebackground='#45a049',
             activeforeground='white',
-            cursor='hand2',
-            relief='flat',
-            padx=40,
-            pady=10,
-            borderwidth=0
+            **button_style,
         )
-        ok_button.pack()
+        ok_button.pack(side='left', expand=True, fill='x')
 
         # Enter-Taste zum Schließen
         self.dialog.bind('<Return>', lambda e: self.dialog.destroy())
         self.dialog.bind('<Escape>', lambda e: self.dialog.destroy())
 
-        # Focus auf OK Button
         ok_button.focus_set()
+
+    def _open_output_dir(self):
+        """Öffnet das lokale Zielverzeichnis im Datei-Explorer."""
+        path = os.path.normpath(self.output_dir)
+        if not path or not os.path.isdir(path):
+            messagebox.showerror(
+                "Ordner nicht gefunden",
+                f"Das Zielverzeichnis existiert nicht:\n{path}",
+                parent=self.dialog,
+            )
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.run(["open", path], check=False)
+            else:
+                subprocess.run(["xdg-open", path], check=False)
+        except OSError as e:
+            messagebox.showerror(
+                "Ordner konnte nicht geöffnet werden",
+                f"{path}\n\n{e}",
+                parent=self.dialog,
+            )
 
     def _add_item(self, parent, text, icon):
         """Fügt ein Item zur Liste hinzu"""

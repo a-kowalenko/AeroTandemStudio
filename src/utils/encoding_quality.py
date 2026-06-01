@@ -105,6 +105,19 @@ def build_hw_quality_params(hw_type: str | None, encoder: str | None, crf: int, 
     return build_software_quality_params("libx264", crf, codec)
 
 
+def strip_hwaccel_input_params(input_params: list) -> list:
+    """Entfernt -hwaccel/-hwaccel_device — nötig wenn CPU-Filter (scale/pad) verwendet werden."""
+    stripped = []
+    i = 0
+    while i < len(input_params):
+        if input_params[i] in ("-hwaccel", "-hwaccel_device"):
+            i += 2
+            continue
+        stripped.append(input_params[i])
+        i += 1
+    return stripped
+
+
 def clip_needs_video_filter(fmt: dict | None, target_width=1920, target_height=1080, target_fps=30) -> bool:
     """True wenn Scale/Pad/FPS-Filter vor dem Encode nötig sind."""
     if not fmt or "error" in fmt:

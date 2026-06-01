@@ -33,6 +33,7 @@ from src.utils.encoding_quality import (
     build_software_quality_params,
     clamp_crf,
     clip_needs_video_filter,
+    strip_hwaccel_input_params,
     stream_format_values_equivalent,
 )
 from typing import List, Dict, Callable  # NEU
@@ -1495,45 +1496,46 @@ class VideoPreview:
 
         hw_info = self.hw_detector.detect_hardware()
         hw_type = hw_info.get('type') if hw_info.get('available') else None
-        use_hw_filters = False
+        encoder = encoding_params.get('encoder', 'libx264')
+        use_hw_encode = (
+            self.hw_accel_enabled
+            and hw_type
+            and encoder
+            and not str(encoder).startswith('lib')
+        )
 
-        cmd.extend(encoding_params.get('input_params', []))
+        input_params = list(encoding_params.get('input_params', []))
+        # QSV/CUDA-Decode liefert GPU-Frames — CPU-scale kann qsv/cuda nicht verarbeiten.
+        if needs_vf and use_hw_encode:
+            input_params = strip_hwaccel_input_params(input_params)
+
+        # QSV-Encoder braucht eine HW-Device-Referenz, aber Frames kommen aus CPU-Filtern.
+        if needs_vf and use_hw_encode and hw_type == 'intel':
+            cmd.extend(["-init_hw_device", "qsv=hw"])
+
+        cmd.extend(input_params)
         cmd.extend(["-i", input_path])
 
         if needs_vf:
-            if use_hw_filters and hw_type == 'intel':
-                filter_str = (
-                    f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
-                    f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                    f"fps={tp['fps']},format=nv12,hwupload=extra_hw_frames=64,format=qsv"
-                )
-                cmd.extend(["-vf", filter_str])
-            elif use_hw_filters and hw_type == 'nvidia':
-                filter_str = (
-                    f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
-                    f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                    f"fps={tp['fps']},format=nv12,hwupload"
-                )
-                cmd.extend(["-vf", filter_str])
+            base_vf = (
+                f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
+                f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"fps={tp['fps']}"
+            )
+            # Kein hwupload: erfordert -filter_hw_device; h264_qsv nimmt nv12/yuv420p aus RAM.
+            if use_hw_encode and hw_type == 'intel':
+                filter_chain = base_vf + ",format=nv12"
             else:
-                filter_chain = (
-                    f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
-                    f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                    f"fps={tp['fps']},format=yuv420p"
-                )
-                if self.hw_accel_enabled and hw_type in ['intel', 'nvidia', 'amd']:
-                    filter_chain = (
-                        f"scale={tp['width']}:{tp['height']}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
-                        f"pad={tp['width']}:{tp['height']}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                        f"fps={tp['fps']}"
-                    )
-                cmd.extend(["-vf", filter_chain])
+                filter_chain = base_vf + ",format=yuv420p"
+            cmd.extend(["-vf", filter_chain])
         else:
             print(f"  → Quelle bereits 1080p@30 — überspringe Scale/FPS-Filter")
 
-        encoder = encoding_params.get('encoder', 'libx264')
         cmd.extend(["-c:v", encoder])
-        cmd.extend(["-pix_fmt", "yuv420p"])
+        if use_hw_encode and hw_type == 'intel' and needs_vf:
+            cmd.extend(["-pix_fmt", "nv12"])
+        else:
+            cmd.extend(["-pix_fmt", "yuv420p"])
 
         if self.hw_accel_enabled and hw_type:
             print(f"  → Nutze Hardware-Encoder: {encoder} (Qualität CRF≈{preview_crf})")
@@ -1643,7 +1645,16 @@ class VideoPreview:
                     "Unable to parse option",
                     "Error setting option",
                     "Undefined constant",
-                    "hwaccel initialisation returned error"
+                    "hwaccel initialisation returned error",
+                    "Impossible to convert between the formats",
+                    "Error reinitializing filters",
+                    "Error initializing filters",
+                    "Function not implemented",
+                    "auto_scale_0",
+                    "Pixel formats",
+                    "src: qsv",
+                    "hardware device reference is required",
+                    "A hardware device reference",
                 ]
                 if any(indicator in stderr_text for indicator in hw_error_indicators):
                     print("⚠️ Hardware-Encoder-Fehler erkannt!")

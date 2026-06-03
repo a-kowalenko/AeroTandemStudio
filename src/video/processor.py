@@ -1149,6 +1149,15 @@ class VideoProcessor:
                                 "vorname": (form_data.get("vorname", "") or "").strip(),
                                 "nachname": (form_data.get("nachname", "") or "").strip(),
                                 "email": (form_data.get("email", "") or "").strip(),
+                                "type": marker_type,
+                                "handcam_foto": kunde.handcam_foto,
+                                "handcam_video": kunde.handcam_video,
+                                "outside_foto": kunde.outside_foto,
+                                "outside_video": kunde.outside_video,
+                                "ist_bezahlt_handcam_foto": kunde.ist_bezahlt_handcam_foto,
+                                "ist_bezahlt_handcam_video": kunde.ist_bezahlt_handcam_video,
+                                "ist_bezahlt_outside_foto": kunde.ist_bezahlt_outside_foto,
+                                "ist_bezahlt_outside_video": kunde.ist_bezahlt_outside_video,
                             }
                             telefon = (form_data.get("telefon", "") or "").strip()
                             if telefon:

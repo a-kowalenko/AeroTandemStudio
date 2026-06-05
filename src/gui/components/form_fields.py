@@ -4,6 +4,17 @@ from datetime import date
 
 from .circular_spinner import CircularSpinner
 
+_MODE_BTN_BORDER = "#000000"
+_MODE_BTN_SELECTED_BG = "#007ACC"
+_MODE_BTN_SELECTED_FG = "#FFFFFF"
+_MODE_BTN_SELECTED_ACTIVE_BG = "#0066B3"
+_MODE_BTN_IDLE_BG = "#FFFFFF"
+_MODE_BTN_IDLE_FG = "#1F2937"
+_MODE_BTN_IDLE_ACTIVE_BG = "#E8F4FF"
+_MODE_BTN_MUTED_FG = "#6B7280"
+_MODE_BTN_MUTED_ACTIVE_BG = "#F3F4F6"
+
+
 class FormFields:
     def __init__(self, parent, config, app_instance):
         self.parent = parent
@@ -20,7 +31,7 @@ class FormFields:
         self.videospringer_var = tk.StringVar()
 
         # Variable für den Videomodus (Handcam vs. Outside)
-        self.video_mode_var = tk.StringVar(value="handcam")
+        self.video_mode_var = tk.StringVar(value="")
 
         # Variablen für Kunde/Manuell-Form
         self.kunde_id_var = tk.StringVar()
@@ -73,8 +84,11 @@ class FormFields:
         # NEU: Platzhalter für Bearbeiten-Buttons
         self.btn_gast = None  # Bleibt (kontrolliert jetzt Vor- und Nachname)
         self.btn_video_mode = None
+        self.btn_mode_handcam = None
+        self.btn_mode_outside = None
+        self._mode_toggle_rail = None
 
-        # NEU: Liste für Video-Widgets (Radios, Checkboxen)
+        # NEU: Liste für Video-Widgets (Toggle-Buttons, Checkboxen)
         self.video_widgets_list = []
 
         # Container-Frames für die umschaltbaren Sektionen
@@ -119,6 +133,9 @@ class FormFields:
         self.entry_videospringer = None
         self.btn_gast = None
         self.btn_video_mode = None
+        self.btn_mode_handcam = None
+        self.btn_mode_outside = None
+        self._mode_toggle_rail = None
         self.handcam_frame = None
         self.outside_frame = None
 
@@ -232,8 +249,19 @@ class FormFields:
 
     # --- Methoden zum Erstellen von Formular-Layouts ---
 
+    def _kunde_media_aus_qr(self, kunde) -> bool:
+        """True, wenn der QR-Code mindestens ein gebuchtes Produkt enthielt."""
+        return bool(
+            kunde.handcam_foto or kunde.handcam_video
+            or kunde.outside_foto or kunde.outside_video
+        )
+
     def build_kunde_form(self, kunde):
         """Baut das Formular für einen erkannten Kunden."""
+        media_aus_qr = self._kunde_media_aus_qr(kunde)
+        media_state = 'disabled' if media_aus_qr else 'normal'
+        btn_video_text = 'Bearbeiten' if media_aus_qr else 'Übernehmen'
+
         row = 0
         row = self._create_id_fields(
             row=row,
@@ -273,33 +301,28 @@ class FormFields:
         row = self._create_datum_ort_fields(row)
         # --- ENDE VERSCHOBEN ---
 
-        # --- Video Modus Radio-Buttons (nicht bearbeitbar) ---
+        # --- Video Modus Toggle-Buttons ---
         self.video_widgets_list = []  # Zurücksetzen
         mode_frame = tk.Frame(self.frame)
         mode_frame.grid(row=row, column=0, columnspan=5, pady=5, sticky="w")
 
-        self.radio_handcam = tk.Radiobutton(mode_frame, text="Handcam", variable=self.video_mode_var, value="handcam",
-                                            command=self.toggle_video_mode_visibility, font=("Arial", 11, "bold"),
-                                            state='disabled')
-        self.radio_handcam.pack(side="left", padx=5)
-        self.video_widgets_list.append(self.radio_handcam)
+        self._create_mode_toggle_buttons(
+            mode_frame,
+            lockable=media_aus_qr,
+            initial_state=media_state,
+        )
 
-        self.radio_outside = tk.Radiobutton(mode_frame, text="Outside", variable=self.video_mode_var, value="outside",
-                                            command=self.toggle_video_mode_visibility, font=("Arial", 11, "bold"),
-                                            state='disabled')
-        self.radio_outside.pack(side="left", padx=5)
-        self.video_widgets_list.append(self.radio_outside)
-
-        # Videospringer-Widgets (state='disabled')
+        # Videospringer-Widgets
         self.label_videospringer = tk.Label(mode_frame, text="Videospringer:", font=("Arial", 11))
         self.entry_videospringer = tk.Entry(mode_frame, font=("Arial", 11),
                                             textvariable=self.videospringer_var)
-        # Videospringer-Variable aus Settings laden, falls vorhanden (wird im Kunde-Modus oft leer sein)
         self.videospringer_var.set(self.config.get_settings().get("videospringer", ""))
 
-        # Button für Video-Modus
-        self.btn_video_mode = tk.Button(mode_frame, text="Bearbeiten", command=self.toggle_edit_video_mode)
-        self.btn_video_mode.pack(side="left", padx=(20, 5))
+        if media_aus_qr:
+            self.btn_video_mode = tk.Button(mode_frame, text=btn_video_text, command=self.toggle_edit_video_mode)
+            self.btn_video_mode.pack(side="left", padx=(20, 5))
+        else:
+            self.btn_video_mode = None
 
         row += 1
 
@@ -310,26 +333,26 @@ class FormFields:
         # Handcam Foto
         self.handcam_foto_var.set(kunde.handcam_foto)
         chk_hf = tk.Checkbutton(self.handcam_frame, text="Handcam Foto", variable=self.handcam_foto_var,
-                                font=("Arial", 11), state='disabled')
+                                font=("Arial", 11), state=media_state)
         chk_hf.grid(row=0, column=0, pady=5, sticky="w")
         self.video_widgets_list.append(chk_hf)
 
         self.handcam_foto_bezahlt_var.set(kunde.ist_bezahlt_handcam_foto)
         chk_hfb = tk.Checkbutton(self.handcam_frame, text="Bezahlt", variable=self.handcam_foto_bezahlt_var,
-                                 font=("Arial", 11), state='disabled')
+                                 font=("Arial", 11), state=media_state)
         chk_hfb.grid(row=0, column=1, padx=10, pady=5, sticky="w")
         self.video_widgets_list.append(chk_hfb)
 
         # Handcam Video
         self.handcam_video_var.set(kunde.handcam_video)
         chk_hv = tk.Checkbutton(self.handcam_frame, text="Handcam Video", variable=self.handcam_video_var,
-                                font=("Arial", 11), state='disabled')
+                                font=("Arial", 11), state=media_state)
         chk_hv.grid(row=1, column=0, pady=5, sticky="w")
         self.video_widgets_list.append(chk_hv)
 
         self.handcam_video_bezahlt_var.set(kunde.ist_bezahlt_handcam_video)
         chk_hvb = tk.Checkbutton(self.handcam_frame, text="Bezahlt", variable=self.handcam_video_bezahlt_var,
-                                 font=("Arial", 11), state='disabled')
+                                 font=("Arial", 11), state=media_state)
         chk_hvb.grid(row=1, column=1, padx=10, pady=5, sticky="w")
         self.video_widgets_list.append(chk_hvb)
 
@@ -340,46 +363,45 @@ class FormFields:
         # Outside Foto
         self.outside_foto_var.set(kunde.outside_foto)
         chk_of = tk.Checkbutton(self.outside_frame, text="Outside Foto", variable=self.outside_foto_var,
-                                font=("Arial", 11), state='disabled')
+                                font=("Arial", 11), state=media_state)
         chk_of.grid(row=0, column=0, pady=5, sticky="w")
         self.video_widgets_list.append(chk_of)
 
         self.outside_foto_bezahlt_var.set(kunde.ist_bezahlt_outside_foto)
         chk_ofb = tk.Checkbutton(self.outside_frame, text="Bezahlt", variable=self.outside_foto_bezahlt_var,
-                                 font=("Arial", 11), state='disabled')
+                                 font=("Arial", 11), state=media_state)
         chk_ofb.grid(row=0, column=1, padx=10, pady=5, sticky="w")
         self.video_widgets_list.append(chk_ofb)
 
         # Outside Video
         self.outside_video_var.set(kunde.outside_video)
         chk_ov = tk.Checkbutton(self.outside_frame, text="Outside Video", variable=self.outside_video_var,
-                                font=("Arial", 11), state='disabled')
+                                font=("Arial", 11), state=media_state)
         chk_ov.grid(row=1, column=0, pady=5, sticky="w")
         self.video_widgets_list.append(chk_ov)
 
         self.outside_video_bezahlt_var.set(kunde.ist_bezahlt_outside_video)
         chk_ovb = tk.Checkbutton(self.outside_frame, text="Bezahlt", variable=self.outside_video_bezahlt_var,
-                                 font=("Arial", 11), state='disabled')
+                                 font=("Arial", 11), state=media_state)
         chk_ovb.grid(row=1, column=1, padx=10, pady=5, sticky="w")
         self.video_widgets_list.append(chk_ovb)
 
         # Setze initialen Status für Video Modus
-        if kunde.outside_foto or kunde.outside_video:
-            self.video_mode_var.set("outside")
-        else:
-            # Fallback, falls weder Handcam noch Outside gebucht, aber QR gescannt wurde
-            # (sollte nicht passieren, aber sicher ist sicher)
-            mode = self.config.get_settings().get("video_mode", "handcam")
-            if not (kunde.handcam_foto or kunde.handcam_video):
-                self.video_mode_var.set(mode)
+        if media_aus_qr:
+            if kunde.outside_foto or kunde.outside_video:
+                self.video_mode_var.set("outside")
+            elif kunde.handcam_foto or kunde.handcam_video:
+                self.video_mode_var.set("handcam")
             else:
-                self.video_mode_var.set("handcam")  # Standard ist Handcam, wenn Handcam gebucht
+                self.video_mode_var.set("handcam")
+        else:
+            self.video_mode_var.set("")
 
         row += 1  # Wichtig: Zeile für die Frames erhöhen
-        self.toggle_video_mode_visibility()  # Rufe auf, um korrekte Sektion anzuzeigen
+        self._update_mode_button_styles()
+        self.toggle_video_mode_visibility()
 
-        # Medien in der Liste können Produkte erfordern, die im QR nicht gebucht waren (z. B. Video dazu).
-        if hasattr(self.app, "drag_drop") and self.app.drag_drop:
+        if media_aus_qr and hasattr(self.app, "drag_drop") and self.app.drag_drop:
             self.auto_check_products(
                 self.app.drag_drop.has_videos(),
                 self.app.drag_drop.has_photos(),
@@ -439,20 +461,12 @@ class FormFields:
         row = self._create_datum_ort_fields(row)
         # --- ENDE VERSCHOBEN ---
 
-        # --- Video Modus Radio-Buttons (normal) ---
+        # --- Video Modus Toggle-Buttons ---
         self.video_widgets_list = []  # Zurücksetzen
         mode_frame = tk.Frame(self.frame)
         mode_frame.grid(row=row, column=0, columnspan=5, pady=5, sticky="w")
 
-        radio_handcam = tk.Radiobutton(mode_frame, text="Handcam", variable=self.video_mode_var, value="handcam",
-                                       command=self.toggle_video_mode_visibility, font=("Arial", 11, "bold"))
-        radio_handcam.pack(side="left", padx=5)
-        self.video_widgets_list.append(radio_handcam)  # Hinzufügen zur Liste (für Kunde-Modus)
-
-        radio_outside = tk.Radiobutton(mode_frame, text="Outside", variable=self.video_mode_var, value="outside",
-                                       command=self.toggle_video_mode_visibility, font=("Arial", 11, "bold"))
-        radio_outside.pack(side="left", padx=5)
-        self.video_widgets_list.append(radio_outside)  # Hinzufügen zur Liste (für Kunde-Modus)
+        self._create_mode_toggle_buttons(mode_frame)
 
         # Videospringer-Widgets (normal)
         self.label_videospringer = tk.Label(mode_frame, text="Videospringer:", font=("Arial", 11))
@@ -522,19 +536,10 @@ class FormFields:
         chk_ovb.grid(row=1, column=1, padx=10, pady=5, sticky="w")
         self.video_widgets_list.append(chk_ovb)  # Hinzufügen
 
-        # Setze initialen Modus (aus geladenen Settings)
-        self.video_mode_var.set(self.config.get_settings().get("video_mode", "handcam"))
+        self.video_mode_var.set("")
         row += 1  # Wichtig: Zeile für die Frames erhöhen
-        self.toggle_video_mode_visibility()  # Rufe auf, um korrekte Sektion anzuzeigen
-
-        # Prüfe auf bereits vorhandene Dateien ---
-        # Dies geschieht, wenn ein QR-Scan fehlschlägt, aber Dateien vorhanden sind.
-        if hasattr(self.app, 'drag_drop') and self.app.drag_drop:
-            has_videos = self.app.drag_drop.has_videos()
-            has_photos = self.app.drag_drop.has_photos()
-
-            # Rufe die bestehende auto_check-Logik auf
-            self.auto_check_products(has_videos, has_photos)
+        self._update_mode_button_styles()
+        self.toggle_video_mode_visibility()
 
     # --- Methoden zum Erstellen gemeinsamer Felder ---
 
@@ -685,15 +690,114 @@ class FormFields:
 
     # --- Hilfs- und Datenmethoden ---
 
+    def _create_mode_toggle_buttons(
+        self,
+        parent,
+        *,
+        lockable: bool = False,
+        initial_state: str = 'normal',
+    ) -> None:
+        """Erstellt Handcam/Outside Toggle-Buttons mit einheitlichem Styling."""
+        self._mode_toggle_rail = tk.Frame(parent, bg=_MODE_BTN_BORDER, padx=1, pady=1)
+        self._mode_toggle_rail.pack(side="left", padx=5)
+
+        inner = tk.Frame(self._mode_toggle_rail, bg=_MODE_BTN_IDLE_BG)
+        inner.pack(fill="both", expand=True)
+
+        self.btn_mode_handcam = tk.Button(
+            inner, text="Handcam", font=("Arial", 11, "bold"), width=10,
+            cursor="hand2", padx=16, pady=6, bd=0,
+            command=lambda: self._select_video_mode("handcam"),
+        )
+        self.btn_mode_handcam.pack(side="left")
+
+        separator = tk.Frame(inner, bg=_MODE_BTN_BORDER, width=1)
+        separator.pack(side="left", fill="y")
+        separator.pack_propagate(False)
+
+        self.btn_mode_outside = tk.Button(
+            inner, text="Outside", font=("Arial", 11, "bold"), width=10,
+            cursor="hand2", padx=16, pady=6, bd=0,
+            command=lambda: self._select_video_mode("outside"),
+        )
+        self.btn_mode_outside.pack(side="left")
+
+        if lockable:
+            self.video_widgets_list.append(self.btn_mode_handcam)
+            self.video_widgets_list.append(self.btn_mode_outside)
+            self.btn_mode_handcam.config(state=initial_state)
+            self.btn_mode_outside.config(state=initial_state)
+
+        self._update_mode_button_styles()
+
+    def _select_video_mode(self, mode: str):
+        """Wählt Handcam/Outside per Toggle-Button."""
+        self.video_mode_var.set(mode)
+        self._update_mode_button_styles()
+        self.toggle_video_mode_visibility()
+        if hasattr(self.app, "drag_drop") and self.app.drag_drop:
+            self.auto_check_products(
+                self.app.drag_drop.has_videos(),
+                self.app.drag_drop.has_photos(),
+            )
+
+    def _apply_mode_button_style(self, btn, *, selected: bool, on_rail: bool) -> None:
+        """Setzt das einheitliche Styling für einen Modus-Toggle-Button."""
+        common = dict(
+            relief="flat",
+            bd=0,
+            highlightbackground=_MODE_BTN_BORDER,
+            highlightthickness=1,
+        )
+        if selected:
+            btn.config(
+                **common,
+                bg=_MODE_BTN_SELECTED_BG,
+                fg=_MODE_BTN_SELECTED_FG,
+                activebackground=_MODE_BTN_SELECTED_ACTIVE_BG,
+                activeforeground=_MODE_BTN_SELECTED_FG,
+            )
+        elif on_rail:
+            btn.config(
+                **common,
+                bg=_MODE_BTN_IDLE_BG,
+                fg=_MODE_BTN_IDLE_FG,
+                activebackground=_MODE_BTN_IDLE_ACTIVE_BG,
+                activeforeground=_MODE_BTN_SELECTED_BG,
+            )
+        else:
+            btn.config(
+                **common,
+                bg=_MODE_BTN_IDLE_BG,
+                fg=_MODE_BTN_MUTED_FG,
+                activebackground=_MODE_BTN_MUTED_ACTIVE_BG,
+                activeforeground=_MODE_BTN_SELECTED_BG,
+            )
+
+    def _update_mode_button_styles(self):
+        """Hebt den aktiven Modus-Toggle-Button hervor."""
+        if not self.btn_mode_handcam or not self.btn_mode_outside:
+            return
+
+        mode = self.video_mode_var.get()
+        for btn, value in (
+            (self.btn_mode_handcam, "handcam"),
+            (self.btn_mode_outside, "outside"),
+        ):
+            self._apply_mode_button_style(
+                btn,
+                selected=(mode == value),
+                on_rail=(not mode),
+            )
+
     def toggle_video_mode_visibility(self):
-        """Zeigt/versteckt Handcam/Outside Frames basierend auf dem Radio-Button."""
+        """Zeigt/versteckt Handcam/Outside Frames basierend auf dem gewählten Modus."""
         mode = self.video_mode_var.get()
         if mode == "handcam":
             if self.handcam_frame:
                 self.handcam_frame.grid()
             if self.outside_frame:
                 self.outside_frame.grid_remove()
-            # Videospringer ausblenden (mit pack_forget)
             if self.label_videospringer:
                 self.label_videospringer.pack_forget()
             if self.entry_videospringer:
@@ -703,12 +807,19 @@ class FormFields:
                 self.handcam_frame.grid_remove()
             if self.outside_frame:
                 self.outside_frame.grid()
-            # Videospringer einblenden (mit pack)
             if self.label_videospringer:
-                # Packt rechts von den Radio-Buttons
                 self.label_videospringer.pack(side="left", padx=(15, 5))
             if self.entry_videospringer:
                 self.entry_videospringer.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        else:
+            if self.handcam_frame:
+                self.handcam_frame.grid_remove()
+            if self.outside_frame:
+                self.outside_frame.grid_remove()
+            if self.label_videospringer:
+                self.label_videospringer.pack_forget()
+            if self.entry_videospringer:
+                self.entry_videospringer.pack_forget()
 
     # --- NEUE METHODEN ZUM UMSCHALTEN DES BEARBEITEN-STATUS ---
 
@@ -765,7 +876,7 @@ class FormFields:
             print("Fehler beim Umschalten des Widget-Status (Gast).")
 
     def toggle_edit_video_mode(self):
-        """Schaltet alle Radio-Buttons und Checkboxen für den Video-Modus um."""
+        """Schaltet Modus-Toggle-Buttons und Produkt-Checkboxen um."""
         if not self.btn_video_mode:
             return
 
@@ -779,10 +890,11 @@ class FormFields:
 
             self.btn_video_mode.config(text=new_text)
 
-            # Alle Radios und Checkboxen umschalten
             for widget in self.video_widgets_list:
-                if widget and widget.winfo_exists():  # Prüfen ob Widget noch existiert
+                if widget and widget.winfo_exists():
                     widget.config(state=new_state)
+
+            self._update_mode_button_styles()
 
         except tk.TclError:
             print("Fehler beim Umschalten des Video-Modus-Status.")
@@ -796,7 +908,7 @@ class FormFields:
         self.gast_name_var.set(settings.get("gast_name", ""))
         self.tandemmaster_var.set(settings.get("tandemmaster", ""))
         self.videospringer_var.set(settings.get("videospringer", ""))
-        self.video_mode_var.set(settings.get("video_mode", "handcam"))
+        self.video_mode_var.set("")
 
     def get_form_data(self):
         """Sammelt Daten aus dem *aktuell* angezeigten Formular."""
@@ -839,21 +951,28 @@ class FormFields:
             data["ist_bezahlt_handcam_foto"] = self.handcam_foto_bezahlt_var.get()
             data["handcam_video"] = self.handcam_video_var.get()
             data["ist_bezahlt_handcam_video"] = self.handcam_video_bezahlt_var.get()
-            # Inaktive auf False setzen
             data["outside_foto"] = False
             data["ist_bezahlt_outside_foto"] = False
             data["outside_video"] = False
             data["ist_bezahlt_outside_video"] = False
-        else:  # mode == "outside"
+        elif mode == "outside":
             data["outside_foto"] = self.outside_foto_var.get()
             data["ist_bezahlt_outside_foto"] = self.outside_foto_bezahlt_var.get()
             data["outside_video"] = self.outside_video_var.get()
             data["ist_bezahlt_outside_video"] = self.outside_video_bezahlt_var.get()
-            # Inaktive auf False setzen
             data["handcam_foto"] = False
             data["ist_bezahlt_handcam_foto"] = False
             data["handcam_video"] = False
             data["ist_bezahlt_handcam_video"] = False
+        else:
+            data["handcam_foto"] = False
+            data["ist_bezahlt_handcam_foto"] = False
+            data["handcam_video"] = False
+            data["ist_bezahlt_handcam_video"] = False
+            data["outside_foto"] = False
+            data["ist_bezahlt_outside_foto"] = False
+            data["outside_video"] = False
+            data["ist_bezahlt_outside_video"] = False
 
         return data
 
@@ -865,7 +984,9 @@ class FormFields:
         current_settings_data["ort"] = self.ort_var.get()
         current_settings_data["gast_name"] = self.gast_name_var.get()
         current_settings_data["tandemmaster"] = self.tandemmaster_var.get()
-        current_settings_data["video_mode"] = self.video_mode_var.get()
+        mode = self.video_mode_var.get()
+        if mode:
+            current_settings_data["video_mode"] = mode
         current_settings_data["videospringer"] = self.videospringer_var.get()
 
         return current_settings_data

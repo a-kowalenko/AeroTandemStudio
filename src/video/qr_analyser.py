@@ -31,7 +31,11 @@ def _parse_kunde_aus_qr_string(qr_daten_str: str) -> Kunde:
 
     daten_dict = json.loads(payload_str)
 
-    media_code = str(daten_dict.get('media', 'none'))
+    raw_media = daten_dict.get('media', 'none')
+    if raw_media is None or str(raw_media).strip() == '':
+        media_code = 'none'
+    else:
+        media_code = str(raw_media).strip()
     media_mapping = {
         'none': (False, False, False, False),
         'hc_f': (True, False, False, False),

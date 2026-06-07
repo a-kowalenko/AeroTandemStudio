@@ -1138,7 +1138,7 @@ class VideoProcessor:
             # Speichere MARKER Datei im Ausgabeordner (VOR dem Server-Upload!)
             self._update_status("Schreibe Abschluss-Datei (_fertig.txt)...")
             marker_path = os.path.join(base_output_dir, "_fertig.txt")
-            with open(marker_path, 'w') as marker_file:
+            with open(marker_path, 'w', encoding='utf-8') as marker_file:
                 try:
                     marker_type = "Outside" if outside_video_mode else "Handcam"
                     form_mode = form_data.get("form_mode")

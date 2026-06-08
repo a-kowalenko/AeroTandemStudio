@@ -28,6 +28,8 @@ class ProgressHandler:
         self._macro_total = 7
         self._lane_pct = [0.0, 0.0]
         self._lane_seen = [False, False]
+        self._upload_seen = False
+        self._upload_pct = 0.0
         self._detail_popover = None
         self._detail_built = False
         self._popover_inner = None
@@ -222,7 +224,9 @@ class ProgressHandler:
             return
         step = self._step_pct
         active = [self._lane_pct[i] for i in range(2) if self._lane_seen[i]]
-        if active:
+        if self._upload_seen:
+            g = self._step_pct
+        elif active:
             enc_mean = sum(active) / len(active)
             w = self.STEP_WEIGHT_WHEN_ENCODING
             g = w * step + (1.0 - w) * enc_mean
@@ -315,6 +319,16 @@ class ProgressHandler:
             return
         self.detail_step_bar["value"] = self._step_pct
         self.eta_label.config(text=self._macro_step_label())
+        if self._upload_seen:
+            self.enc_title_labels[0].config(text="Server-Upload")
+            self.enc_progress_bars[0]["value"] = self._upload_pct
+            self.enc_eta_labels[0].config(text=f"{math.floor(self._upload_pct)}%")
+            for i in range(1, 2):
+                self.enc_progress_bars[i]["value"] = 0
+                self.enc_eta_labels[i].config(text="")
+                self.enc_detail_labels[i].config(text="")
+            self._schedule_popover_geometry_refresh()
+            return
         for i in range(2):
             self.enc_progress_bars[i]["value"] = self._lane_pct[i] if self._lane_seen[i] else 0
             if self._lane_seen[i]:
@@ -505,6 +519,71 @@ class ProgressHandler:
             except tk.TclError:
                 pass
 
+    def update_upload_progress(
+        self,
+        percent=0.0,
+        current_file=0,
+        total_files=0,
+        current_bytes=0,
+        total_bytes=0,
+        filename="",
+    ):
+        self._upload_seen = True
+        self._upload_pct = float(percent)
+
+        if self.second_parent is None:
+            if percent is not None:
+                self.progress_bar["value"] = percent
+            detail_parts = [f"Server-Upload {math.floor(percent)}%"]
+            if total_files > 0 and current_file > 0:
+                detail_parts.append(f"Datei {current_file}/{total_files}")
+            if total_bytes > 0:
+                detail_parts.append(
+                    f"{current_bytes / (1024 * 1024):.0f}/{total_bytes / (1024 * 1024):.0f} MB"
+                )
+            if filename:
+                detail_parts.append(filename)
+            self.eta_label.config(text=detail_parts[0])
+            self.encoding_details_label.config(text=" · ".join(detail_parts[1:]))
+            self.parent.update_idletasks()
+            return
+
+        self._lane_seen = [False, False]
+        self._lane_pct = [0.0, 0.0]
+        self._encoding_lane1_visible = False
+
+        if self._detail_ui_alive():
+            self.enc_title_labels[0].config(text="Server-Upload")
+            self.enc_progress_bars[0]["value"] = percent
+            if total_files > 0 and current_file > 0:
+                self.enc_eta_labels[0].config(text=f"{math.floor(percent)}% · {current_file}/{total_files}")
+            else:
+                self.enc_eta_labels[0].config(text=f"{math.floor(percent)}%")
+
+            detail_parts = []
+            if total_bytes > 0:
+                detail_parts.append(
+                    f"{current_bytes / (1024 * 1024):.0f}/{total_bytes / (1024 * 1024):.0f} MB"
+                )
+            if filename:
+                detail_parts.append(filename)
+            self.enc_detail_labels[0].config(text=" · ".join(detail_parts) if detail_parts else "")
+
+            if len(self.enc_blocks) > 1 and self._encoding_lane1_visible:
+                self.enc_blocks[1].pack_forget()
+                self._encoding_lane1_visible = False
+
+        self._refresh_gesamt()
+        self.gesamt_eta_label.config(text=f"{math.floor(percent)}%")
+        self.parent.update_idletasks()
+
+        if self._detail_popover is not None:
+            try:
+                if self._detail_popover.winfo_exists():
+                    self._schedule_popover_geometry_refresh()
+            except tk.TclError:
+                pass
+
     def _format_time(self, seconds):
         minutes = int(seconds // 60)
         secs = int(seconds % 60)
@@ -528,6 +607,8 @@ class ProgressHandler:
             self._macro_total = 7
             self._lane_pct = [0.0, 0.0]
             self._lane_seen = [False, False]
+            self._upload_seen = False
+            self._upload_pct = 0.0
 
         self.progress_bar["value"] = 0
         if self.second_parent is None:

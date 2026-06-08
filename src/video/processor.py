@@ -25,11 +25,19 @@ from src.utils.hardware_acceleration import HardwareAccelerationDetector
 
 
 class VideoProcessor:
-    def __init__(self, progress_callback=None, status_callback=None, config_manager=None, encoding_progress_callback=None):
+    def __init__(
+        self,
+        progress_callback=None,
+        status_callback=None,
+        config_manager=None,
+        encoding_progress_callback=None,
+        upload_progress_callback=None,
+    ):
         self.hintergrund_path = HINTERGRUND_PATH
         self.progress_callback = progress_callback
         self.status_callback = status_callback
-        self.encoding_progress_callback = encoding_progress_callback  # NEU: Callback für Live-Encoding-Fortschritt
+        self.encoding_progress_callback = encoding_progress_callback
+        self.upload_progress_callback = upload_progress_callback
         self.cancel_event = threading.Event()
         self.logger = CancellableProgressBarLogger(self.cancel_event)
         self.config_manager = config_manager  # Config Manager speichern
@@ -1198,20 +1206,26 @@ class VideoProcessor:
 
             # Jetzt Server-Upload durchführen (inkl. _fertig.txt)
             step_server = 12 if create_watermark_version else 11
-            self._update_progress(step_server, TOTAL_STEPS)
+            final_step = 13 if create_watermark_version else 12
             server_uploaded = False
             if upload_to_server:
+                self._update_progress(step_server, TOTAL_STEPS)
                 self._update_status("Lade Verzeichnis auf Server hoch...")
-                # Wir laden das gesamte Basis-Verzeichnis hoch (inkl. _fertig.txt)
-                success, message, server_path = self._upload_to_server(base_output_dir)
+                success, message, server_path = self._upload_to_server(
+                    base_output_dir,
+                    step_server=step_server,
+                    final_step=final_step,
+                    total_steps=TOTAL_STEPS,
+                )
                 server_uploaded = success
                 if success:
                     self._update_status(f"Server-Upload abgeschlossen ({message})")
                 else:
                     self._update_status(f"Server-Upload fehlgeschlagen ({message})")
+            else:
+                self._update_progress(step_server, TOTAL_STEPS)
 
             # --- ABSCHLUSS (letzter Schritt) ---
-            final_step = 13 if create_watermark_version else 12
             self._update_progress(final_step, TOTAL_STEPS)
 
             # Erstelle strukturierte Informationen über erstellte Elemente
@@ -2174,27 +2188,66 @@ class VideoProcessor:
 
         return full_output_path
 
-    def _upload_to_server(self, local_directory_path):
+    def _upload_to_server(self, local_directory_path, *, step_server, final_step, total_steps):
         """Lädt das erstellte Verzeichnis auf den Server hoch"""
         try:
             from ..utils.file_utils import upload_to_server_simple
-            # Hinzufügen einer Prüfung vor dem langen Upload-Prozess
+
             self._check_for_cancellation()
 
-            # Übergebe das Verzeichnis und config_manager an die Upload-Funktion
+            def on_upload_progress(
+                *,
+                percent,
+                current_file,
+                total_files,
+                current_bytes,
+                total_bytes,
+                filename,
+            ):
+                self._check_for_cancellation()
+                upload_span = max(final_step - step_server, 0.001)
+                fractional_step = step_server + (percent / 100.0) * upload_span
+                self._update_progress(fractional_step, total_steps)
+
+                if self.upload_progress_callback:
+                    self.upload_progress_callback(
+                        percent=percent,
+                        current_file=current_file,
+                        total_files=total_files,
+                        current_bytes=current_bytes,
+                        total_bytes=total_bytes,
+                        filename=filename,
+                    )
+
+                status_parts = [f"Server-Upload {percent:.0f}%"]
+                if total_files > 0 and current_file > 0:
+                    status_parts.append(f"Datei {current_file}/{total_files}")
+                if total_bytes > 0:
+                    current_mb = current_bytes / (1024 * 1024)
+                    total_mb = total_bytes / (1024 * 1024)
+                    status_parts.append(f"{current_mb:.0f}/{total_mb:.0f} MB")
+                if filename:
+                    status_parts.append(filename)
+                self._update_status(" · ".join(status_parts))
+
             success, message, server_path = upload_to_server_simple(
                 local_directory_path,
-                self.config_manager
+                self.config_manager,
+                progress_callback=on_upload_progress,
+                cancel_check=self.cancel_event.is_set,
             )
+
+            if message == "Upload abgebrochen":
+                raise CancellationError(message)
 
             if success:
                 print(f"Server Upload erfolgreich: {server_path}")
             else:
                 print(f"Server Upload fehlgeschlagen: {message}")
             return success, message, server_path
+        except CancellationError:
+            raise
         except Exception as e:
-            if isinstance(e, CancellationError):
-                raise e
             error_msg = f"Upload Fehler: {str(e)}"
             print(error_msg)
             return False, error_msg, ""

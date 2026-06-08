@@ -1923,8 +1923,9 @@ class VideoGeneratorApp:
         self.video_processor = VideoProcessor(
             progress_callback=self._update_progress,
             status_callback=self._handle_status_update,
-            encoding_progress_callback=self._update_encoding_progress,  # NEU: Encoding-Fortschritt
-            config_manager=self.config  # Config Manager übergeben
+            encoding_progress_callback=self._update_encoding_progress,
+            upload_progress_callback=self._update_upload_progress,
+            config_manager=self.config
         )
 
         payload = {
@@ -1995,6 +1996,28 @@ class VideoGeneratorApp:
                 eta,
                 task_name,
             )
+
+    def _update_upload_progress(
+        self,
+        *,
+        percent=0.0,
+        current_file=0,
+        total_files=0,
+        current_bytes=0,
+        total_bytes=0,
+        filename="",
+    ):
+        """Callback für Live-Server-Upload-Fortschritt"""
+        self.root.after(
+            0,
+            self.progress_handler.update_upload_progress,
+            percent,
+            current_file,
+            total_files,
+            current_bytes,
+            total_bytes,
+            filename,
+        )
 
     def _handle_status_update(self, status_type, message):
         """Callback für Statusupdates"""

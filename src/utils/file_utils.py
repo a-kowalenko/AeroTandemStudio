@@ -13,9 +13,12 @@ import re
 import shutil
 import subprocess
 import platform
-from typing import Tuple, Optional
+from typing import Callable, List, Optional, Tuple
 
 from src.utils.constants import SUBPROCESS_CREATE_NO_WINDOW
+
+UploadProgressCallback = Callable[..., None]
+CancelCheck = Callable[[], bool]
 
 
 # ============================================================================
@@ -139,10 +142,161 @@ def _get_credentials(settings: dict) -> Tuple[str, str]:
 
 
 # ============================================================================
+# UPLOAD PROGRESS HELPERS
+# ============================================================================
+
+def _collect_upload_files(local_directory: str) -> List[Tuple[str, str, int]]:
+    """Listet alle Dateien für einen Upload (relativ, absolut, Größe in Bytes)."""
+    files: List[Tuple[str, str, int]] = []
+    for root, _dirs, filenames in os.walk(local_directory):
+        for name in sorted(filenames):
+            abs_path = os.path.join(root, name)
+            rel_path = os.path.relpath(abs_path, local_directory)
+            try:
+                size = os.path.getsize(abs_path)
+            except OSError:
+                size = 0
+            files.append((rel_path, abs_path, size))
+    return files
+
+
+def _emit_upload_progress(
+    progress_callback: Optional[UploadProgressCallback],
+    *,
+    percent: float,
+    current_file: int,
+    total_files: int,
+    current_bytes: int,
+    total_bytes: int,
+    filename: str,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        percent=min(100.0, max(0.0, float(percent))),
+        current_file=current_file,
+        total_files=total_files,
+        current_bytes=current_bytes,
+        total_bytes=total_bytes,
+        filename=filename,
+    )
+
+
+def _copy_file_with_progress(
+    src_path: str,
+    dst_path: str,
+    *,
+    chunk_size: int = 1024 * 1024,
+    on_chunk: Optional[Callable[[int, int], None]] = None,
+) -> None:
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    file_size = os.path.getsize(src_path)
+    if file_size == 0:
+        with open(dst_path, "wb"):
+            pass
+        if on_chunk:
+            on_chunk(0, 0)
+        return
+
+    copied_in_file = 0
+    with open(src_path, "rb") as src_file, open(dst_path, "wb") as dst_file:
+        while True:
+            chunk = src_file.read(chunk_size)
+            if not chunk:
+                break
+            dst_file.write(chunk)
+            copied_in_file += len(chunk)
+            if on_chunk:
+                on_chunk(copied_in_file, file_size)
+
+
+def _copy_directory_with_progress(
+    local_directory: str,
+    target_path: str,
+    *,
+    progress_callback: Optional[UploadProgressCallback] = None,
+    cancel_check: Optional[CancelCheck] = None,
+) -> Tuple[bool, str]:
+    files = _collect_upload_files(local_directory)
+    if not files:
+        return False, f"Lokales Verzeichnis ist leer: {local_directory}"
+
+    total_files = len(files)
+    total_bytes = sum(size for _, _, size in files)
+    copied_bytes = 0
+
+    _emit_upload_progress(
+        progress_callback,
+        percent=0.0,
+        current_file=0,
+        total_files=total_files,
+        current_bytes=0,
+        total_bytes=total_bytes,
+        filename="",
+    )
+
+    for file_index, (rel_path, abs_path, file_size) in enumerate(files, start=1):
+        if cancel_check and cancel_check():
+            return False, "Upload abgebrochen"
+
+        dst_path = os.path.join(target_path, rel_path)
+        bytes_before_file = copied_bytes
+
+        def on_chunk(chunk_copied: int, _file_total: int) -> None:
+            current_total = bytes_before_file + chunk_copied
+            if total_bytes > 0:
+                percent = (current_total / total_bytes) * 100.0
+            else:
+                percent = (file_index - 1) / total_files * 100.0
+            _emit_upload_progress(
+                progress_callback,
+                percent=percent,
+                current_file=file_index,
+                total_files=total_files,
+                current_bytes=current_total,
+                total_bytes=total_bytes,
+                filename=os.path.basename(abs_path),
+            )
+
+        _copy_file_with_progress(abs_path, dst_path, on_chunk=on_chunk if file_size > 0 else None)
+        copied_bytes += file_size
+
+        if total_bytes > 0:
+            percent = (copied_bytes / total_bytes) * 100.0
+        else:
+            percent = (file_index / total_files) * 100.0
+        _emit_upload_progress(
+            progress_callback,
+            percent=percent,
+            current_file=file_index,
+            total_files=total_files,
+            current_bytes=copied_bytes,
+            total_bytes=total_bytes,
+            filename=os.path.basename(abs_path),
+        )
+
+    _emit_upload_progress(
+        progress_callback,
+        percent=100.0,
+        current_file=total_files,
+        total_files=total_files,
+        current_bytes=total_bytes,
+        total_bytes=total_bytes,
+        filename="",
+    )
+    return True, f"Erfolgreich auf Server kopiert: {target_path}"
+
+
+# ============================================================================
 # MAIN UPLOAD FUNCTION
 # ============================================================================
 
-def upload_to_server_simple(local_directory: str, config_manager) -> Tuple[bool, str, str]:
+def upload_to_server_simple(
+    local_directory: str,
+    config_manager,
+    progress_callback: Optional[UploadProgressCallback] = None,
+    cancel_check: Optional[CancelCheck] = None,
+) -> Tuple[bool, str, str]:
     r"""
     Simple upload method using native tools.
 
@@ -176,14 +330,31 @@ def upload_to_server_simple(local_directory: str, config_manager) -> Tuple[bool,
         # If it's a local path, use direct copying
         if not is_network:
             print(f"Lokaler Pfad erkannt: {normalized_path}")
-            return upload_to_server_python(local_directory, server_url=normalized_path)
+            return upload_to_server_python(
+                local_directory,
+                server_url=normalized_path,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
 
         # For Windows: Use net use and robocopy (better than xcopy)
         if platform.system() == "Windows":
-            return _upload_windows_robocopy(local_directory, normalized_path, settings)
+            return _upload_windows_robocopy(
+                local_directory,
+                normalized_path,
+                settings,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
         else:
             # For other systems: Use smbclient if available
-            return _upload_unix_smbclient(local_directory, normalized_path, settings)
+            return _upload_unix_smbclient(
+                local_directory,
+                normalized_path,
+                settings,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
 
     except Exception as e:
         return False, f"Upload Fehler: {str(e)}", ""
@@ -193,7 +364,14 @@ def upload_to_server_simple(local_directory: str, config_manager) -> Tuple[bool,
 # WINDOWS UPLOAD FUNCTIONS
 # ============================================================================
 
-def _upload_windows_robocopy(local_directory: str, server_path: str, settings: dict) -> Tuple[bool, str, str]:
+def _upload_windows_robocopy(
+    local_directory: str,
+    server_path: str,
+    settings: dict,
+    *,
+    progress_callback: Optional[UploadProgressCallback] = None,
+    cancel_check: Optional[CancelCheck] = None,
+) -> Tuple[bool, str, str]:
     r"""
     Upload for Windows using robocopy (more reliable than xcopy).
 
@@ -228,17 +406,35 @@ def _upload_windows_robocopy(local_directory: str, server_path: str, settings: d
         if is_local_path:
             # Local path - use direct Python copying
             print(f"Lokaler Pfad erkannt, verwende direktes Kopieren...")
-            return upload_to_server_python(local_directory, server_url=server_path)
+            return upload_to_server_python(
+                local_directory,
+                server_url=server_path,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
 
         # Network path - always use credentials for network shares
         # Even if server is accessible, we need proper authentication to create directories
-        return _upload_windows_with_credentials(local_directory, server_path, settings)
+        return _upload_windows_with_credentials(
+            local_directory,
+            server_path,
+            settings,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+        )
 
     except Exception as e:
         return False, f"Windows Upload Fehler: {str(e)}", ""
 
 
-def _upload_windows_with_credentials(local_directory: str, server_path: str, settings: dict) -> Tuple[bool, str, str]:
+def _upload_windows_with_credentials(
+    local_directory: str,
+    server_path: str,
+    settings: dict,
+    *,
+    progress_callback: Optional[UploadProgressCallback] = None,
+    cancel_check: Optional[CancelCheck] = None,
+) -> Tuple[bool, str, str]:
     r"""
     Upload for Windows with explicit credentials.
 
@@ -433,8 +629,20 @@ def _upload_windows_with_credentials(local_directory: str, server_path: str, set
         except Exception as e:
             return False, f"Fehler bei Verzeichniserstellung: {target_path} - {str(e)}", ""
 
-        # IMPORTANT: robocopy MUST be executed here, BEFORE finally disconnects!
+        # IMPORTANT: copy MUST be executed here, BEFORE finally disconnects!
         try:
+            if progress_callback is not None or cancel_check is not None:
+                print(f"Kopiere Dateien mit Fortschrittsanzeige...")
+                success, message = _copy_directory_with_progress(
+                    local_directory,
+                    target_path,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                )
+                if success:
+                    return True, message, target_path
+                return False, message, ""
+
             print(f"Kopiere Dateien mit robocopy...")
 
             # robocopy command with optimal parameters for media upload
@@ -571,7 +779,14 @@ def _execute_robocopy(local_directory: str, target_path: str) -> Tuple[bool, str
 # UNIX/LINUX/MACOS UPLOAD FUNCTIONS
 # ============================================================================
 
-def _upload_unix_smbclient(local_directory: str, server_url: str, settings: dict) -> Tuple[bool, str, str]:
+def _upload_unix_smbclient(
+    local_directory: str,
+    server_url: str,
+    settings: dict,
+    *,
+    progress_callback: Optional[UploadProgressCallback] = None,
+    cancel_check: Optional[CancelCheck] = None,
+) -> Tuple[bool, str, str]:
     """
     Upload for macOS and Linux systems using smbclient.
 
@@ -593,7 +808,12 @@ def _upload_unix_smbclient(local_directory: str, server_url: str, settings: dict
         # If it's a local path, use direct copying
         if not is_network:
             print(f"Lokaler Pfad erkannt (nicht-Windows), verwende direktes Kopieren...")
-            return upload_to_server_python(local_directory, server_url=normalized_path)
+            return upload_to_server_python(
+                local_directory,
+                server_url=normalized_path,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
 
         # Check if smbclient is available
         result = subprocess.run(
@@ -617,14 +837,27 @@ def _upload_unix_smbclient(local_directory: str, server_url: str, settings: dict
 
         server, share = parts
 
-        # Use smbclient with credentials
-        return _upload_smbclient_with_auth(local_directory, server, share, settings)
+        # Use smbclient with credentials (no live progress available)
+        return _upload_smbclient_with_auth(
+            local_directory,
+            server,
+            share,
+            settings,
+            progress_callback=progress_callback,
+        )
 
     except Exception as e:
         return False, f"Upload Fehler (nicht-Windows): {str(e)}", ""
 
 
-def _upload_smbclient_with_auth(local_directory: str, server: str, share: str, settings: dict) -> Tuple[bool, str, str]:
+def _upload_smbclient_with_auth(
+    local_directory: str,
+    server: str,
+    share: str,
+    settings: dict,
+    *,
+    progress_callback: Optional[UploadProgressCallback] = None,
+) -> Tuple[bool, str, str]:
     """
     Upload using smbclient with authentication.
 
@@ -639,6 +872,19 @@ def _upload_smbclient_with_auth(local_directory: str, server: str, share: str, s
     """
     try:
         dir_name = os.path.basename(local_directory)
+        files = _collect_upload_files(local_directory)
+        total_files = len(files)
+        total_bytes = sum(size for _, _, size in files)
+
+        _emit_upload_progress(
+            progress_callback,
+            percent=0.0,
+            current_file=0,
+            total_files=total_files,
+            current_bytes=0,
+            total_bytes=total_bytes,
+            filename="",
+        )
 
         # Get credentials from settings
         login, password = _get_credentials(settings)
@@ -672,6 +918,15 @@ def _upload_smbclient_with_auth(local_directory: str, server: str, share: str, s
 
         if result.returncode == 0:
             target_path = f"//{server}/{share}/{dir_name}"
+            _emit_upload_progress(
+                progress_callback,
+                percent=100.0,
+                current_file=total_files,
+                total_files=total_files,
+                current_bytes=total_bytes,
+                total_bytes=total_bytes,
+                filename="",
+            )
             return True, f"Erfolgreich auf Server kopiert: {target_path}", target_path
         else:
             error_msg = result.stderr if result.stderr else result.stdout
@@ -695,7 +950,13 @@ def _upload_smbclient_with_auth(local_directory: str, server: str, share: str, s
 # PYTHON-BASED UPLOAD (FALLBACK)
 # ============================================================================
 
-def upload_to_server_python(local_directory: str, server_url: str = "smb://169.254.169.254/aktuell") -> Tuple[bool, str, str]:
+def upload_to_server_python(
+    local_directory: str,
+    server_url: str = "smb://169.254.169.254/aktuell",
+    *,
+    progress_callback: Optional[UploadProgressCallback] = None,
+    cancel_check: Optional[CancelCheck] = None,
+) -> Tuple[bool, str, str]:
     """
     Pure Python solution without external tools (Windows only).
 
@@ -718,9 +979,20 @@ def upload_to_server_python(local_directory: str, server_url: str = "smb://169.2
         if not os.path.exists(server_path):
             return False, f"Server nicht erreichbar: {server_path}", ""
 
-        # Copy with shutil
+        # Copy with shutil or progress-aware copy
         if os.path.exists(target_path):
             shutil.rmtree(target_path)  # Delete existing
+
+        if progress_callback is not None or cancel_check is not None:
+            success, message = _copy_directory_with_progress(
+                local_directory,
+                target_path,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
+            if success:
+                return True, message, target_path
+            return False, message, ""
 
         shutil.copytree(local_directory, target_path)
         return True, f"Erfolgreich auf Server kopiert: {target_path}", target_path

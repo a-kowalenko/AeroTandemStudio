@@ -49,15 +49,48 @@ def stream_format_values_equivalent(key: str, val_a, val_b, vcodec: str) -> bool
     return False
 
 
+def is_hevc_codec(codec: str) -> bool:
+    return normalize_codec_name(codec) == "hevc"
+
+
+def normalize_codec_name(codec: str) -> str:
+    name = (codec or "h264").lower()
+    if name in ("hevc", "h265"):
+        return "hevc"
+    return name
+
+
+def append_hevc_splice_encode_params(params: list[str], encoder: str, fps: int = 30) -> list[str]:
+    """HEVC-Parameter für splice-taugliche Clips (wie Intro-Encoding)."""
+    encoder = (encoder or "").lower()
+    fps = max(1, int(fps))
+    params.extend(["-bf", "0", "-fps_mode", "cfr", "-tag:v", "hvc1"])
+    if encoder == "libx265":
+        params.extend([
+            "-x265-params",
+            f"keyint={fps}:min-keyint={fps}:scenecut=0:open-gop=0:"
+            f"repeat-headers=1:aud=1:bframes=0",
+        ])
+    elif encoder.endswith("_nvenc"):
+        params.extend(["-no-scenecut", "1"])
+    elif encoder.endswith("_qsv"):
+        params.extend(["-look_ahead", "0", "-forced_idr", "1"])
+    return params
+
+
 def build_software_quality_params(encoder: str, crf: int, codec: str = "h264") -> list[str]:
     crf = clamp_crf(crf)
     encoder = (encoder or "libx264").lower()
-    params = ["-g", "30", "-keyint_min", "30"]
+    hevc = is_hevc_codec(codec)
+    params = ["-g", "30", "-keyint_min", "30", "-sc_threshold", "0"]
     if encoder == "libx264":
         params.extend(["-preset", "medium", "-crf", str(crf)])
+        if not hevc:
+            params.extend(["-x264-params", "repeat-headers=1:nal-hrd=none:open-gop=0"])
     elif encoder == "libx265":
         hevc_crf = min(51, crf + 2)
         params.extend(["-preset", "medium", "-crf", str(hevc_crf)])
+        append_hevc_splice_encode_params(params, encoder, fps=30)
     elif encoder == "libvpx-vp9":
         params.extend(["-deadline", "good", "-cpu-used", "2", "-b:v", "0", "-crf", "31"])
     elif encoder in ("libaom-av1", "libsvtav1"):
@@ -77,11 +110,14 @@ def build_hw_quality_params(hw_type: str | None, encoder: str | None, crf: int, 
 
     if hw == "nvidia" or "nvenc" in enc:
         cq = min(51, crf + 2) if hevc else crf
-        return ["-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", str(cq), "-b:v", "0"] + gop
+        params = ["-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", str(cq), "-b:v", "0"] + gop
+        if hevc:
+            append_hevc_splice_encode_params(params, enc, fps=30)
+        return params
 
     if hw == "amd" or "amf" in enc:
         qp = min(51, crf + 2) if hevc else crf
-        return [
+        params = [
             "-usage", "transcoding",
             "-quality", "quality",
             "-rc", "cqp",
@@ -89,10 +125,16 @@ def build_hw_quality_params(hw_type: str | None, encoder: str | None, crf: int, 
             "-qp_p", str(qp),
             "-qp_b", str(qp),
         ] + gop
+        if hevc:
+            append_hevc_splice_encode_params(params, enc, fps=30)
+        return params
 
     if hw == "intel" or "qsv" in enc:
         q = min(51, crf + 2) if hevc else crf
-        return ["-global_quality", str(q), "-preset", "medium", "-look_ahead", "0", "-bf", "0"] + gop
+        params = ["-global_quality", str(q), "-preset", "medium", "-look_ahead", "0", "-bf", "0"] + gop
+        if hevc:
+            append_hevc_splice_encode_params(params, enc, fps=30)
+        return params
 
     if hw == "videotoolbox" or "videotoolbox" in enc:
         q = max(40, min(90, 100 - crf))
@@ -130,6 +172,11 @@ def clip_needs_video_filter(fmt: dict | None, target_width=1920, target_height=1
     codec_name = fmt.get("codec_name", "h264")
     if VideoProcessor.pix_fmt_needs_reencode_for_browser(pix_fmt, codec_name):
         return True
+    codec = VideoProcessor._normalize_vcodec_name(codec_name)
+    if codec == "hevc":
+        if pix_fmt and str(pix_fmt) not in ("yuv420p", "yuv420p10le"):
+            return True
+        return False
     if pix_fmt and str(pix_fmt) not in ("yuv420p", "yuvj420p"):
         return True
     return False

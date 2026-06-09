@@ -27,6 +27,13 @@ from src.video.processor import VideoProcessor
 from src.utils.preview_encode_target import (
     all_clips_match_preview_target,
     clip_matches_preview_target,
+    normalize_target_codec,
+    resolve_auto_target_codec,
+)
+from src.video.concat_utils import (
+    build_mpegts_concat_to_mp4_command,
+    mp4_to_mpegts_stream_copy,
+    normalize_vcodec_name,
 )
 from src.utils.encoding_quality import (
     build_hw_quality_params,
@@ -1408,11 +1415,12 @@ class VideoPreview:
         if not force_codec:
             if compatible:
                 return self._stream_copy_encoding_plan()
+            auto_codec = resolve_auto_target_codec(format_info)
             return {
                 "strategy": "per_clip",
                 "needs_clip_reencoding": True,
                 "needs_combined_reencoding": False,
-                "target_codec": "h264",
+                "target_codec": auto_codec,
                 "fallback_reason": None,
             }
 
@@ -1481,14 +1489,20 @@ class VideoPreview:
             actual_output_path = output_path
             temp_output_path = None
 
+        source_fmt = self._probe_clip_format(input_path)
+        hevc_target = normalize_vcodec_name(codec_to_use) == "hevc"
+        source_pix = (source_fmt or {}).get("pix_fmt")
+        if hevc_target and source_pix and "10" in str(source_pix):
+            target_pix_fmt = "yuv420p10le"
+        else:
+            target_pix_fmt = "yuv420p"
         target_params = {
-            'width': 1920, 'height': 1080, 'fps': 30, 'pix_fmt': 'yuv420p',
+            'width': 1920, 'height': 1080, 'fps': 30, 'pix_fmt': target_pix_fmt,
             'audio_codec': 'aac', 'audio_sample_rate': 48000, 'audio_channels': 2
         }
         tp = target_params
         encoding_params = self._get_encoding_params(codec_to_use)
         preview_crf = self._get_preview_encode_crf()
-        source_fmt = self._probe_clip_format(input_path)
         needs_vf = clip_needs_video_filter(source_fmt)
 
         cmd = ["ffmpeg", "-y"]
@@ -1525,6 +1539,8 @@ class VideoPreview:
             # Kein hwupload: erfordert -filter_hw_device; h264_qsv nimmt nv12/yuv420p aus RAM.
             if use_hw_encode and hw_type == 'intel':
                 filter_chain = base_vf + ",format=nv12"
+            elif target_pix_fmt == "yuv420p10le":
+                filter_chain = base_vf + ",format=yuv420p10le"
             else:
                 filter_chain = base_vf + ",format=yuv420p"
             cmd.extend(["-vf", filter_chain])
@@ -1535,7 +1551,13 @@ class VideoPreview:
         if use_hw_encode and hw_type == 'intel' and needs_vf:
             cmd.extend(["-pix_fmt", "nv12"])
         else:
-            cmd.extend(["-pix_fmt", "yuv420p"])
+            cmd.extend(["-pix_fmt", target_pix_fmt])
+        if hevc_target:
+            profile = (source_fmt or {}).get("profile")
+            if profile and str(profile).lower().replace(" ", "") == "main10":
+                cmd.extend(["-profile:v", "main10"])
+            else:
+                cmd.extend(["-profile:v", "main"])
 
         if self.hw_accel_enabled and hw_type:
             print(f"  → Nutze Hardware-Encoder: {encoder} (Qualität CRF≈{preview_crf})")
@@ -1766,8 +1788,13 @@ class VideoPreview:
             settings = self.app.config.get_settings()
             selected_codec = settings.get("video_codec", "auto")
 
-        codec_to_use = "h264" if selected_codec == "auto" else selected_codec
         source_fmt = self._probe_clip_format(input_path)
+        if selected_codec == "auto":
+            codec_to_use = normalize_target_codec(
+                source_fmt.get("codec_name") if source_fmt else None
+            )
+        else:
+            codec_to_use = selected_codec
         if (
             codec_to_use == "h264"
             and source_fmt
@@ -2253,55 +2280,33 @@ class VideoPreview:
             return int(m2.group(1)) / 1_000_000.0
         return None
 
-    def _create_fast_combined_video(self, video_paths):
-        """Kombiniert Videos schnell ohne Re-Encoding (jetzt für die Kopien verwendet)"""
-        concat_list_path = os.path.join(tempfile.gettempdir(), "preview_concat_list.txt")
+    def _probe_combine_vcodec(self, video_paths):
+        """Ermittelt den Codec für Stream-Copy-Combine (erster Clip)."""
+        if not video_paths:
+            return "h264"
+        fmt = self._probe_clip_format(video_paths[0])
+        if not fmt:
+            return "h264"
+        return normalize_vcodec_name(fmt.get("codec_name"))
 
-        os.makedirs(os.path.dirname(concat_list_path), exist_ok=True)
+    def _run_ffmpeg_popen_with_progress(self, cmd, video_paths, output_path, total_sec, cur_best=0.0):
+        """Startet FFmpeg-Popen und liest Fortschritt aus stderr."""
+        self.ffmpeg_process = subprocess.Popen(
+            cmd,
+            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            universal_newlines=True,
+            encoding='utf-8',
+            errors='replace',
+            creationflags=SUBPROCESS_CREATE_NO_WINDOW,
+        )
+        return self._wait_ffmpeg_combine_process(
+            video_paths, output_path, total_sec, cur_best_start=cur_best
+        )
 
-        output_path = os.path.join(tempfile.gettempdir(), "preview_combined_fast.mp4")
-
-        try:
-            with open(concat_list_path, "w", encoding="utf-8") as f:
-                for video_path in video_paths:
-                    # Escape Pfad für FFmpeg concat (besonders wichtig für Windows-Pfade)
-                    escaped_path = os.path.abspath(video_path).replace('\\', '/')
-                    f.write(f"file '{escaped_path}'\n")
-        except Exception as e:
-            print(f"Fehler beim Schreiben der concat-Liste: {e}")
-            return None
-
-        if self.cancellation_event.is_set():
-            return None
-
-        print(f"Kombiniere {len(video_paths)} Videos mit FFmpeg concat...")
-
-        ui_ready = threading.Event()
-
-        def _kick_combine_ui():
-            try:
-                self._begin_combine_progress_ui(video_paths)
-            finally:
-                ui_ready.set()
-
-        self.parent.after(0, _kick_combine_ui)
-        ui_ready.wait(timeout=15.0)
-
-        total_sec = float(getattr(self, "_combine_total_sec", 0.0) or 0.0)
-        cur_best = 0.0
-
-        self.ffmpeg_process = subprocess.Popen([
-            "ffmpeg", "-y", "-fflags", "+genpts",
-            "-f", "concat", "-safe", "0", "-i", concat_list_path,
-            "-c", "copy",
-            "-avoid_negative_ts", "make_zero",
-            "-movflags", "+faststart",
-            output_path
-        ], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
-            universal_newlines=True, encoding='utf-8', errors='replace',
-            creationflags=SUBPROCESS_CREATE_NO_WINDOW)
-
-        # WICHTIG: stderr lesen (Pipe-Buffer) und time=/out_time_ms für Fortschritt auswerten
+    def _wait_ffmpeg_combine_process(self, video_paths, output_path, total_sec, cur_best_start=0.0):
+        """Wartet auf laufenden FFmpeg-Combine-Prozess inkl. Fortschritt/Abbruch."""
+        cur_best = cur_best_start
         stderr_lines = []
 
         while self.ffmpeg_process.poll() is None:
@@ -2315,10 +2320,6 @@ class VideoPreview:
                     self.ffmpeg_process.wait()
                 self.ffmpeg_process = None
                 self.parent.after(0, self._stop_combine_indeterminate_if_any)
-                try:
-                    os.remove(concat_list_path)
-                except OSError:
-                    pass
                 return None
 
             try:
@@ -2348,11 +2349,6 @@ class VideoPreview:
         returncode = self.ffmpeg_process.returncode
         self.ffmpeg_process = None
 
-        try:
-            os.remove(concat_list_path)
-        except OSError as e:
-            print(f"Fehler beim Löschen der temp. Datei: {e}")
-
         if returncode == 0:
             print(f"✅ Kombiniertes Video erstellt: {output_path}")
             if total_sec > 0 and not getattr(self, "_combine_use_indeterminate", False):
@@ -2360,15 +2356,90 @@ class VideoPreview:
                     0, lambda tt=total_sec: self._apply_combine_progress_ui(100.0, tt, tt))
             self.parent.after(0, self._stop_combine_indeterminate_if_any)
             return output_path
-        else:
-            self.parent.after(0, self._stop_combine_indeterminate_if_any)
-            if not self.cancellation_event.is_set():
-                # Zeige FFmpeg-Fehler
-                stderr_text = ''.join(stderr_lines)
-                last_lines = '\n'.join(stderr_text.split('\n')[-15:])
-                print(f"❌ Fast combine fehlgeschlagen (Code {returncode}).")
-                print(f"FFmpeg Output:\n{last_lines}")
+
+        self.parent.after(0, self._stop_combine_indeterminate_if_any)
+        if not self.cancellation_event.is_set():
+            stderr_text = ''.join(stderr_lines)
+            last_lines = '\n'.join(stderr_text.split('\n')[-15:])
+            print(f"❌ Fast combine fehlgeschlagen (Code {returncode}).")
+            if last_lines.strip():
+                print(last_lines)
+        return None
+
+    def _create_fast_combined_video(self, video_paths):
+        """Kombiniert Videos schnell ohne Re-Encoding (jetzt für die Kopien verwendet)"""
+        if self.cancellation_event.is_set():
             return None
+
+        output_path = os.path.join(tempfile.gettempdir(), "preview_combined_fast.mp4")
+        vcodec = self._probe_combine_vcodec(video_paths)
+
+        ui_ready = threading.Event()
+
+        def _kick_combine_ui():
+            try:
+                self._begin_combine_progress_ui(video_paths)
+            finally:
+                ui_ready.set()
+
+        self.parent.after(0, _kick_combine_ui)
+        ui_ready.wait(timeout=15.0)
+
+        total_sec = float(getattr(self, "_combine_total_sec", 0.0) or 0.0)
+
+        if vcodec == "hevc" and len(video_paths) > 1:
+            print(f"Kombiniere {len(video_paths)} HEVC-Videos via MPEG-TS (stabile Wiedergabe)...")
+            ts_paths = []
+            try:
+                for idx, video_path in enumerate(video_paths):
+                    ts_path = os.path.join(
+                        tempfile.gettempdir(), f"preview_combine_{idx}.ts"
+                    )
+                    mp4_to_mpegts_stream_copy(video_path, ts_path, "hevc", has_audio=True)
+                    ts_paths.append(ts_path)
+                if self.cancellation_event.is_set():
+                    return None
+                cmd = build_mpegts_concat_to_mp4_command(
+                    output_path, ts_paths, "hevc", has_audio=True
+                )
+                return self._run_ffmpeg_popen_with_progress(
+                    cmd, video_paths, output_path, total_sec
+                )
+            finally:
+                for ts_path in ts_paths:
+                    try:
+                        os.remove(ts_path)
+                    except OSError:
+                        pass
+
+        concat_list_path = os.path.join(tempfile.gettempdir(), "preview_concat_list.txt")
+        os.makedirs(os.path.dirname(concat_list_path), exist_ok=True)
+
+        try:
+            with open(concat_list_path, "w", encoding="utf-8") as f:
+                for video_path in video_paths:
+                    escaped_path = os.path.abspath(video_path).replace('\\', '/')
+                    f.write(f"file '{escaped_path}'\n")
+        except Exception as e:
+            print(f"Fehler beim Schreiben der concat-Liste: {e}")
+            return None
+
+        print(f"Kombiniere {len(video_paths)} Videos mit FFmpeg concat...")
+
+        cmd = [
+            "ffmpeg", "-y", "-fflags", "+genpts",
+            "-f", "concat", "-safe", "0", "-i", concat_list_path,
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        result = self._run_ffmpeg_popen_with_progress(cmd, video_paths, output_path, total_sec)
+        try:
+            os.remove(concat_list_path)
+        except OSError as e:
+            print(f"Fehler beim Löschen der temp. Datei: {e}")
+        return result
 
     def _check_video_formats(self, video_paths, show_ui=True):
         """Prüft ob Videos kompatible Formate haben (Video + Audio, Profil).

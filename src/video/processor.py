@@ -9,6 +9,16 @@ from datetime import date, datetime
 import multiprocessing
 import time
 
+from .concat_utils import (
+    build_mpegts_concat_to_mp4_command,
+    concat_mp4_segments_to_mkv,
+    hevc_stream_copy_video_tag,
+    prep_hevc_mp4_for_splice,
+    remux_mkv_to_mp4,
+    trim_body_start_to_keyframe,
+    validate_splice_decode,
+    write_concat_file_list,
+)
 from .logger import CancellableProgressBarLogger, CancellationError
 from ..utils.file_utils import normalize_whitespace_to_underscore, sanitize_filename
 from src.utils.media_datetime import get_photo_display_epoch
@@ -233,13 +243,13 @@ class VideoProcessor:
             '-bsf:a', 'aac_adtstoasc',
             '-movflags', '+faststart',
             '-avoid_negative_ts', 'make_zero',
-            '-reset_timestamps', '1',
             '-max_interleave_delta', '0',
         ])
 
         vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
         if vcodec == 'hevc':
-            cmd.extend(['-bsf:v', 'hevc_metadata=aud=insert,extract_extradata', '-tag:v', 'hvc1'])
+            hevc_tag = hevc_stream_copy_video_tag(video_params)
+            cmd.extend(['-bsf:v', 'hevc_metadata=aud=insert', f'-tag:v', hevc_tag])
         elif vcodec == 'h264':
             if intro_ts_path and body_ts_path:
                 cmd.extend(['-bsf:v', 'h264_metadata=aud=insert'])
@@ -354,7 +364,13 @@ class VideoProcessor:
                 f"Intro-Profil ({intro['profile']}) passt nicht zum Hauptvideo ({body['profile']})."
             )
 
-    def _validate_browser_mp4(self, output_path, video_params, expected_duration_sec=None):
+    def _validate_browser_mp4(
+        self,
+        output_path,
+        video_params,
+        expected_duration_sec=None,
+        intro_dauer=None,
+    ):
         """Prüft Browser-taugliche MP4 nach Stream-Copy-Mux. Returns (ok, reason)."""
         if not output_path or not os.path.exists(output_path):
             reason = "Ausgabedatei fehlt"
@@ -408,6 +424,13 @@ class VideoProcessor:
                     print(f"Browser-Validierung: {reason}")
                     return False, reason
 
+            if intro_dauer is not None and vcodec == 'hevc':
+                decode_ok, decode_reason = validate_splice_decode(output_path, intro_dauer)
+                if not decode_ok:
+                    reason = f"Nahtstelle nicht dekodierbar: {decode_reason}"
+                    print(f"Browser-Validierung: {reason}")
+                    return False, reason
+
             return True, ""
         except Exception as exc:
             reason = str(exc)
@@ -431,6 +454,8 @@ class VideoProcessor:
         """
         extra_temp_files = []
         vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
+        if vcodec == 'hevc':
+            force_normalize = True
 
         if not video_params.get("has_audio", True):
             self._update_status("Erzeuge stille Audiospur für Hauptvideo...")
@@ -455,6 +480,14 @@ class VideoProcessor:
         else:
             body_path = combined_video_path
 
+        if vcodec == 'hevc':
+            self._update_status("HEVC: trimme Hauptvideo auf Keyframe-Start...")
+            body_keyframe = os.path.join(work_temp_dir, "body_keyframe.mp4")
+            extra_temp_files.append(body_keyframe)
+            has_audio = video_params.get("has_audio", True)
+            trim_body_start_to_keyframe(body_path, body_keyframe, has_audio=has_audio)
+            body_path = body_keyframe
+
         skip_norm = (
             not force_normalize
             and self._mp4_has_faststart(intro_path)
@@ -475,19 +508,46 @@ class VideoProcessor:
             intro_mux = intro_norm
             body_mux = body_norm
 
-        if vcodec == 'hevc' or use_ts_concat:
-            if use_ts_concat and vcodec == 'h264':
-                self._update_status("H.264: bereite MPEG-TS-Concat vor (stabile Wiedergabe)...")
-            else:
-                self._update_status("HEVC: bereite MPEG-TS-Concat vor (stabile Wiedergabe)...")
+        if vcodec == 'hevc':
+            hevc_tag = hevc_stream_copy_video_tag(video_params)
+            has_audio = video_params.get("has_audio", True)
+            self._update_status("HEVC: bereite Stream-Copy-Splice vor (MKV-Remux)...")
+            intro_splice = os.path.join(work_temp_dir, "intro_splice.mp4")
+            body_splice = os.path.join(work_temp_dir, "body_splice.mp4")
+            concat_list_path = os.path.join(work_temp_dir, "hevc_concat_list.txt")
+            intro_ts = os.path.join(work_temp_dir, "intro.ts")
+            body_ts = os.path.join(work_temp_dir, "body.ts")
+            extra_temp_files.extend([
+                intro_splice, body_splice, concat_list_path, intro_ts, body_ts,
+            ])
+            prep_hevc_mp4_for_splice(intro_mux, intro_splice, has_audio=has_audio, video_tag=hevc_tag)
+            prep_hevc_mp4_for_splice(body_mux, body_splice, has_audio=has_audio, video_tag=hevc_tag)
+            write_concat_file_list([intro_splice, body_splice], concat_list_path)
+            self._mp4_to_mpegts_stream_copy(intro_splice, intro_ts, vcodec, video_params)
+            self._mp4_to_mpegts_stream_copy(body_splice, body_ts, vcodec, video_params)
+            return {
+                'method': 'mkv_concat',
+                'concat_list_path': concat_list_path,
+                'intro_mux_path': intro_splice,
+                'body_mux_path': body_splice,
+                'intro_ts_path': intro_ts,
+                'body_ts_path': body_ts,
+                'hevc_tag': hevc_tag,
+                'combined_body_path': body_mux,
+                'temp_files': extra_temp_files,
+                'used_fast_path': skip_norm,
+                'intro_source': intro_path,
+                'combined_video_path': combined_video_path,
+                'work_temp_dir': work_temp_dir,
+            }
+
+        if use_ts_concat:
+            self._update_status("H.264: bereite MPEG-TS-Concat vor (stabile Wiedergabe)...")
             intro_ts = os.path.join(work_temp_dir, "intro.ts")
             body_ts = os.path.join(work_temp_dir, "body.ts")
             extra_temp_files.extend([intro_ts, body_ts])
             self._mp4_to_mpegts_stream_copy(intro_mux, intro_ts, vcodec, video_params)
-            if use_ts_concat and vcodec == 'h264':
-                self._update_status("H.264: Hauptvideo nach MPEG-TS (Stream-Copy)...")
-            else:
-                self._update_status("HEVC: Hauptvideo nach MPEG-TS (Stream-Copy)...")
+            self._update_status("H.264: Hauptvideo nach MPEG-TS (Stream-Copy)...")
             self._mp4_to_mpegts_stream_copy(body_mux, body_ts, vcodec, video_params)
             return {
                 'method': 'ts',
@@ -521,8 +581,36 @@ class VideoProcessor:
             'work_temp_dir': work_temp_dir,
         }
 
+    def _run_hevc_mkv_stream_copy_mux(
+        self,
+        full_video_output_path,
+        video_params,
+        mux_segments,
+        intro_dauer,
+        task_name,
+        encoding_lane,
+    ):
+        """Avidemux-ähnlich: MP4-Segmente → MKV (copy) → MP4 (copy, frischer Index)."""
+        work_dir = mux_segments['work_temp_dir']
+        mkv_path = os.path.join(work_dir, "splice_concat.mkv")
+        has_audio = video_params.get("has_audio", True)
+        hevc_tag = mux_segments.get('hevc_tag') or hevc_stream_copy_video_tag(video_params)
+
+        self._update_status("HEVC: füge Intro+Video zusammen (MKV Stream-Copy)...")
+        concat_mp4_segments_to_mkv(mux_segments['concat_list_path'], mkv_path)
+        self._check_for_cancellation()
+        remux_mkv_to_mp4(
+            mkv_path,
+            full_video_output_path,
+            vcodec='hevc',
+            has_audio=has_audio,
+            video_tag=hevc_tag,
+        )
+
     def _execute_final_mux_command(self, full_video_output_path, video_params, mux_segments):
         """Baut den FFmpeg-Befehl für den Stream-Copy-Mux (MP4-concat oder MPEG-TS-concat)."""
+        if mux_segments.get('method') == 'mkv_concat':
+            raise ValueError("MKV-Concat wird über _run_hevc_mkv_stream_copy_mux ausgeführt.")
         if mux_segments.get('method') == 'ts':
             vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
             if vcodec == 'h264':
@@ -578,7 +666,30 @@ class VideoProcessor:
             task_id=None,
             encoding_lane=encoding_lane,
         )
-        return self._validate_browser_mp4(full_video_output_path, video_params, expected_duration)
+        return self._validate_browser_mp4(
+            full_video_output_path,
+            video_params,
+            expected_duration,
+            intro_dauer=intro_dauer,
+        )
+
+    def _get_final_mux_encoding_params(self, video_params):
+        """Encoder für finalen Intro+Body-Mux (Filter braucht CPU-Frames, Encode darf HW sein)."""
+        vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
+        codec_key = 'hevc' if vcodec == 'hevc' else 'h264'
+        if self.hw_accel_enabled:
+            encoding_params = self._get_encoding_params(codec_key)
+            encoder_name = encoding_params.get('encoder') or 'libx264'
+            if vcodec == 'hevc' and self._intro_requires_software_encoder(video_params, encoder_name):
+                print(
+                    f"ℹ Final-Mux: Software-HEVC "
+                    f"(pix_fmt={video_params.get('pix_fmt')}, profile={video_params.get('profile')})"
+                )
+                encoding_params = self.hw_detector._get_software_params('hevc')
+                encoder_name = encoding_params.get('encoder') or 'libx265'
+            return encoding_params, encoder_name
+        encoding_params = self._get_encoding_params(codec_key)
+        return encoding_params, encoding_params.get('encoder') or 'libx264'
 
     def _build_final_intro_body_reencode_command(
         self,
@@ -587,47 +698,83 @@ class VideoProcessor:
         body_path,
         video_params,
     ):
-        """Re-Encode-Fallback: Intro + Body per filter concat zu browser-tauglicher MP4."""
+        """Intro + Body per filter concat zu einem durchgängigen MP4-Bitstream."""
         vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
-        sw_codec = 'hevc' if vcodec == 'hevc' else 'h264'
-        encoding_params = self.hw_detector._get_software_params(sw_codec)
-        encoder_name = encoding_params.get('encoder') or 'libx264'
+        encoding_params, encoder_name = self._get_final_mux_encoding_params(video_params)
+        use_hw_tuning = (
+            self.hw_accel_enabled
+            and encoder_name
+            and not str(encoder_name).startswith('lib')
+        )
 
         if vcodec == 'hevc' and self._is_10bit_pix_fmt(video_params.get('pix_fmt')):
             target_pix_fmt = 'yuv420p10le'
         else:
             target_pix_fmt = 'yuv420p'
 
+        sample_rate = video_params.get('sample_rate') or '48000'
+        channel_layout = video_params.get('channel_layout') or 'stereo'
+        fps_int = self._parse_r_frame_rate(video_params.get('fps'))
+
+        fmt_suffix = f",format={target_pix_fmt}"
+        filter_complex = (
+            f"[0:v:0]setsar=1,setpts=PTS-STARTPTS{fmt_suffix}[v0];"
+            f"[1:v:0]setsar=1,setpts=PTS-STARTPTS{fmt_suffix}[v1];"
+            f"[0:a:0]aformat=sample_rates={sample_rate}:channel_layouts={channel_layout}[a0];"
+            f"[1:a:0]aformat=sample_rates={sample_rate}:channel_layouts={channel_layout}[a1];"
+            f"[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"
+        )
+
         cmd = ['ffmpeg', '-y', '-i', intro_path, '-i', body_path]
         cmd.extend([
-            '-filter_complex', '[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[outv][outa]',
+            '-filter_complex', filter_complex,
             '-map', '[outv]', '-map', '[outa]',
         ])
         cmd.extend(encoding_params['output_params'])
 
-        if encoder_name == 'libx264':
-            cmd.extend(['-preset', 'veryfast', '-crf', '18'])
-        elif encoder_name == 'libx265':
-            cmd.extend(['-preset', 'veryfast', '-crf', '20'])
+        if not use_hw_tuning:
+            if encoder_name == 'libx264':
+                cmd.extend(['-preset', 'veryfast', '-crf', '18'])
+            elif encoder_name == 'libx265':
+                cmd.extend(['-preset', 'veryfast', '-crf', '20'])
+        else:
+            if encoder_name.endswith('_nvenc'):
+                cmd.extend(['-rc', 'constqp', '-qp', '18', '-preset', 'p2', '-no-scenecut', '1'])
+            elif encoder_name.endswith('_qsv'):
+                if vcodec == 'hevc':
+                    cmd.extend(['-global_quality', '18'])
+                else:
+                    cmd.extend(['-global_quality', '18', '-look_ahead', '0', '-forced_idr', '1'])
+            elif encoder_name.endswith('_amf'):
+                cmd.extend(['-quality', 'balanced', '-rc', 'cqp', '-qp_i', '18', '-qp_p', '18'])
 
         cmd.extend(['-pix_fmt', target_pix_fmt])
+        cmd.extend([
+            '-r', video_params.get('fps') or str(fps_int),
+            '-fps_mode', 'cfr',
+            '-g', str(fps_int),
+            '-keyint_min', str(fps_int),
+            '-sc_threshold', '0',
+            '-bf', '0',
+        ])
 
         profile_str = self._normalize_profile_name(video_params.get('profile'))
         if profile_str and vcodec in ('h264', 'hevc'):
-            if vcodec in ('hevc',) and profile_str not in ('main', 'main10'):
-                profile_str = 'main'
+            if vcodec == 'hevc' and profile_str not in ('main', 'main10'):
+                profile_str = 'main10' if target_pix_fmt == 'yuv420p10le' else 'main'
             cmd.extend(['-profile:v', profile_str])
 
         if video_params.get('level') and vcodec in ('h264', 'hevc'):
             cmd.extend(['-level:v', self._ffmpeg_level_string(vcodec, video_params['level'])])
 
-        vtag = video_params.get('vtag')
-        if vtag and vcodec in ('h264', 'hevc'):
-            cmd.extend(['-tag:v', vtag])
+        if vcodec == 'hevc':
+            from src.utils.encoding_quality import append_hevc_splice_encode_params
+            append_hevc_splice_encode_params(cmd, encoder_name, fps=fps_int)
         elif vcodec == 'h264':
-            cmd.extend(['-tag:v', 'avc1'])
-        elif vcodec == 'hevc':
-            cmd.extend(['-tag:v', 'hvc1'])
+            vtag = video_params.get('vtag')
+            cmd.extend(['-tag:v', vtag if vtag else 'avc1'])
+            if encoder_name == 'libx264':
+                cmd.extend(['-x264-params', 'repeat-headers=1:nal-hrd=none:open-gop=0'])
 
         cmd.extend(['-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', output_path])
         return cmd
@@ -641,9 +788,13 @@ class VideoProcessor:
         intro_dauer,
         task_name,
         encoding_lane=0,
+        status_message=None,
     ):
-        """Letzter Ausweg: Intro + Hauptvideo einmal neu encodieren."""
-        self._update_status("Stream-Copy fehlgeschlagen – encodiere Intro + Video neu...")
+        """Intro + Hauptvideo zu einem durchgängigen Bitstream encodieren."""
+        if status_message:
+            self._update_status(status_message)
+        else:
+            self._update_status("Encodiere Intro + Video zu durchgängigem Bitstream...")
         expected_duration = self._estimate_final_output_duration_sec(intro_dauer, body_path)
         command = self._build_final_intro_body_reencode_command(
             full_video_output_path, intro_path, body_path, video_params
@@ -651,7 +802,7 @@ class VideoProcessor:
         self._run_ffmpeg_with_progress(
             command,
             expected_duration,
-            f"{task_name} (Re-Encode)",
+            task_name,
             task_id=None,
             encoding_lane=encoding_lane,
         )
@@ -667,13 +818,73 @@ class VideoProcessor:
         encoding_lane=0,
         extra_temp_files=None,
     ):
-        """Fügt Intro + Hauptvideo per Stream-Copy zusammen; Fallbacks bei Validierungsfehlern."""
+        """Fügt Intro + Hauptvideo per Stream-Copy zusammen."""
         combined_body_path = mux_segments['combined_body_path']
         expected_duration = self._estimate_final_output_duration_sec(intro_dauer, combined_body_path)
         vcodec = self._normalize_vcodec_name(video_params.get('vcodec', 'h264'))
         last_reason = "Unbekannter Validierungsfehler"
 
         self._check_for_cancellation()
+
+        if vcodec == 'hevc':
+            last_reason = "Unbekannter HEVC-Mux-Fehler"
+            hevc_attempts = []
+            if mux_segments.get('method') == 'mkv_concat':
+                hevc_attempts.append('mkv_concat')
+            if mux_segments.get('intro_ts_path') and mux_segments.get('body_ts_path'):
+                hevc_attempts.append('ts')
+            for attempt in hevc_attempts:
+                self._check_for_cancellation()
+                try:
+                    if attempt == 'mkv_concat':
+                        self._run_hevc_mkv_stream_copy_mux(
+                            full_video_output_path,
+                            video_params,
+                            mux_segments,
+                            intro_dauer,
+                            task_name,
+                            encoding_lane,
+                        )
+                    else:
+                        self._update_status("HEVC: füge Intro+Video zusammen (MPEG-TS Stream-Copy)...")
+                        ts_segments = {**mux_segments, 'method': 'ts'}
+                        hevc_tag = mux_segments.get('hevc_tag') or hevc_stream_copy_video_tag(video_params)
+                        command = build_mpegts_concat_to_mp4_command(
+                            full_video_output_path,
+                            [mux_segments['intro_ts_path'], mux_segments['body_ts_path']],
+                            'hevc',
+                            has_audio=video_params.get('has_audio', True),
+                            video_tag=hevc_tag,
+                        )
+                        mux_progress_duration = self._estimate_stream_copy_mux_duration_sec(
+                            intro_dauer, combined_body_path, mux_segments
+                        )
+                        self._run_ffmpeg_with_progress(
+                            command,
+                            mux_progress_duration,
+                            task_name,
+                            task_id=None,
+                            encoding_lane=encoding_lane,
+                        )
+                    ok, reason = self._validate_browser_mp4(
+                        full_video_output_path,
+                        video_params,
+                        expected_duration,
+                        intro_dauer=intro_dauer,
+                    )
+                    if ok:
+                        print(f"✓ Finaler HEVC-Schnitt per Stream-Copy ({attempt})")
+                        return
+                    last_reason = reason
+                    print(f"⚠ HEVC Stream-Copy ({attempt}) Validierung fehlgeschlagen: {reason}")
+                    self._remove_output_file(full_video_output_path)
+                except Exception as exc:
+                    last_reason = str(exc)
+                    print(f"⚠ HEVC Stream-Copy ({attempt}) fehlgeschlagen: {exc}")
+                    self._remove_output_file(full_video_output_path)
+            raise Exception(
+                f"HEVC Stream-Copy-Mux fehlgeschlagen (kein Neuencode): {last_reason}"
+            )
 
         ok, reason = self._run_stream_copy_mux_attempt(
             full_video_output_path,
@@ -969,11 +1180,10 @@ class VideoProcessor:
                         temp_intro_with_audio_path, dauer, video_params, drawtext_filter
                     )
 
-                    # Schritt 5 & 6: MP4 concat-Liste (kein MPEG-TS — spart viel Plattenplatz)
+                    # Schritt 5 & 6: Zusammenführung vorbereiten
                     self._check_for_cancellation()
                     self._update_progress(5, TOTAL_STEPS)
                     self._update_status("Bereite Stream-Copy-Zusammenführung vor...")
-
                     mux_segments = self._prepare_final_mux_segments(
                         temp_intro_with_audio_path,
                         combined_video_path,
@@ -1482,8 +1692,18 @@ class VideoProcessor:
                 command.extend(["-qp", "18"])
 
         fps_int = self._parse_r_frame_rate(v_params.get('fps'))
+        body_has_b_frames = int(v_params.get('has_b_frames') or 0) > 0
+        vcodec_norm = self._normalize_vcodec_name(vcodec)
         if vcodec in ('h264', 'hevc', 'h265'):
-            command.extend(["-g", str(fps_int), "-keyint_min", str(fps_int), "-sc_threshold", "0", "-bf", "0"])
+            command.extend([
+                "-g", str(fps_int),
+                "-keyint_min", str(fps_int),
+                "-sc_threshold", "0",
+            ])
+            if vcodec_norm == 'hevc' and body_has_b_frames:
+                command.extend(["-bf", "2"])
+            else:
+                command.extend(["-bf", "0"])
         command.extend(["-fps_mode", "cfr"])
 
         if v_params.get('color_range'):
@@ -1506,9 +1726,12 @@ class VideoProcessor:
         if v_params.get('level') and vcodec in ('h264', 'hevc', 'h265'):
             command.extend(["-level:v", self._ffmpeg_level_string(vcodec, v_params['level'])])
 
-        vtag = v_params.get('vtag')
-        if vtag and vcodec in ('h264', 'hevc', 'h265', 'vp9', 'av1'):
-            command.extend(["-tag:v", vtag])
+        if vcodec_norm == 'hevc':
+            command.extend(["-tag:v", hevc_stream_copy_video_tag(v_params)])
+        else:
+            vtag = v_params.get('vtag')
+            if vtag and vcodec in ('h264', 'vp9', 'av1'):
+                command.extend(["-tag:v", vtag])
 
         try:
             dauer_float = float(dauer)
@@ -1521,10 +1744,11 @@ class VideoProcessor:
         if encoder_name == 'libx264':
             command.extend(["-x264-params", "repeat-headers=1:nal-hrd=none:open-gop=0"])
         elif encoder_name == 'libx265':
+            bframes = 2 if body_has_b_frames else 0
             command.extend([
                 "-x265-params",
                 f"keyint={fps_int}:min-keyint={fps_int}:scenecut=0:open-gop=0:"
-                f"repeat-headers=1:aud=1:bframes=0",
+                f"repeat-headers=1:aud=1:bframes={bframes}",
             ])
 
         command.extend(["-movflags", "+faststart"])

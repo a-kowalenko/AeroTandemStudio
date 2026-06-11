@@ -1,9 +1,13 @@
-﻿import tkinter as tk
+﻿import os
+import threading
+import tkinter as tk
 from tkinter import ttk
+
 from PIL import Image, ImageTk
-import os
 
 from src.utils.media_datetime import format_photo_table_datetime
+
+_THUMB_BATCH_SIZE = 30
 
 
 class PhotoPreview:
@@ -17,10 +21,17 @@ class PhotoPreview:
         # Foto-Daten
         self.photo_paths = []
         self.current_photo_index = 0
-        self.photo_images = {}  # Cache für geladene Bilder
-        self.thumbnail_images = {}  # Cache für Thumbnails
-        # Vom Import-Worker vorberechnete Thumbnails (Pfad -> PIL.Image), um den Mainthread zu entlasten
+        self.photo_images = {}  # Cache: index -> ImageTk für große Vorschau
+        # Cache: (path, size_px) -> ImageTk.PhotoImage
+        self.thumbnail_images = {}
+        # Vom Import-Worker vorberechnete Thumbnails (Pfad -> PIL.Image)
         self._pil_thumbnail_cache = {}
+        self._photo_metadata_cache = {}
+        self._thumb_widgets = {}
+        self._thumb_build_job = None
+        self._metadata_build_job = None
+        self._large_preview_generation = 0
+        self._totals_dirty = True
 
         # NEU: Mehrfachauswahl
         self.selected_photos = set()  # Set von ausgewählten Indizes
@@ -276,94 +287,276 @@ class PhotoPreview:
 
     def set_photos(self, photo_paths, pil_thumbnail_cache=None):
         """Setzt die anzuzeigenden Fotos. Optional: vorberechnete PIL-Thumbnails vom Import-Thread."""
+        self._cancel_thumb_build_job()
         self.photo_paths = photo_paths
         self.current_photo_index = 0 if photo_paths else -1
 
-        # NEU: Mehrfachauswahl zurücksetzen
         self.selected_photos.clear()
-        self.explicitly_selected = False  # Keine explizite Markierung
+        self.explicitly_selected = False
         self.last_clicked_index = 0 if photo_paths else None
 
-        # Cache leeren
         self.photo_images.clear()
         self.thumbnail_images.clear()
         self._pil_thumbnail_cache = dict(pil_thumbnail_cache) if pil_thumbnail_cache else {}
+        self._prune_metadata_cache()
+        if photo_paths and self.current_photo_index >= 0:
+            current_path = photo_paths[self.current_photo_index]
+            if current_path not in self._photo_metadata_cache:
+                self._photo_metadata_cache[current_path] = self._load_photo_metadata(current_path)
+        self._schedule_metadata_prefetch(photo_paths)
+        self._totals_dirty = True
 
-        # UI aktualisieren
-        self._update_thumbnails()
-        self._update_large_preview()
-        self._update_info()
+        self._rebuild_thumbnails_full()
+        self._schedule_large_preview_update()
+        self._update_current_photo_info()
+        self._update_totals_info()
         self._update_delete_button()
 
-    def _update_thumbnails(self):
-        """Aktualisiert die Thumbnail-Galerie mit Mehrfachauswahl-Unterstützung"""
-        # Alte Thumbnails entfernen
+    def _cancel_thumb_build_job(self):
+        if self._thumb_build_job is not None:
+            try:
+                self.frame.after_cancel(self._thumb_build_job)
+            except tk.TclError:
+                pass
+            self._thumb_build_job = None
+
+    def _cancel_metadata_build_job(self):
+        if self._metadata_build_job is not None:
+            try:
+                self.frame.after_cancel(self._metadata_build_job)
+            except tk.TclError:
+                pass
+            self._metadata_build_job = None
+
+    def _active_thumb_size(self):
+        return int(self.thumbnail_size * 1.3)
+
+    def _thumbnail_cache_key(self, photo_path, is_active):
+        size = self._active_thumb_size() if is_active else self.thumbnail_size
+        return (photo_path, size)
+
+    def _prune_metadata_cache(self):
+        active = set(self.photo_paths)
+        stale = [path for path in self._photo_metadata_cache if path not in active]
+        for path in stale:
+            del self._photo_metadata_cache[path]
+
+    def _load_photo_metadata(self, photo_path):
+        meta = {
+            "filename": os.path.basename(photo_path),
+            "resolution": "-",
+            "size": "-",
+            "date": "-",
+            "time": "-",
+        }
+        try:
+            with Image.open(photo_path) as img:
+                width, height = img.size
+            meta["resolution"] = f"{width} × {height} px"
+            size_bytes = os.path.getsize(photo_path)
+            meta["size"] = f"{size_bytes / (1024 * 1024):.2f} MB"
+            imp_ep = None
+            if self.app and hasattr(self.app, "drag_drop"):
+                imp_ep = self.app.drag_drop.get_source_import_epoch(photo_path)
+            date_str, time_str = format_photo_table_datetime(photo_path, imp_ep)
+            meta["date"] = date_str
+            meta["time"] = time_str
+        except Exception as e:
+            print(f"Fehler beim Laden der Foto-Metadaten für {photo_path}: {e}")
+        return meta
+
+    def _schedule_metadata_prefetch(self, paths):
+        self._cancel_metadata_build_job()
+        self._metadata_prefetch_paths = list(paths or [])
+        self._metadata_prefetch_index = 0
+        if self._metadata_prefetch_paths:
+            self._build_metadata_batch()
+
+    def _build_metadata_batch(self):
+        paths = getattr(self, "_metadata_prefetch_paths", [])
+        start = self._metadata_prefetch_index
+        end = min(start + 15, len(paths))
+
+        for path in paths[start:end]:
+            if path not in self._photo_metadata_cache:
+                self._photo_metadata_cache[path] = self._load_photo_metadata(path)
+
+        if end < len(paths):
+            self._metadata_prefetch_index = end
+            self._metadata_build_job = self.frame.after(1, self._build_metadata_batch)
+            return
+
+        self._metadata_build_job = None
+        self._totals_dirty = True
+
+    def _selection_style_for_index(self, idx):
+        is_current = idx == self.current_photo_index
+        if self.explicitly_selected:
+            is_selected = idx in self.selected_photos
+            multiple_selected = len(self.selected_photos) > 1
+        else:
+            is_selected = is_current
+            multiple_selected = False
+
+        if is_selected and (multiple_selected or not is_current):
+            return 3, "#FF9800"
+        return 2, "#999999"
+
+    def _apply_thumbnail_frame_style(self, frame, idx):
+        thickness, color = self._selection_style_for_index(idx)
+        frame.config(highlightthickness=thickness, highlightbackground=color)
+
+    def _get_thumbnail_photoimage(self, photo_path, is_active):
+        cache_key = self._thumbnail_cache_key(photo_path, is_active)
+        cached = self.thumbnail_images.get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            size = self._active_thumb_size() if is_active else self.thumbnail_size
+            pil_source = self._pil_thumbnail_cache.get(photo_path)
+            if pil_source is not None:
+                img = pil_source.copy()
+                if img.width > size or img.height > size:
+                    img.thumbnail((size, size), Image.LANCZOS)
+            else:
+                with Image.open(photo_path) as opened:
+                    img = opened.copy()
+                img.thumbnail((size, size), Image.LANCZOS)
+
+            thumbnail = ImageTk.PhotoImage(img)
+            self.thumbnail_images[cache_key] = thumbnail
+            return thumbnail
+        except Exception as e:
+            print(f"Fehler beim Erstellen des Thumbnails für {photo_path}: {e}")
+            return None
+
+    def _create_thumbnail_widget(self, idx):
+        if idx < 0 or idx >= len(self.photo_paths):
+            return
+
+        photo_path = self.photo_paths[idx]
+        is_current = idx == self.current_photo_index
+        thumbnail = self._get_thumbnail_photoimage(photo_path, is_active=is_current)
+        if not thumbnail:
+            return
+
+        thickness, color = self._selection_style_for_index(idx)
+        thumb_frame = tk.Frame(
+            self.thumbnail_inner_frame,
+            bg="white",
+            highlightthickness=thickness,
+            highlightbackground=color,
+        )
+        thumb_frame.pack(side="left", padx=5, pady=5)
+
+        thumb_label = tk.Label(thumb_frame, image=thumbnail, bg="white")
+        thumb_label.image = thumbnail
+        thumb_label.pack()
+        thumb_label.bind(
+            "<ButtonRelease-1>",
+            lambda e, i=idx: self._on_thumbnail_click_release(e, i),
+        )
+        thumb_frame.bind(
+            "<ButtonRelease-1>",
+            lambda e, i=idx: self._on_thumbnail_click_release(e, i),
+        )
+        self._thumb_widgets[idx] = {"frame": thumb_frame, "label": thumb_label}
+
+    def _rebuild_thumbnails_full(self):
+        """Baut die Thumbnail-Leiste komplett neu (Import, Löschen, Strg+A)."""
+        self._cancel_thumb_build_job()
         for widget in self.thumbnail_inner_frame.winfo_children():
             widget.destroy()
+        self._thumb_widgets.clear()
 
         if not self.photo_paths:
             self.thumbnail_canvas.configure(scrollregion=(0, 0, 0, 0))
             return
 
-        # Neue Thumbnails erstellen
-        for idx, photo_path in enumerate(self.photo_paths):
-            is_current = idx == self.current_photo_index
+        self._build_thumbnail_batch(0)
 
-            # Implizite vs. explizite Markierung
-            if self.explicitly_selected:
-                # Explizite Markierung vorhanden - nur explizit markierte zeigen
-                is_selected = idx in self.selected_photos
-            else:
-                # Keine explizite Markierung - aktuelles Foto gilt als markiert
-                is_selected = is_current
+    def _build_thumbnail_batch(self, start_index):
+        end_index = min(start_index + _THUMB_BATCH_SIZE, len(self.photo_paths))
+        for idx in range(start_index, end_index):
+            self._create_thumbnail_widget(idx)
 
-            # Prüfe ob mehrere Fotos markiert sind
-            if self.explicitly_selected:
-                multiple_selected = len(self.selected_photos) > 1
-            else:
-                multiple_selected = False
+        if end_index < len(self.photo_paths):
+            self._thumb_build_job = self.frame.after(
+                1, lambda n=end_index: self._build_thumbnail_batch(n)
+            )
+            return
 
-            thumbnail = self._create_thumbnail(photo_path, idx, is_current=is_current)
-            if thumbnail:
-                # Frame für Thumbnail mit Border
-                # Bestimme Rahmenfarbe basierend auf Markierung
-                # Oranger Rand nur wenn markiert UND (mehrere markiert ODER nicht aktiv)
-                if is_selected and (multiple_selected or not is_current):
-                    # Markiert mit orangem Rand: wenn mehrere markiert ODER nicht das aktive Foto
-                    thumb_frame = tk.Frame(
-                        self.thumbnail_inner_frame,
-                        bg="white",
-                        highlightthickness=3,
-                        highlightbackground="#FF9800"  # Orange für markiert
-                    )
-                else:
-                    # Nicht markiert oder nur das aktive allein markiert: Grauer Rand
-                    thumb_frame = tk.Frame(
-                        self.thumbnail_inner_frame,
-                        bg="white",
-                        highlightthickness=2,
-                        highlightbackground="#999999"  # Grau
-                    )
-
-                thumb_frame.pack(side="left", padx=5, pady=5)
-
-                # Label mit Thumbnail
-                thumb_label = tk.Label(thumb_frame, image=thumbnail, bg="white")
-                thumb_label.image = thumbnail  # Referenz behalten
-                thumb_label.pack()
-
-                # Click-Event - NEU: Mit Modifier-Keys für Mehrfachauswahl
-                thumb_label.bind("<ButtonRelease-1>", lambda e, i=idx: self._on_thumbnail_click_release(e, i))
-                thumb_frame.bind("<ButtonRelease-1>", lambda e, i=idx: self._on_thumbnail_click_release(e, i))
-
-        # Canvas-Scroll-Region aktualisieren
+        self._thumb_build_job = None
         self.thumbnail_inner_frame.update_idletasks()
         bbox = self.thumbnail_canvas.bbox("all")
         if bbox:
             self.thumbnail_canvas.configure(scrollregion=bbox)
-
-        # Scrolle zum aktiven Thumbnail
         self._scroll_to_active_thumbnail()
+
+    def _update_thumbnails(self):
+        """Kompatibilitäts-Wrapper: vollständiger Neuaufbau."""
+        self._rebuild_thumbnails_full()
+
+    def _refresh_thumbnail_at_index(self, idx):
+        widgets = self._thumb_widgets.get(idx)
+        if not widgets or idx < 0 or idx >= len(self.photo_paths):
+            return False
+
+        photo_path = self.photo_paths[idx]
+        is_active = idx == self.current_photo_index
+        thumbnail = self._get_thumbnail_photoimage(photo_path, is_active=is_active)
+        if not thumbnail:
+            return False
+
+        widgets["label"].config(image=thumbnail)
+        widgets["label"].image = thumbnail
+        self._apply_thumbnail_frame_style(widgets["frame"], idx)
+        return True
+
+    def _update_thumbnail_selection_styles(self):
+        for idx in self._thumb_widgets:
+            widgets = self._thumb_widgets.get(idx)
+            if widgets:
+                self._apply_thumbnail_frame_style(widgets["frame"], idx)
+
+    def _can_incremental_navigate(self, old_index, new_index):
+        return (
+            old_index is not None
+            and old_index >= 0
+            and new_index >= 0
+            and old_index in self._thumb_widgets
+            and new_index in self._thumb_widgets
+        )
+
+    def _navigate_to_photo(self, new_index, *, update_large=True):
+        if new_index < 0 or new_index >= len(self.photo_paths):
+            return
+        if new_index == self.current_photo_index:
+            return
+
+        old_index = self.current_photo_index
+        self.current_photo_index = new_index
+
+        if self._can_incremental_navigate(old_index, new_index):
+            self._refresh_thumbnail_at_index(old_index)
+            self._refresh_thumbnail_at_index(new_index)
+            self._scroll_to_active_thumbnail()
+        else:
+            self._rebuild_thumbnails_full()
+
+        if update_large:
+            self._schedule_large_preview_update()
+        self._update_current_photo_info()
+        self.update_wm_button_state()
+
+    def _after_selection_change(self, *, update_large=False):
+        self._update_thumbnail_selection_styles()
+        if update_large:
+            self._schedule_large_preview_update()
+            self._update_current_photo_info()
+        self._update_delete_button()
+        self.update_wm_button_state()
 
     def _on_thumbnail_drag_start(self, event):
         """Startet das Drag-Scrolling"""
@@ -428,13 +621,14 @@ class PhotoPreview:
         # Warte bis die Widgets gerendert sind
         self.thumbnail_inner_frame.update_idletasks()
 
-        # Hole alle Thumbnail-Widgets (Frames)
-        children = self.thumbnail_inner_frame.winfo_children()
-        if self.current_photo_index >= len(children):
-            return
-
-        # Hole das aktive Thumbnail-Frame
-        active_frame = children[self.current_photo_index]
+        widgets = self._thumb_widgets.get(self.current_photo_index)
+        if not widgets:
+            children = self.thumbnail_inner_frame.winfo_children()
+            if self.current_photo_index >= len(children):
+                return
+            active_frame = children[self.current_photo_index]
+        else:
+            active_frame = widgets["frame"]
 
         # Hole die Position und Größe des aktiven Thumbnails relativ zum inner_frame
         thumb_x = active_frame.winfo_x()
@@ -478,74 +672,87 @@ class PhotoPreview:
             new_view_start = min(1.0, (thumb_right + margin - canvas_width) / total_width)
             self.thumbnail_canvas.xview_moveto(new_view_start)
 
-    def _create_thumbnail(self, photo_path, idx, is_current=False):
-        """Erstellt ein Thumbnail für ein Foto - aktive 1.3x größer"""
-        # Cache-Key berücksichtigt ob aktiv oder nicht
-        cache_key = (idx, is_current)
-        if cache_key in self.thumbnail_images:
-            return self.thumbnail_images[cache_key]
+    def _schedule_large_preview_update(self):
+        """Lädt die große Vorschau asynchron; zeigt zuerst ein schnelles Thumbnail."""
+        self._large_preview_generation += 1
+        generation = self._large_preview_generation
 
-        try:
-            if photo_path in self._pil_thumbnail_cache:
-                img = self._pil_thumbnail_cache[photo_path].copy()
-            else:
-                img = Image.open(photo_path)
-
-            # Aktive Thumbnails sind 1.3x größer
-            size = int(self.thumbnail_size * 1.3) if is_current else self.thumbnail_size
-
-            # Verwende thumbnail() - skaliert in Bounding Box mit Aspect Ratio (wie Video Preview)
-            img.thumbnail((size, size), Image.LANCZOS)
-
-            thumbnail = ImageTk.PhotoImage(img)
-            self.thumbnail_images[cache_key] = thumbnail
-            return thumbnail
-        except Exception as e:
-            print(f"Fehler beim Erstellen des Thumbnails für {photo_path}: {e}")
-            return None
-
-    def _update_large_preview(self):
-        """Aktualisiert die große Foto-Vorschau"""
-        # Canvas leeren
         self.large_preview_canvas.delete("all")
-
         if not self.photo_paths or self.current_photo_index < 0:
-            # Platzhalter anzeigen
             self.large_preview_canvas.create_text(
                 self.large_preview_width // 2,
                 self.large_preview_height // 2,
                 text="Keine Fotos",
                 fill="white",
-                font=("Arial", 12)
+                font=("Arial", 12),
             )
             return
 
-        # Foto laden und anzeigen
         photo_path = self.photo_paths[self.current_photo_index]
-        try:
-            img = Image.open(photo_path)
-            # Größe anpassen (aspect ratio beibehalten)
-            img.thumbnail((self.large_preview_width, self.large_preview_height), Image.LANCZOS)
-            photo_image = ImageTk.PhotoImage(img)
-            self.photo_images[self.current_photo_index] = photo_image
+        self._show_large_preview_quick(photo_path)
+        self._draw_navigation_arrows()
 
-            # Zentriert anzeigen
-            x = self.large_preview_width // 2
-            y = self.large_preview_height // 2
-            self.large_preview_canvas.create_image(x, y, image=photo_image, anchor="center")
+        def worker():
+            try:
+                with Image.open(photo_path) as opened:
+                    img = opened.copy()
+                img.thumbnail(
+                    (self.large_preview_width, self.large_preview_height),
+                    Image.LANCZOS,
+                )
+                payload = img.copy()
+            except Exception as e:
+                print(f"Fehler beim Laden des Fotos {photo_path}: {e}")
+                payload = None
 
-            # Pfeile zeichnen (initial versteckt)
-            self._draw_navigation_arrows()
+            self.frame.after(
+                0,
+                lambda g=generation, p=photo_path, data=payload: self._apply_large_preview_result(
+                    g, p, data
+                ),
+            )
 
-        except Exception as e:
-            print(f"Fehler beim Laden des Fotos {photo_path}: {e}")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_large_preview_quick(self, photo_path):
+        quick = self._get_thumbnail_photoimage(photo_path, is_active=True)
+        if quick is None:
+            return
+        x = self.large_preview_width // 2
+        y = self.large_preview_height // 2
+        self.large_preview_canvas.create_image(x, y, image=quick, anchor="center", tags="preview_image")
+
+    def _apply_large_preview_result(self, generation, photo_path, pil_image):
+        if generation != self._large_preview_generation:
+            return
+        if (
+            not self.photo_paths
+            or self.current_photo_index < 0
+            or self.photo_paths[self.current_photo_index] != photo_path
+        ):
+            return
+
+        self.large_preview_canvas.delete("all")
+        if pil_image is None:
             self.large_preview_canvas.create_text(
                 self.large_preview_width // 2,
                 self.large_preview_height // 2,
                 text="Fehler beim Laden",
                 fill="red",
-                font=("Arial", 12)
+                font=("Arial", 12),
             )
+            return
+
+        photo_image = ImageTk.PhotoImage(pil_image)
+        self.photo_images[self.current_photo_index] = photo_image
+        x = self.large_preview_width // 2
+        y = self.large_preview_height // 2
+        self.large_preview_canvas.create_image(x, y, image=photo_image, anchor="center")
+        self._draw_navigation_arrows()
+
+    def _update_large_preview(self):
+        """Synchroner Wrapper für bestehende Aufrufer."""
+        self._schedule_large_preview_update()
 
     def _draw_navigation_arrows(self):
         """Zeichnet die Navigation-Pfeile (initial versteckt)"""
@@ -684,22 +891,19 @@ class PhotoPreview:
                 # NICHT aktiv machen - aktuelles Foto bleibt unverändert
                 self.last_clicked_index = index
             else:
-                # Normaler Klick: Macht nur das Foto aktiv, deselektiert NICHT
-                self.current_photo_index = index  # Macht das Foto aktiv
                 self.last_clicked_index = index
+                self._navigate_to_photo(index, update_large=True)
+                self._update_delete_button()
+                return
         else:
-            # Kein Event (z.B. programmatischer Aufruf)
-            self.current_photo_index = index
             self.last_clicked_index = index
+            self._navigate_to_photo(index, update_large=True)
+            self._update_delete_button()
+            return
 
-        # Update UI - nur bei normalem Klick wird große Preview aktualisiert
-        if not event or (not ctrl_pressed and not shift_pressed):
-            self._update_large_preview()
-        self._update_thumbnails()
-        self._update_info()
-        self._update_delete_button()
-        # NEU: WM-Button Status aktualisieren
-        self.update_wm_button_state()
+        if shift_pressed or ctrl_pressed:
+            self._after_selection_change(update_large=False)
+            return
 
     def _on_thumbnail_click_release(self, event, index):
         """Behandelt ButtonRelease auf ein Thumbnail - nur wenn es kein Drag war"""
@@ -710,26 +914,12 @@ class PhotoPreview:
     def _show_previous_photo(self):
         """Zeigt das vorherige Foto"""
         if self.current_photo_index > 0:
-            # Nur aktuellen Index ändern, NICHT die Auswahl
-            self.current_photo_index -= 1
-
-            self._update_large_preview()
-            self._update_thumbnails()
-            self._update_info()
-            # NEU: WM-Button Status aktualisieren
-            self.update_wm_button_state()
+            self._navigate_to_photo(self.current_photo_index - 1, update_large=True)
 
     def _show_next_photo(self):
         """Zeigt das nächste Foto"""
         if self.current_photo_index < len(self.photo_paths) - 1:
-            # Nur aktuellen Index ändern, NICHT die Auswahl
-            self.current_photo_index += 1
-
-            self._update_large_preview()
-            self._update_thumbnails()
-            self._update_info()
-            # NEU: WM-Button Status aktualisieren
-            self.update_wm_button_state()
+            self._navigate_to_photo(self.current_photo_index + 1, update_large=True)
 
     def _on_canvas_click_focus(self, event):
         """Setzt Focus auf Frame bei Klick auf Canvas für Tastatur-Events"""
@@ -762,50 +952,37 @@ class PhotoPreview:
         if self.shift_selection_start is None:
             self.shift_selection_start = self.current_photo_index
             self.shift_direction = 'left'
-            self.explicitly_selected = True  # Aktiviere explizite Markierung
+            self.explicitly_selected = True
 
-            # Markiere Start-Foto und bewege Index nach links
             self.selected_photos.clear()
-            self.selected_photos.add(self.current_photo_index)  # Startpunkt
-            self.current_photo_index -= 1  # Bewege nach links
-            self.selected_photos.add(self.current_photo_index)  # Neues Foto
+            self.selected_photos.add(self.current_photo_index)
+            self._navigate_to_photo(self.current_photo_index - 1, update_large=True)
+            self.selected_photos.add(self.current_photo_index)
             self.last_clicked_index = self.current_photo_index
-
-            self._update_large_preview()
-            self._update_thumbnails()
-            self._update_info()
+            self._update_thumbnail_selection_styles()
             self._update_delete_button()
             return
 
         # Fall 2: Wir waren nach rechts, jetzt nach links (Zusammenziehen)
         if self.shift_direction == 'right':
-            # Entferne das aktuelle (rechts äußerste) Foto
             self.selected_photos.discard(self.current_photo_index)
-            self.current_photo_index -= 1  # Gehe einen Schritt zurück
-            # Richtung bleibt 'right' - wir ziehen nur zusammen
+            self._navigate_to_photo(self.current_photo_index - 1, update_large=True)
 
-            # Prüfe ob nur noch das aktive Foto übrig ist
             if len(self.selected_photos) == 1 and self.current_photo_index in self.selected_photos:
-                # Zurück zu impliziter Auswahl
                 self.selected_photos.clear()
                 self.explicitly_selected = False
                 self.shift_selection_start = None
                 self.shift_direction = None
 
-            self._update_large_preview()
-            self._update_thumbnails()
-            self._update_info()
+            self._update_thumbnail_selection_styles()
             self._update_delete_button()
             return
 
         # Fall 3: Weitergehen nach links (gleiche Richtung - Erweitern)
-        self.current_photo_index -= 1
+        self._navigate_to_photo(self.current_photo_index - 1, update_large=True)
         self.selected_photos.add(self.current_photo_index)
         self.last_clicked_index = self.current_photo_index
-
-        self._update_large_preview()
-        self._update_thumbnails()
-        self._update_info()
+        self._update_thumbnail_selection_styles()
         self._update_delete_button()
 
     def _on_key_shift_right(self, event):
@@ -817,50 +994,37 @@ class PhotoPreview:
         if self.shift_selection_start is None:
             self.shift_selection_start = self.current_photo_index
             self.shift_direction = 'right'
-            self.explicitly_selected = True  # Aktiviere explizite Markierung
+            self.explicitly_selected = True
 
-            # Markiere Start-Foto und bewege Index nach rechts
             self.selected_photos.clear()
-            self.selected_photos.add(self.current_photo_index)  # Startpunkt
-            self.current_photo_index += 1  # Bewege nach rechts
-            self.selected_photos.add(self.current_photo_index)  # Neues Foto
+            self.selected_photos.add(self.current_photo_index)
+            self._navigate_to_photo(self.current_photo_index + 1, update_large=True)
+            self.selected_photos.add(self.current_photo_index)
             self.last_clicked_index = self.current_photo_index
-
-            self._update_large_preview()
-            self._update_thumbnails()
-            self._update_info()
+            self._update_thumbnail_selection_styles()
             self._update_delete_button()
             return
 
         # Fall 2: Wir waren nach links, jetzt nach rechts (Zusammenziehen)
         if self.shift_direction == 'left':
-            # Entferne das aktuelle (links äußerste) Foto
             self.selected_photos.discard(self.current_photo_index)
-            self.current_photo_index += 1  # Gehe einen Schritt zurück
-            # Richtung bleibt 'left' - wir ziehen nur zusammen
+            self._navigate_to_photo(self.current_photo_index + 1, update_large=True)
 
-            # Prüfe ob nur noch das aktive Foto übrig ist
             if len(self.selected_photos) == 1 and self.current_photo_index in self.selected_photos:
-                # Zurück zu impliziter Auswahl
                 self.selected_photos.clear()
                 self.explicitly_selected = False
                 self.shift_selection_start = None
                 self.shift_direction = None
 
-            self._update_large_preview()
-            self._update_thumbnails()
-            self._update_info()
+            self._update_thumbnail_selection_styles()
             self._update_delete_button()
             return
 
         # Fall 3: Weitergehen nach rechts (gleiche Richtung - Erweitern)
-        self.current_photo_index += 1
+        self._navigate_to_photo(self.current_photo_index + 1, update_large=True)
         self.selected_photos.add(self.current_photo_index)
         self.last_clicked_index = self.current_photo_index
-
-        self._update_large_preview()
-        self._update_thumbnails()
-        self._update_info()
+        self._update_thumbnail_selection_styles()
         self._update_delete_button()
 
     def _on_key_select_all(self, event):
@@ -873,7 +1037,7 @@ class PhotoPreview:
         self.explicitly_selected = True  # Explizite Markierung
         self.last_clicked_index = self.current_photo_index
 
-        self._update_thumbnails()
+        self._update_thumbnail_selection_styles()
         self._update_delete_button()
 
     def _on_key_delete(self, event):
@@ -986,79 +1150,73 @@ class PhotoPreview:
     def _on_fullscreen_key_left(self, event):
         """Behandelt linke Pfeiltaste im Vollbild-Modus"""
         if self.current_photo_index > 0:
-            self.current_photo_index -= 1
-            # Aktualisiere das Foto im Vollbild-Modus
+            self._navigate_to_photo(self.current_photo_index - 1, update_large=False)
             self._update_fullscreen_photo()
-            # Aktualisiere auch die Haupt-UI im Hintergrund (ohne sichtbar zu werden)
-            self._update_large_preview()
-            self._update_thumbnails()
-            self._update_info()
 
     def _on_fullscreen_key_right(self, event):
         """Behandelt rechte Pfeiltaste im Vollbild-Modus"""
         if self.current_photo_index < len(self.photo_paths) - 1:
-            self.current_photo_index += 1
-            # Aktualisiere das Foto im Vollbild-Modus
+            self._navigate_to_photo(self.current_photo_index + 1, update_large=False)
             self._update_fullscreen_photo()
-            # Aktualisiere auch die Haupt-UI im Hintergrund (ohne sichtbar zu werden)
-            self._update_large_preview()
-            self._update_thumbnails()
-            self._update_info()
 
     def _update_info(self):
-        """Aktualisiert die Foto-Informationen"""
+        """Aktualisiert alle Foto-Informationen (aktuell + Gesamt)."""
+        self._update_current_photo_info()
+        self._update_totals_info()
+
+    def _update_current_photo_info(self):
+        """Aktualisiert nur die Infos des aktuellen Fotos (ohne Dateizugriff bei Navigation)."""
         if not self.photo_paths or self.current_photo_index < 0:
-            # Alle Infos zurücksetzen
             for key in ["filename", "resolution", "size", "date"]:
                 self.info_labels[key].config(text="-")
-            self.info_labels["total_count"].config(text="0")
-            self.info_labels["total_size"].config(text="0 MB")
             return
 
-        # Aktuelles Foto Info
         photo_path = self.photo_paths[self.current_photo_index]
+        if photo_path not in self._photo_metadata_cache:
+            self._photo_metadata_cache[photo_path] = self._load_photo_metadata(photo_path)
 
-        try:
-            # Dateiname (mit Kürzung)
-            filename = os.path.basename(photo_path)
-            truncated_filename = self._truncate_filename(filename, max_chars=30)
-            self.info_labels["filename"].config(text=truncated_filename)
+        meta = self._photo_metadata_cache.get(photo_path, {})
+        truncated_filename = self._truncate_filename(
+            meta.get("filename", os.path.basename(photo_path)),
+            max_chars=30,
+        )
+        self.info_labels["filename"].config(text=truncated_filename)
+        self.info_labels["resolution"].config(text=meta.get("resolution", "-"))
+        self.info_labels["size"].config(text=meta.get("size", "-"))
+        date_str = meta.get("date", "-")
+        time_str = meta.get("time", "-")
+        self.info_labels["date"].config(text=f"{date_str} - {time_str}")
 
-            # Auflösung
-            img = Image.open(photo_path)
-            width, height = img.size
-            self.info_labels["resolution"].config(text=f"{width} × {height} px")
+    def _update_totals_info(self):
+        """Aktualisiert Gesamt-Statistiken nur wenn sich die Foto-Liste geändert hat."""
+        if not self.photo_paths:
+            self.info_labels["total_count"].config(text="0")
+            self.info_labels["total_size"].config(text="0 MB")
+            self._totals_dirty = False
+            return
 
-            # Dateigröße
-            size_bytes = os.path.getsize(photo_path)
-            size_mb = size_bytes / (1024 * 1024)
-            self.info_labels["size"].config(text=f"{size_mb:.2f} MB")
-
-            # Erstellungszeitpunkt (wie Videos / resolve_video_display_epoch; konsistent mit Tabelle links)
-            imp_ep = None
-            if self.app and hasattr(self.app, "drag_drop"):
-                imp_ep = self.app.drag_drop.get_source_import_epoch(photo_path)
-            fd, ft = format_photo_table_datetime(photo_path, imp_ep)
-            self.info_labels["date"].config(text=f"{fd} - {ft}")
-
-        except Exception as e:
-            print(f"Fehler beim Abrufen der Foto-Informationen: {e}")
-
-        # Gesamt-Statistiken
-        total_count = len(self.photo_paths)
-        self.info_labels["total_count"].config(text=str(total_count))
+        self.info_labels["total_count"].config(text=str(len(self.photo_paths)))
+        if not self._totals_dirty:
+            self.update_wm_button_state()
+            return
 
         total_size = 0
         for path in self.photo_paths:
+            meta = self._photo_metadata_cache.get(path)
+            if meta and meta.get("size") != "-":
+                try:
+                    total_size += os.path.getsize(path)
+                    continue
+                except OSError:
+                    pass
             try:
                 total_size += os.path.getsize(path)
-            except Exception:
+            except OSError:
                 pass
 
         total_size_mb = total_size / (1024 * 1024)
         self.info_labels["total_size"].config(text=f"{total_size_mb:.2f} MB")
-
-        # NEU: WM-Button Status aktualisieren
+        self._totals_dirty = False
         self.update_wm_button_state()
 
     def _update_delete_button(self):
@@ -1102,7 +1260,7 @@ class PhotoPreview:
         self.shift_selection_start = None
         self.shift_direction = None
 
-        self._update_thumbnails()
+        self._update_thumbnail_selection_styles()
         self._update_delete_button()
 
     def _scan_current_photo_qr(self):
@@ -1147,27 +1305,25 @@ class PhotoPreview:
                 if 0 <= idx < len(self.photo_paths):
                     self.photo_paths.pop(idx)
 
-        # Cache komplett leeren (einfacher bei Mehrfachauswahl)
         self.photo_images.clear()
         self.thumbnail_images.clear()
+        self._prune_metadata_cache()
 
-        # Auswahl zurücksetzen
         self.selected_photos.clear()
         self.explicitly_selected = False
 
-        # Neuen aktuellen Index bestimmen
         if self.photo_paths:
-            # Wähle das erste verbleibende Foto
             self.current_photo_index = 0
             self.last_clicked_index = 0
         else:
             self.current_photo_index = -1
             self.last_clicked_index = None
 
-        # UI komplett aktualisieren
-        self._update_thumbnails()
-        self._update_large_preview()
-        self._update_info()
+        self._totals_dirty = True
+        self._rebuild_thumbnails_full()
+        self._schedule_large_preview_update()
+        self._update_current_photo_info()
+        self._update_totals_info()
         self._update_delete_button()
 
     def _cleanup_cache_after_delete(self, deleted_index):

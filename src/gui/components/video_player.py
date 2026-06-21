@@ -3,12 +3,56 @@ import tkinter as tk
 
 # VLC Import nur wenn benötigt (wird in __init__ geladen)
 vlc = None
+_shared_vlc_instance = None
+_vlc_paths_configured = False
 
-try:
-    from src.utils.path_helper import setup_vlc_paths
-    setup_vlc_paths()
-except ImportError:
-    print("Warnung: path_helper nicht gefunden. VLC funktioniert möglicherweise nicht in der gebündelten App.")
+_VLC_ARGS = (
+    '--no-plugins-cache',
+    '--reset-plugins-cache',
+    '--ignore-config',
+    '--no-xlib',
+    '--quiet',
+    '--no-video-title-show',
+) + (('--avcodec-hw=none',) if sys.platform == 'win32' else ())
+
+
+def _ensure_vlc_paths():
+    """Konfiguriert VLC-Pfade einmalig beim ersten Zugriff."""
+    global _vlc_paths_configured
+    if _vlc_paths_configured:
+        return
+    try:
+        from src.utils.path_helper import setup_vlc_paths
+        setup_vlc_paths()
+    except ImportError:
+        print("Warnung: path_helper nicht gefunden. VLC funktioniert möglicherweise nicht in der gebündelten App.")
+    _vlc_paths_configured = True
+
+
+def _import_vlc_module():
+    """Importiert python-vlc bei Bedarf."""
+    global vlc
+    if vlc is not None:
+        return vlc
+    try:
+        import vlc as vlc_module
+        vlc = vlc_module
+    except Exception as e:
+        print(f"⚠️ VLC Modul konnte nicht importiert werden: {e}")
+        vlc = None
+    return vlc
+
+
+def get_shared_vlc_instance():
+    """Gibt eine wiederverwendete VLC-Instanz zurück (teuer beim ersten Aufruf)."""
+    global _shared_vlc_instance
+    _ensure_vlc_paths()
+    vlc_module = _import_vlc_module()
+    if vlc_module is None:
+        return None
+    if _shared_vlc_instance is None:
+        _shared_vlc_instance = vlc_module.Instance(*_VLC_ARGS)
+    return _shared_vlc_instance
 
 
 class VideoPlayer:
@@ -18,17 +62,6 @@ class VideoPlayer:
     """
 
     def __init__(self, parent, app_instance):
-        global vlc
-
-        # Lazy VLC Import - erst hier, nicht beim Modul-Import
-        if vlc is None:
-            try:
-                import vlc as vlc_module
-                vlc = vlc_module
-            except Exception as e:
-                print(f"⚠️ VLC Modul konnte nicht importiert werden: {e}")
-                vlc = None
-
         self.parent = parent
         self.app = app_instance
         self.clip_durations = []
@@ -55,23 +88,11 @@ class VideoPlayer:
         self._main_volume_block = False  # Für Lautstärke-Sync
         # ---
 
-        # VLC-Instanz und Media Player initialisieren
+        # VLC-Instanz und Media Player initialisieren (geteilte Instanz)
         try:
-            # VLC Instance mit optimierten Parametern für Windows
-            vlc_args = [
-                '--no-plugins-cache',
-                '--reset-plugins-cache',
-                '--ignore-config',
-                '--no-xlib',
-                '--quiet',  # Reduziert Console-Spam
-                '--no-video-title-show',  # Keine Titel-Overlays
-            ]
-
-            # Hardwaresbeschleunigungs-Option unterscheidet sich je nach Plattform
-            if sys.platform == 'win32':
-                vlc_args.append('--avcodec-hw=none')  # Deaktiviert problematische HW-Beschleunigung auf Win
-
-            self.vlc_instance = vlc.Instance(*vlc_args)
+            self.vlc_instance = get_shared_vlc_instance()
+            if self.vlc_instance is None:
+                raise RuntimeError("VLC nicht verfügbar")
             self.media_player = self.vlc_instance.media_player_new()
         except Exception as e:
             print(f"Fehler beim Initialisieren von VLC: {e}")

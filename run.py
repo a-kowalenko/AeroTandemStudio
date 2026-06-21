@@ -10,7 +10,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from src.gui.splash_screen import SplashScreen
-from src.gui.app import VideoGeneratorApp
 from src.utils.constants import APP_VERSION
 
 
@@ -57,7 +56,9 @@ def main():
 
         def start_app_loading():
             """Startet das Laden der App"""
-            # Erstelle App mit Splash-Callback
+            # Schwere App-Module erst nach Splash-Start laden
+            from src.gui.app import VideoGeneratorApp
+
             app = VideoGeneratorApp(root=root, splash_callback=update_splash_status)
             app_instance[0] = app
 
@@ -84,8 +85,8 @@ def main():
 
             print("🎉 App gestartet!")
 
-        # Starte App-Laden nach kurzem Delay
-        root.after(200, start_app_loading)
+        # Starte App-Laden nach kurzem Delay (Splash/Event-Loop zuerst)
+        root.after(50, start_app_loading)
 
         # Starte Event-Loop (Spinner dreht sich!)
         root.mainloop()

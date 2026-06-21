@@ -9,34 +9,18 @@ from typing import List, Literal, Optional, Dict, Any
 from tkinterdnd2 import TkinterDnD
 from datetime import datetime
 
-from .components.form_fields import FormFields
-from .components.drag_drop import DragDropFrame
-from .components.video_preview import VideoPreview
-from .components.photo_preview import PhotoPreview
-from .components.progress_indicator import ProgressHandler
-from .components.circular_spinner import CircularSpinner
-from .components.settings_dialog import SettingsDialog
-from .components.video_player import VideoPlayer
-from .components.video_cutter import VideoCutterDialog  # Importiert
 from .pending_video_cut import PendingVideoCut
 from ..video.cutter_service import VideoCutterService
-from .components.loading_window import LoadingWindow
-from .components.sd_status_indicator import SDStatusIndicator
-from .components.success_dialog import show_success_dialog
 from ..model.kunde import Kunde
 
-from ..video.processor import VideoProcessor
 from ..utils.config import ConfigManager
 from ..utils.validation import validate_form_data
-from ..utils.sd_card_monitor import SDCardMonitor
-from ..utils.media_history import MediaHistoryStore
 from ..utils.natural_sort import sort_paths_by_basename
 from ..utils.dji_media_paths import collect_media_from_backup_folder
 from ..installer.ffmpeg_installer import ensure_ffmpeg_installed
 from ..utils.file_utils import test_server_connection
 from ..installer.updater import initialize_updater
 from ..utils.constants import APP_VERSION
-from ..utils.cache_cleanup import CacheCleanupService
 
 
 def _truthy_session_keep_flag(value) -> bool:
@@ -105,6 +89,10 @@ class VideoGeneratorApp:
         # Starte asynchrone Initialisierung
         self._init_step_1()
 
+    def _schedule_init_chunk(self, callback, delay=1):
+        """Gibt dem Event-Loop Zeit für Splash-Spinner und UI-Updates."""
+        self.root.after(delay, callback)
+
     def _init_step_1(self):
         """Schritt 1: GUI erstellen - aufgeteilt in Sub-Schritte"""
         if self.splash_callback:
@@ -132,8 +120,7 @@ class VideoGeneratorApp:
 
         self.root.config(padx=20, pady=0)
 
-        # Nächster Chunk
-        self.root.after(1, self._setup_gui_step_2)
+        self._schedule_init_chunk(self._setup_gui_step_2)
 
     def _setup_gui_step_2(self):
         """GUI Setup Teil 2: Header und Container"""
@@ -155,28 +142,33 @@ class VideoGeneratorApp:
         self.right_frame.pack(side="right", fill="y", padx=(10, 0))
         self.right_frame.pack_propagate(False)  # Erzwingt die width-Einstellung
 
-        # Nächster Chunk
-        self.root.after(1, self._setup_gui_step_3)
+        self._schedule_init_chunk(self._setup_gui_step_3)
 
     def _setup_gui_step_3(self):
-        """GUI Setup Teil 3: Komponenten erstellen"""
+        """GUI Setup Teil 3: Formular"""
         if self.splash_callback:
             self.splash_callback("Lade Formulare...")
 
-        # Formular und Drag&Drop
+        from .components.form_fields import FormFields
         self.form_fields = FormFields(self.left_frame, self.config, self)
 
+        self._schedule_init_chunk(self._setup_gui_step_3b)
+
+    def _setup_gui_step_3b(self):
+        """GUI Setup Teil 3b: Drag & Drop"""
+        if self.splash_callback:
+            self.splash_callback("Initialisiere Import...")
+
+        from .components.drag_drop import DragDropFrame
         self.drag_drop = DragDropFrame(self.left_frame, self)
 
-        # Nächster Chunk
-        self.root.after(1, self._setup_gui_step_4)
+        self._schedule_init_chunk(self._setup_gui_step_4)
 
     def _setup_gui_step_4(self):
-        """GUI Setup Teil 4: Tabs und Preview"""
+        """GUI Setup Teil 4: Preview-Tabs"""
         if self.splash_callback:
-            self.splash_callback("Initialisiere Video Player...")
+            self.splash_callback("Erstelle Vorschau...")
 
-        # Tabs erstellen
         style = ttk.Style()
         style.configure('Preview.TNotebook.Tab', font=('Arial', 8, 'bold'), padding=[20, 5])
 
@@ -186,27 +178,39 @@ class VideoGeneratorApp:
         self.foto_tab = ttk.Frame(self.preview_notebook)
         self.preview_notebook.add(self.foto_tab, text="Foto Vorschau")
 
-        # Video Player und Preview
+        self._schedule_init_chunk(self._setup_gui_step_4b)
+
+    def _setup_gui_step_4b(self):
+        """GUI Setup Teil 4b: Video Player (VLC)"""
+        if self.splash_callback:
+            self.splash_callback("Initialisiere Video Player...")
+
+        from .components.video_player import VideoPlayer
         self.video_player = VideoPlayer(self.video_tab, self)
 
+        self._schedule_init_chunk(self._setup_gui_step_4c)
+
+    def _setup_gui_step_4c(self):
+        """GUI Setup Teil 4c: Video-Vorschau"""
+        if self.splash_callback:
+            self.splash_callback("Initialisiere Video Vorschau...")
+
+        from .components.video_preview import VideoPreview
         self.video_preview = VideoPreview(self.video_tab, self)
 
-        # Nächster Chunk
-        self.root.after(1, self._setup_gui_step_5)
+        self._schedule_init_chunk(self._setup_gui_step_5)
 
     def _setup_gui_step_5(self):
         """GUI Setup Teil 5: Foto-Preview und Button"""
         if self.splash_callback:
             self.splash_callback("Initialisiere Foto Vorschau...")
 
+        from .components.photo_preview import PhotoPreview
         self.photo_preview = PhotoPreview(self.foto_tab, self)
 
-
-        # Rufe den Rest von setup_gui auf
         self._finish_setup_gui()
 
-        # Weiter mit nächstem Init-Schritt
-        self.root.after(10, self._init_step_2)
+        self._schedule_init_chunk(self._init_step_2, delay=10)
 
     def _create_reset_session_icon(self):
         """Raster-Reload-Icon (weiß, transparent); None bei fehlendem PIL."""
@@ -318,6 +322,8 @@ class VideoGeneratorApp:
 
     def _finish_setup_gui(self):
         """Finalisiert setup_gui - erstellt Upload-Frame etc."""
+        from .components.progress_indicator import ProgressHandler
+
         # Event-Binding
         self.preview_notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
@@ -378,16 +384,14 @@ class VideoGeneratorApp:
             self.splash_callback("Prüfe FFmpeg Installation...")
 
         self.ensure_dependencies()
-        self.root.after(10, self._init_step_3)
+        self._schedule_init_chunk(self._init_step_3, delay=10)
 
     def _init_step_3(self):
         """Schritt 3: Finalisierung"""
         if self.splash_callback:
             self.splash_callback("Finalisiere...")
 
-        # SD-Monitor wird NACH Splash-Schließung gestartet (verzögert)
-        # Hier nur vorbereiten
-        self.root.after(10, self._init_complete)
+        self._schedule_init_chunk(self._init_complete, delay=10)
 
     def _init_complete(self):
         """Initialisierung abgeschlossen"""
@@ -434,6 +438,13 @@ class VideoGeneratorApp:
 
 
     def setup_gui(self):
+        from .components.form_fields import FormFields
+        from .components.drag_drop import DragDropFrame
+        from .components.video_player import VideoPlayer
+        from .components.video_preview import VideoPreview
+        from .components.photo_preview import PhotoPreview
+        from .components.progress_indicator import ProgressHandler
+
         self.root.title("Aero Tandem Studio")
 
         # Zentriere Fenster auf dem Bildschirm
@@ -579,6 +590,8 @@ class VideoGeneratorApp:
 
     def create_header(self):
         """Erstellt den Header mit Titel, Logo und Settings-Button"""
+        from .components.sd_status_indicator import SDStatusIndicator
+
         header_frame = tk.Frame(self.root)
         header_frame.pack(fill="x")
 
@@ -698,6 +711,8 @@ class VideoGeneratorApp:
         Öffnet ein modales Fenster mit allen Konfigurationsoptionen.
         Nach dem Speichern wird on_settings_saved() automatisch aufgerufen.
         """
+        from .components.settings_dialog import SettingsDialog
+
         SettingsDialog(
             self.root,
             self.config,
@@ -862,6 +877,8 @@ class VideoGeneratorApp:
 
     def _create_install_overlay(self):
         """Erstellt Installations-Overlay"""
+        from .components.circular_spinner import CircularSpinner
+
         overlay = tk.Frame(self.root, bg="#000000")
         overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
         overlay.lift()
@@ -1111,6 +1128,8 @@ class VideoGeneratorApp:
         parallel: bool = False,
     ) -> None:
         _, plural = self._qr_media_labels(media)
+        from .components.loading_window import LoadingWindow
+
         self.loading_window = LoadingWindow(
             self.root,
             text=f"Prüfe {plural} auf QR-Code",
@@ -1920,6 +1939,8 @@ class VideoGeneratorApp:
         self._switch_to_cancel_mode()
 
         # VideoProcessor initialisieren
+        from ..video.processor import VideoProcessor
+
         self.video_processor = VideoProcessor(
             progress_callback=self._update_progress,
             status_callback=self._handle_status_update,
@@ -2024,6 +2045,7 @@ class VideoGeneratorApp:
         if status_type == "success":
             # message ist jetzt ein Dict mit created_items
             if isinstance(message, dict):
+                from .components.success_dialog import show_success_dialog
                 self.root.after(0, lambda: show_success_dialog(self.root, message))
             else:
                 # Fallback für alte Text-Nachrichten
@@ -2066,6 +2088,8 @@ class VideoGeneratorApp:
             exclude = self.video_preview.temp_dir
 
         def run():
+            from ..utils.cache_cleanup import CacheCleanupService
+
             result = CacheCleanupService.cleanup_orphans_only(exclude_temp_dir=exclude)
             if result.deleted_dirs or result.deleted_files:
                 print(
@@ -2079,6 +2103,8 @@ class VideoGeneratorApp:
         """
         Leert zuerst Formular/Medien der aktuellen Session und löscht danach Cache-Dateien.
         """
+        from ..utils.cache_cleanup import CacheCleanupService
+
         settings = self.config.get_settings()
         speicherort = settings.get("speicherort")
         import_paths = []
@@ -2381,6 +2407,8 @@ class VideoGeneratorApp:
             return
 
         # Dialog erstellen - video_path ist bereits der Working-Folder-Pfad!
+        from .components.video_cutter import VideoCutterDialog
+
         self.video_cutter_dialog = VideoCutterDialog(
             self.root,
             video_path=video_path,
@@ -2865,6 +2893,8 @@ class VideoGeneratorApp:
 
     def initialize_sd_card_monitor(self):
         """Initialisiert und startet den SD-Karten Monitor"""
+        from ..utils.sd_card_monitor import SDCardMonitor
+
         try:
             self.sd_card_monitor = SDCardMonitor(
                 self.config,
@@ -3274,6 +3304,8 @@ class VideoGeneratorApp:
 
             if skip_processed and (video_files or photo_files):
                 # Filtere bereits importierte Dateien
+                from ..utils.media_history import MediaHistoryStore
+
                 history_store = MediaHistoryStore.instance()
 
                 filtered_videos = []

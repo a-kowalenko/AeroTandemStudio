@@ -26,6 +26,54 @@ _VIDEO_EXTENSIONS = frozenset({
 })
 _MEDIA_EXTENSIONS = _PHOTO_EXTENSIONS | _VIDEO_EXTENSIONS
 
+PHOTO_EXTENSIONS = _PHOTO_EXTENSIONS
+VIDEO_EXTENSIONS = _VIDEO_EXTENSIONS
+MEDIA_EXTENSIONS = _MEDIA_EXTENSIONS
+
+
+def expand_files_for_sd_clear(
+    backed_up_paths: list[str],
+    media_extensions: frozenset[str] | None = None,
+) -> list[str]:
+    """
+    Erweitert die Löschliste um Sidecar-Dateien (z. B. .lfr, .lrv, .thm):
+    gleicher Dateiname-Stamm im selben Ordner, aber keine Mediendatei-Endung.
+    """
+    extensions = media_extensions or _MEDIA_EXTENSIONS
+    ext_lower = {e.lower() for e in extensions}
+    to_delete: dict[str, str] = {}
+    stems_by_dir: dict[str, set[str]] = {}
+
+    for path in backed_up_paths:
+        if not path:
+            continue
+        norm = os.path.normcase(os.path.normpath(path))
+        to_delete[norm] = path
+        directory = os.path.dirname(path)
+        stem = os.path.splitext(os.path.basename(path))[0]
+        stems_by_dir.setdefault(directory, set()).add(stem.lower())
+
+    for directory, stems in stems_by_dir.items():
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in names:
+            full = os.path.join(directory, name)
+            if not os.path.isfile(full):
+                continue
+            norm = os.path.normcase(os.path.normpath(full))
+            if norm in to_delete:
+                continue
+            stem, ext = os.path.splitext(name)
+            if stem.lower() not in stems:
+                continue
+            if ext.lower() in ext_lower:
+                continue
+            to_delete[norm] = full
+
+    return list(to_delete.values())
+
 
 def _norm_parts(path: str) -> list[str]:
     return [p for p in os.path.normpath(path).split(os.sep) if p]

@@ -40,9 +40,13 @@ LINUX_API_AVAILABLE = True
 
 from src.utils.media_history import MediaHistoryStore, get_media_type_from_filename
 from src.utils.dji_media_paths import (
+    expand_files_for_sd_clear,
     filter_media_paths_for_backup,
+    MEDIA_EXTENSIONS,
+    PHOTO_EXTENSIONS,
     resolve_drive_dcim_path,
     resolve_timelapse_session_active_for_paths,
+    VIDEO_EXTENSIONS,
     write_backup_manifest,
 )
 from src.utils.file_utils import normalize_server_path
@@ -380,9 +384,9 @@ class SDCardMonitor:
                 return None  # Kein DCIM Ordner, normal fortfahren
 
             # Sammle alle Mediendateien
-            valid_video_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.m4v', '.mpg', '.mpeg', '.wmv', '.flv', '.webm'}
-            valid_photo_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.gif', '.webp', '.heic', '.raw', '.cr2', '.nef', '.arw', '.dng'}
-            valid_extensions = valid_video_extensions | valid_photo_extensions
+            valid_video_extensions = VIDEO_EXTENSIONS
+            valid_photo_extensions = PHOTO_EXTENSIONS
+            valid_extensions = MEDIA_EXTENSIONS
 
             exclude_timelapse = settings.get("sd_exclude_timelapse_videos", True)
             all_paths = []
@@ -512,9 +516,9 @@ class SDCardMonitor:
 
             os.makedirs(backup_path, exist_ok=True)
 
-            valid_video_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.m4v', '.mpg', '.mpeg', '.wmv', '.flv', '.webm'}
-            valid_photo_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.gif', '.webp', '.heic', '.raw', '.cr2', '.nef', '.arw', '.dng'}
-            valid_extensions = valid_video_extensions | valid_photo_extensions
+            valid_video_extensions = VIDEO_EXTENSIONS
+            valid_photo_extensions = PHOTO_EXTENSIONS
+            valid_extensions = MEDIA_EXTENSIONS
 
             media_files = []
             if selected_files:
@@ -793,12 +797,20 @@ class SDCardMonitor:
             print("Keine Dateien zum Löschen angegeben")
             return
 
+        expanded_files = expand_files_for_sd_clear(files_to_delete)
+        sidecar_count = len(expanded_files) - len(files_to_delete)
         deleted_count = 0
         error_count = 0
 
-        print(f"Lösche {len(files_to_delete)} erfolgreich gesicherte Dateien von SD-Karte...")
+        if sidecar_count > 0:
+            print(
+                f"Lösche {len(expanded_files)} Dateien von SD-Karte "
+                f"({len(files_to_delete)} Mediendateien + {sidecar_count} Sidecar(s))..."
+            )
+        else:
+            print(f"Lösche {len(expanded_files)} erfolgreich gesicherte Dateien von SD-Karte...")
 
-        for file_path in files_to_delete:
+        for file_path in expanded_files:
             try:
                 if os.path.isfile(file_path):
                     os.remove(file_path)
@@ -814,7 +826,7 @@ class SDCardMonitor:
 
         # Optional: Lösche leere Verzeichnisse
         try:
-            deleted_dirs = self._clean_empty_directories(files_to_delete)
+            deleted_dirs = self._clean_empty_directories(expanded_files)
             if deleted_dirs > 0:
                 print(f"  ℹ️ {deleted_dirs} leere Verzeichnisse entfernt")
         except Exception as e:

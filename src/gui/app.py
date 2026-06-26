@@ -86,6 +86,10 @@ class VideoGeneratorApp:
         # Flag für Initialisierungsstatus
         self.initialization_complete = False
 
+        # VLC früh im Hintergrund laden (blockiert Splash-Spinner nicht)
+        from .components.video_player import preload_shared_vlc_instance
+        preload_shared_vlc_instance()
+
         # Starte asynchrone Initialisierung
         self._init_step_1()
 
@@ -185,7 +189,17 @@ class VideoGeneratorApp:
         if self.splash_callback:
             self.splash_callback("Initialisiere Video Player...")
 
-        from .components.video_player import VideoPlayer
+        from .components.video_player import (
+            VideoPlayer,
+            is_vlc_preload_finished,
+            preload_shared_vlc_instance,
+        )
+
+        preload_shared_vlc_instance()
+        if not is_vlc_preload_finished():
+            self._schedule_init_chunk(self._setup_gui_step_4b, delay=50)
+            return
+
         self.video_player = VideoPlayer(self.video_tab, self)
 
         self._schedule_init_chunk(self._setup_gui_step_4c)

@@ -1,10 +1,14 @@
 ﻿import sys
+import threading
 import tkinter as tk
 
 # VLC Import nur wenn benötigt (wird in __init__ geladen)
 vlc = None
 _shared_vlc_instance = None
 _vlc_paths_configured = False
+_vlc_init_lock = threading.Lock()
+_vlc_preload_started = False
+_vlc_preload_done = False
 
 _VLC_ARGS = (
     '--no-plugins-cache',
@@ -46,13 +50,37 @@ def _import_vlc_module():
 def get_shared_vlc_instance():
     """Gibt eine wiederverwendete VLC-Instanz zurück (teuer beim ersten Aufruf)."""
     global _shared_vlc_instance
-    _ensure_vlc_paths()
-    vlc_module = _import_vlc_module()
-    if vlc_module is None:
-        return None
-    if _shared_vlc_instance is None:
-        _shared_vlc_instance = vlc_module.Instance(*_VLC_ARGS)
-    return _shared_vlc_instance
+    with _vlc_init_lock:
+        _ensure_vlc_paths()
+        vlc_module = _import_vlc_module()
+        if vlc_module is None:
+            return None
+        if _shared_vlc_instance is None:
+            _shared_vlc_instance = vlc_module.Instance(*_VLC_ARGS)
+        return _shared_vlc_instance
+
+
+def preload_shared_vlc_instance():
+    """Startet die teure VLC-Instanz-Erstellung im Hintergrund (Splash bleibt animiert)."""
+    global _vlc_preload_started, _vlc_preload_done
+    with _vlc_init_lock:
+        if _vlc_preload_started or _shared_vlc_instance is not None:
+            return
+        _vlc_preload_started = True
+
+    def _worker():
+        global _vlc_preload_done
+        try:
+            get_shared_vlc_instance()
+        finally:
+            _vlc_preload_done = True
+
+    threading.Thread(target=_worker, daemon=True, name="vlc-preload").start()
+
+
+def is_vlc_preload_finished():
+    """True, wenn der Hintergrund-Preload abgeschlossen ist (Erfolg oder Fehler)."""
+    return _vlc_preload_done or _shared_vlc_instance is not None
 
 
 class VideoPlayer:

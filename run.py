@@ -46,6 +46,10 @@ def main():
         # Zeige Splash-Screen (erbt nun das Icon automatisch)
         splash = SplashScreen(root, version=APP_VERSION)
 
+        # VLC-Instanz parallel zum Splash laden (blockiert den Spinner nicht)
+        from src.gui.components.video_player import preload_shared_vlc_instance
+        preload_shared_vlc_instance()
+
         # Callback für Status-Updates vom Splash
         def update_splash_status(text):
             if splash.window.winfo_exists():
